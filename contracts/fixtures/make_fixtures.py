@@ -60,11 +60,21 @@ def golden():
     banks = [list(range(s, min(s + 16, len(chops)))) for s in range(0, len(chops), 16)]
     chops_doc = {"schema": "choppad.chops/2", "grid": "1/4", "bpm": bpm, "beats_per_bar": bpb, "bpm_mult": 1,
                  "beat_offset": 0, "pads_per_bank": 16, "bank_size": 16, "chops": chops, "banks": banks}
-    return meta, analysis, chops_doc
+    advisor_doc = {
+        "schema": "choppad.advisor/2", "model": "qwen/qwen3.8-omni-flash",
+        "sections": [
+            {"label": "intro", "start_bar": 0, "end_bar": 4, "start_s": 1.5, "end_s": 9.5},
+            {"label": "groove", "start_bar": 4, "end_bar": 10, "start_s": 9.5, "end_s": 21.5},
+        ],
+        "suggested_bank": list(range(0, 32, 2)),
+        "pad_labels": [f"Chop {i}" for i in range(0, 32, 2)],
+        "bpm_meter_check": {"felt_bpm": 120.0, "bpm_mult_hint": 1, "meter_hint": "4/4", "notes": "Steady 120 BPM 4/4 click"},
+    }
+    return meta, analysis, chops_doc, advisor_doc
 
 
 if __name__ == "__main__":
-    for name, doc in zip(("meta", "analysis", "chops"), golden()):
+    for name, doc in zip(("meta", "analysis", "chops", "advisor"), golden()):
         with open(os.path.join(HERE, f"{name}.sample.json"), "w") as f:
             json.dump(doc, f, indent=1)
         print("wrote", f"{name}.sample.json")

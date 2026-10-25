@@ -1,4 +1,4 @@
-// ui/engine: pad -> chop playback (WebAudio, sample-accurate) + muted video visual follow. See contracts/README.md §5 (v2).
+// ui/engine: pad -> chop playback (WebAudio, sample-accurate) + muted video visual follow. See contracts/README.md §5 (v2.1).
 export const FADE_IN = 0.0025;   // s
 export const FADE_OUT = 0.003;   // s
 export const TARGET_PEAK = 0.891; // -1 dBFS
@@ -15,7 +15,7 @@ export function normalizationGain(buffer) {
 }
 
 /**
- * createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate", choke: true, fullLevel: true })
+ * createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate"|"playthrough", choke: true, fullLevel: true })
  *  -> { trigger(pad, velocity), release(pad), setBank(n), bank, setChops(chops), setMode(m), setChoke(b),
  *       setFullLevel(b), stopAll() }
  * Sets video.muted = true. Video seeks are coalesced while video.seeking (latest target wins on "seeked").

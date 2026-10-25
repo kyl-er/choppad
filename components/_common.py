@@ -1,12 +1,16 @@
 """Shared test helpers: path setup + fixture access. Import from tests as `from _common import *`."""
-import json, os, sys
+import glob, json, os, sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_v = f"python{sys.version_info.major}.{sys.version_info.minor}"
+for sp in glob.glob(os.path.join(ROOT, ".venv", "lib", _v, "site-packages")):
+    if sp not in sys.path:
+        sys.path.insert(0, sp)
 CONTRACTS = os.path.join(ROOT, "contracts")
 FIX = os.path.join(CONTRACTS, "fixtures")
-for p in (CONTRACTS, FIX, *(os.path.join(ROOT, "components", c) for c in ("ingest", "rhythm", "chop", "integrate"))):
+for p in (CONTRACTS, FIX, *(os.path.join(ROOT, "components", c) for c in ("ingest", "rhythm", "chop", "advisor", "export", "integrate"))):
     if p not in sys.path:
         sys.path.insert(0, p)
-from validate import ContractError, validate_meta, validate_analysis, validate_chops  # noqa: E402,F401
+from validate import ContractError, validate_advisor, validate_analysis, validate_chops, validate_meta  # noqa: E402,F401
 from make_fixtures import click_track, golden  # noqa: E402,F401
 
 def load_fixture(name):

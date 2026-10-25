@@ -1,0 +1,62 @@
+{
+ "schema": "choppad.advisor/2",
+ "model": "qwen/qwen3.8-omni-flash",
+ "sections": [
+  {
+   "label": "intro",
+   "start_bar": 0,
+   "end_bar": 4,
+   "start_s": 1.5,
+   "end_s": 9.5
+  },
+  {
+   "label": "groove",
+   "start_bar": 4,
+   "end_bar": 10,
+   "start_s": 9.5,
+   "end_s": 21.5
+  }
+ ],
+ "suggested_bank": [
+  0,
+  2,
+  4,
+  6,
+  8,
+  10,
+  12,
+  14,
+  16,
+  18,
+  20,
+  22,
+  24,
+  26,
+  28,
+  30
+ ],
+ "pad_labels": [
+  "Chop 0",
+  "Chop 2",
+  "Chop 4",
+  "Chop 6",
+  "Chop 8",
+  "Chop 10",
+  "Chop 12",
+  "Chop 14",
+  "Chop 16",
+  "Chop 18",
+  "Chop 20",
+  "Chop 22",
+  "Chop 24",
+  "Chop 26",
+  "Chop 28",
+  "Chop 30"
+ ],
+ "bpm_meter_check": {
+  "felt_bpm": 120.0,
+  "bpm_mult_hint": 1,
+  "meter_hint": "4/4",
+  "notes": "Steady 120 BPM 4/4 click"
+ }
+}

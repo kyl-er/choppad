@@ -89,6 +89,15 @@ test("gate mode: release stops the voice", () => {
   assert.equal(starts(ctx)[0].node.stopped, true);
 });
 
+test("playthrough mode: plays past chop.end (no slice duration cap) and ignores pad release", () => {
+  const { ctx, eng } = engine({ mode: "playthrough" }); eng.trigger(2, 1);
+  const [s] = starts(ctx);
+  assert.equal(s.offset, chops.chops[2].start);
+  assert.ok(s.duration === undefined || s.duration > (chops.chops[2].end - chops.chops[2].start) + 1);
+  eng.release(2);
+  assert.ok(!s.node.stopped);
+});
+
 test("video is muted and follows the chop", () => {
   const video = new FakeVideo(); const { eng } = engine({ video });
   assert.equal(video.muted, true);

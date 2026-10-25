@@ -1,8 +1,8 @@
-# ChopPad contracts (v2)
+# ChopPad contracts (v2.1)
 
 Owner: orchestrator. Components MUST NOT edit this folder; request changes via the vault Inbox
 (type `contract-change`). `validate.py` is the executable definition — if prose and code disagree, code wins.
-v2 = PRD v2 §8 (debate-merged). All times are seconds (float) from the start of `audio.wav`.
+v2.1 = PRD v2.1 (debate + research + 3–0 consensus). All times are seconds (float) from the start of `audio.wav`.
 Pipeline per source lives in `media/<id>/`.
 
 ## 0. Entry points (module boundaries)
@@ -15,6 +15,8 @@ Pipeline per source lives in `media/<id>/`.
 | ui | `components/ui/engine.js` | `resolveChop`, `normalizationGain`, `createEngine`, `FADE_IN`, `FADE_OUT` |
 | ui | `components/ui/layout.js` | `padToCell(pad)`, `cellToPad(row, col)` |
 | ui | `components/ui/ui.js` | `mountUI(rootEl, {meta, analysis, chops, engine, input, onRegrid}) -> {updateChops, destroy}` (page; not unit-tested) |
+| advisor | `components/advisor/choppad_advisor.py` | `advise(media_dir, *, client=None, model="qwen/qwen3.8-omni-flash", max_cost_usd=0.05, force=False) -> advisor` · `build_prompt(analysis, chops) -> str` · `estimate_cost_usd(duration_s, model=...) -> float` |
+| export | `components/export/choppad_export.py` | `export_sfz(media_dir, out_path=None, *, bank=0) -> sfz_path` · `export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None) -> xml_path` |
 | integrate | `components/integrate/choppad.py` | `run_pipeline(source, media_root, grid, meter, bpm, **ingest_kw)`, `make_server(media_root, port)`; `components/ui/main.js` wiring |
 
 ## 1. `meta.json` — **ingest**
@@ -63,10 +65,26 @@ Pipeline per source lives in `media/<id>/`.
 
 ## 5. Engine (JS, **ui** → **integrate**)
 ```js
-createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate", choke: true, fullLevel: true })
+createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate"|"playthrough", choke: true, fullLevel: true })
   .trigger(pad, velocity) .release(pad) .setBank(n) .bank .setChops(c) .setMode(m) .setChoke(b) .setFullLevel(b) .stopAll()
 ```
-- Voice = `BufferSource → Gain → destination`. Gain: set 0 at start, ramp to level by `+FADE_IN` (2.5 ms), ramp to ~0 at chop end (oneshot); choke/release/stop: ramp to ~0 over `FADE_OUT` (3 ms) then `stop()`.
+- Voice = `BufferSource → Gain → destination`. Gain: set 0 at start, ramp to level by `+FADE_IN` (2.5 ms), ramp to ~0 at chop end (`oneshot`); in `gate` mode release fades out over `FADE_OUT`; in `playthrough` mode the voice plays from `chop.start` past `chop.end` (to the end of the buffer) until choked or `stopAll()`. Choke/release/stop: ramp to ~0 over `FADE_OUT` (3 ms) then `stop()`.
 - Level = `normalizationGain(buffer)` (peak → −1 dBFS, ≤ 4×) × (`fullLevel` ? 1 : `velocity^1.4`). Choke = one mute group across all banks.
-- Video: `video.muted = true`; on trigger seek to `chop.start` + `play().catch(()=>{})`; while `video.seeking`, keep only the latest target and apply it on `"seeked"`; pause at chop end / release. Audio is the clock.
+- Video: `video.muted = true`; on trigger seek to `chop.start` + `play().catch(()=>{})`; while `video.seeking`, keep only the latest target and apply it on `"seeked"`; pause at chop end (`oneshot`) / release (`gate`). Audio is the clock.
 - Page shows an "enable audio" banner while `ctx.state !== "running"` and resumes on the first pointer/key event (Web MIDI is not a user gesture).
+
+## 6. `advisor.json` — **advisor** (optional, off critical path)
+```json
+{ "schema": "choppad.advisor/2", "model": "qwen/qwen3.8-omni-flash",
+  "sections": [{ "label": "intro", "start_bar": 0, "end_bar": 4, "start_s": 1.5, "end_s": 9.5 }],
+  "suggested_bank": [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30],
+  "pad_labels": ["Kick 1", "Snare 1", "… (same length as suggested_bank)"],
+  "bpm_meter_check": { "felt_bpm": 120.0, "bpm_mult_hint": 1, "meter_hint": "4/4", "notes": "steady 4/4" } }
+```
+- Uses the hybrid bar/chop-index prompt (`build_prompt(analysis, chops)`): passes the local bar/chop table + 16 kHz mono 32 kbps MP3 so the LLM selects valid chop indices rather than inventing raw timestamps.
+- `estimate_cost_usd(duration_s, model)` checks the request against `max_cost_usd` (default $0.05 cap) before any network call.
+- Cached at `<media_dir>/advisor.json` unless `force=True`. Accepts injectable `client(prompt, audio_mp3_bytes, model) -> dict|str` for offline tests.
+
+## 7. DAW Export — **export** (Ardour SFZ & Hydrogen drumkit)
+- `export_sfz(media_dir, out_path=None, *, bank=0) -> sfz_path`: writes a zero-copy `.sfz` text file (default `<media_dir>/<id>-bank<bank>.sfz`) referencing `audio.wav` with `<group>` (`loop_mode=one_shot`, `group=1`, `off_by=1`, `ampeg_attack=0.002`) and one `<region>` per pad in `chops["banks"][bank]` (`key=36+pad`, `offset=<round(start*sr)>`, `end=<round(end*sr)>`).
+- `export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None) -> xml_path`: writes `chop_00.wav`..`chop_NN.wav` (44.1 kHz stereo s16le with 2.5 ms fade-in and 3 ms fade-out) and `drumkit.xml` (`xmlns="http://www.hydrogen-music.org/drumkit"`, `<muteGroup>0</muteGroup>`, `<midiOutNote>36+pad</midiOutNote>`) into `out_dir`.

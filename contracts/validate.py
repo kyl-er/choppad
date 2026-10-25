@@ -1,6 +1,6 @@
-"""Executable ChopPad contracts v2 (stdlib only). Each validator raises ContractError on the first violation.
+"""Executable ChopPad contracts v2.1 (stdlib only). Each validator raises ContractError on the first violation.
 
-Usage: python3 contracts/validate.py <meta|analysis|chops> <file.json> [--media-dir DIR] [--duration S]
+Usage: python3 contracts/validate.py <meta|analysis|chops|advisor> <file.json> [--media-dir DIR] [--duration S]
 """
 import json
 import os
@@ -117,7 +117,35 @@ def validate_chops(c):
         _req(chops[b[0]]["beat"] == 0, f"bank {n} must start on a downbeat")
 
 
-VALIDATORS = {"meta": validate_meta, "analysis": validate_analysis, "chops": validate_chops}
+def validate_advisor(adv, chops=None):
+    _req(adv.get("schema") == "choppad.advisor/2", "schema must be choppad.advisor/2")
+    _req(isinstance(adv.get("model"), str) and adv["model"], "advisor.model must be a non-empty string")
+    secs = adv.get("sections")
+    _req(isinstance(secs, list) and secs, "sections must be a non-empty list")
+    for i, s in enumerate(secs):
+        _req(isinstance(s.get("label"), str) and s["label"], f"sections[{i}].label must be a non-empty string")
+        _req(isinstance(s.get("start_bar"), int) and isinstance(s.get("end_bar"), int) and 0 <= s["start_bar"] < s["end_bar"],
+             f"sections[{i}] start_bar/end_bar must be ints with 0 <= start_bar < end_bar")
+        _req(_num(s.get("start_s")) and _num(s.get("end_s")) and 0 <= s["start_s"] < s["end_s"],
+             f"sections[{i}] start_s/end_s must satisfy 0 <= start_s < end_s")
+    bank = adv.get("suggested_bank")
+    _req(isinstance(bank, list) and 1 <= len(bank) <= 16, "suggested_bank must have 1..16 chop indices")
+    n_chops = len(chops["chops"]) if chops else None
+    for idx in bank:
+        _req(isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0, "suggested_bank entries must be ints >= 0")
+        if n_chops is not None:
+            _req(idx < n_chops, f"suggested_bank index {idx} out of range (len={n_chops})")
+    labels = adv.get("pad_labels")
+    _req(isinstance(labels, list) and len(labels) == len(bank) and all(isinstance(x, str) and x for x in labels),
+         "pad_labels must be a list of non-empty strings matching suggested_bank length")
+    chk = adv.get("bpm_meter_check") or {}
+    _req(_num(chk.get("felt_bpm")) and 30 <= chk["felt_bpm"] <= 300, "bpm_meter_check.felt_bpm must be in [30,300]")
+    _req(chk.get("bpm_mult_hint") in BPM_MULTS, "bpm_meter_check.bpm_mult_hint must be 0.5, 1 or 2")
+    _req(chk.get("meter_hint") in ("2/4", "3/4", "4/4"), "bpm_meter_check.meter_hint must be 2/4, 3/4 or 4/4")
+    _req(isinstance(chk.get("notes"), str), "bpm_meter_check.notes must be a string")
+
+
+VALIDATORS = {"meta": validate_meta, "analysis": validate_analysis, "chops": validate_chops, "advisor": validate_advisor}
 
 if __name__ == "__main__":
     kind, path = sys.argv[1], sys.argv[2]

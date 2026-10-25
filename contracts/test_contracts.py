@@ -6,7 +6,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(__file__))
-from validate import ContractError, bank_size, validate_analysis, validate_chops, validate_meta  # noqa: E402
+from validate import ContractError, bank_size, validate_advisor, validate_analysis, validate_chops, validate_meta  # noqa: E402
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -20,6 +20,7 @@ class Goldens(unittest.TestCase):
         validate_meta(load("meta"))
         validate_analysis(load("analysis"), duration_s=load("meta")["duration_s"])
         validate_chops(load("chops"))
+        validate_advisor(load("advisor"), chops=load("chops"))
 
     def test_golden_shape(self):
         c = load("chops")
@@ -40,7 +41,6 @@ class Goldens(unittest.TestCase):
         c = load("chops"); c["banks"] = [list(range(1, 17))] + c["banks"][1:]
         with self.assertRaises(ContractError):
             validate_chops(copy.deepcopy(c))
-
 
     def test_bank_size_rule(self):
         self.assertEqual(bank_size(4, "1/4"), 16)
@@ -69,6 +69,15 @@ class Goldens(unittest.TestCase):
         c = load("chops"); c["banks"] = [list(range(0, 12)), list(range(12, 41))]
         with self.assertRaises(ContractError):
             validate_chops(c)
+
+    def test_rejects_bad_advisor(self):
+        c = load("chops")
+        adv = load("advisor"); adv["suggested_bank"][0] = 999
+        with self.assertRaises(ContractError):
+            validate_advisor(adv, chops=c)
+        adv2 = load("advisor"); adv2["pad_labels"] = ["only one"]
+        with self.assertRaises(ContractError):
+            validate_advisor(adv2, chops=c)
 
 
 if __name__ == "__main__":
