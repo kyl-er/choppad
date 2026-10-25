@@ -1,0 +1,12 @@
+{
+  "vault": "~/01-System/MegaVault/Projects/ChopPad",
+  "components": {
+    "contracts": { "owner": "orchestrator",     "deps": [],                                          "cmd": "python3 -m unittest contracts/test_contracts.py" },
+    "ingest":    { "owner": "agent-ingest",     "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/ingest/tests" },
+    "rhythm":    { "owner": "agent-rhythm",     "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/rhythm/tests" },
+    "chop":      { "owner": "agent-chop",       "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/chop/tests" },
+    "midi":      { "owner": "agent-midi",       "deps": ["contracts"],                               "cmd": "node --test components/midi/test/" },
+    "ui":        { "owner": "agent-ui",         "deps": ["contracts"],                               "cmd": "node --test components/ui/test/" },
+    "integrate": { "owner": "agent-integrator", "deps": ["ingest", "rhythm", "chop", "midi", "ui"], "cmd": "python3 -m unittest discover -s components/integrate/tests" }
+  }
+}

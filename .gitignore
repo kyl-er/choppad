@@ -1,0 +1,6 @@
+media/
+.venv/
+__pycache__/
+node_modules/
+*.wav
+*.mp4
