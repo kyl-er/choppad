@@ -264,6 +264,9 @@ def main():
     parser.add_argument("--port", type=int, default=8960, help="server port (default 8960)")
     parser.add_argument("--clean", action="store_true", help="remove media/ before pipeline")
     parser.add_argument("--force", action="store_true", help="force re-ingest even if cached")
+    parser.add_argument("--advise", action="store_true", help="run OpenRouter advisor on media_dir")
+    parser.add_argument("--export-sfz", nargs="?", const="", default=None, help="export SFZ file (optional path)")
+    parser.add_argument("--export-hydrogen", default=None, help="export Hydrogen drumkit to directory")
 
     args = parser.parse_args()
 
@@ -295,6 +298,20 @@ def main():
             print("No media dirs found in", media_root, file=sys.stderr)
             sys.exit(1)
         media_id = subdirs[-1]
+        media_dir = os.path.join(media_root, media_id)
+
+    if args.advise:
+        from choppad_advisor import advise as _advise
+        _advise(media_dir, force=args.force)
+
+    if args.export_sfz is not None:
+        from choppad_export import export_sfz as _export_sfz
+        sfz_out = args.export_sfz if args.export_sfz else None
+        _export_sfz(media_dir, out_path=sfz_out)
+
+    if args.export_hydrogen:
+        from choppad_export import export_hydrogen as _export_hydrogen
+        _export_hydrogen(media_dir, args.export_hydrogen)
 
     if args.serve:
         print(f"Serving at http://127.0.0.1:{args.port}/?id={media_id}")

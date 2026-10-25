@@ -75,7 +75,7 @@ import { mountUI } from "/ui.js";
 
     if (key === "grid") grid = value;
     else if (key === "meter") meter = value;
-    else if (key === "beat_offset") beat_offset = value;
+    else if (key === "beat_offset") beat_offset = (chops.beat_offset ?? 0) + value;
     else if (key === "bpm_mult") bpm_mult = value;
     else if (key === "set_bar1") {
       const currentBar1 = chops.beat_offset ?? 0;
@@ -93,5 +93,18 @@ import { mountUI } from "/ui.js";
     instance.updateChops(newChops);
   };
 
-  const instance = mountUI(document.getElementById("app"), { meta, analysis, chops, engine, input, onRegrid });
+  const appEl = document.getElementById("app");
+  const instance = mountUI(appEl, { meta, analysis, chops, engine, input, onRegrid });
+  if (videoEl) {
+    videoEl.style.width = "100%";
+    videoEl.style.maxHeight = "220px";
+    videoEl.style.borderRadius = "6px";
+    videoEl.style.background = "#000";
+    const lcdEl = appEl.querySelector(".lcd");
+    if (lcdEl && lcdEl.nextSibling) {
+      appEl.insertBefore(videoEl, lcdEl.nextSibling);
+    } else {
+      appEl.prepend(videoEl);
+    }
+  }
 })();
