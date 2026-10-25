@@ -1,0 +1,266 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #111;
+  color: #ddd;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  user-select: none;
+}
+
+.choppad {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  max-width: 480px;
+  width: 100%;
+}
+
+.lcd {
+  background: #0a0a0a;
+  border: 2px solid #333;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-family: monospace;
+  font-size: 14px;
+}
+
+.lcd-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #0f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lcd-meta {
+  display: flex;
+  gap: 20px;
+  color: #0c0;
+}
+
+.lcd-chop {
+  color: #090;
+  font-size: 12px;
+  min-height: 1.2em;
+}
+
+.pad-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(4, 1fr);
+  gap: 6px;
+  aspect-ratio: 1;
+}
+
+.pad {
+  background: #2a2a2a;
+  border: 2px solid #444;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: #666;
+  transition: background 0.06s, border-color 0.06s;
+  position: relative;
+}
+
+.pad:hover {
+  border-color: #0f06;
+}
+
+.pad:active {
+  background: #3a3a3a;
+}
+
+.pad.active {
+  background: #050;
+  border-color: #0f0;
+  color: #0f0;
+}
+
+.pad.empty {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.pad-label {
+  position: absolute;
+  bottom: 3px;
+  right: 5px;
+  font-size: 9px;
+  color: #555;
+}
+
+.bank-section {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  font-family: monospace;
+}
+
+.bank-btn {
+  background: #333;
+  border: 1px solid #555;
+  color: #ddd;
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.bank-btn:hover {
+  background: #444;
+  border-color: #0f06;
+}
+
+.bank-display {
+  font-size: 16px;
+  color: #0f0;
+  min-width: 40px;
+  text-align: center;
+}
+
+.regrid-section,
+.controls-section,
+.midi-section {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.regrid-section h3,
+.controls-section h3,
+.midi-section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #666;
+  margin-bottom: 8px;
+}
+
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.btn-row button {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.btn-row button:hover {
+  background: #3a3a3a;
+  border-color: #0f06;
+}
+
+.btn-row button.on {
+  background: #050;
+  border-color: #0f0;
+  color: #0f0;
+}
+
+.ctrl-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.ctrl-row label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.ctrl-row input[type="checkbox"] {
+  accent-color: #0f0;
+}
+
+.audio-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  cursor: pointer;
+  color: #0f0;
+  font-family: monospace;
+  font-size: 18px;
+  text-align: center;
+  padding: 20px;
+}
+
+.device-list {
+  font-family: monospace;
+  font-size: 11px;
+  color: #888;
+  margin-top: 6px;
+}
+
+.device-list .device {
+  padding: 1px 0;
+}
+
+.device-list .device.connected {
+  color: #0c0;
+}
+
+.midi-btn {
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #ccc;
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 11px;
+  margin-top: 4px;
+  margin-right: 4px;
+}
+
+.midi-btn:hover {
+  background: #3a3a3a;
+}
+
+.midi-btn.learn-active {
+  background: #540;
+  border-color: #f80;
+  color: #f80;
+}
