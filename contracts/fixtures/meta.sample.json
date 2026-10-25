@@ -1,5 +1,5 @@
 {
- "schema": "choppad.meta/1",
+ "schema": "choppad.meta/2",
  "id": "golden120",
  "source": "fixture:golden120",
  "title": "Golden 120 BPM click",
@@ -7,5 +7,12 @@
  "video": "video.mp4",
  "audio": "audio.wav",
  "audio_sr": 44100,
- "audio_channels": 2
+ "audio_channels": 2,
+ "video_info": {
+  "codec": "h264",
+  "height": 480,
+  "gop": 6,
+  "b_frames": 0,
+  "has_audio": false
+ }
 }

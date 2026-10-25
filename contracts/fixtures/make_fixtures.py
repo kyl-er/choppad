@@ -15,14 +15,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SR = 44100
 
 
-def click_track(path, bpm, beats_per_bar=4, offset_s=0.5, n_beats=44, pickup=2, seconds=None):
-    """Write a stereo s16 44.1k WAV with an accented click on every downbeat. Returns ground truth."""
+def click_track(path, bpm, beats_per_bar=4, offset_s=0.5, n_beats=44, pickup=2, seconds=None, intro_noise_s=0.0):
+    """Write a stereo s16 44.1k WAV with an accented click on every downbeat. Returns ground truth.
+
+    intro_noise_s > 0 prepends that many seconds of quiet (-30 dBFS) noise before the clicks (beat times shift)."""
+    import random
     ibi = 60.0 / bpm
+    offset_s += intro_noise_s
     beats = [round(offset_s + k * ibi, 6) for k in range(n_beats)]
     downbeats = [b for k, b in enumerate(beats) if k >= pickup and (k - pickup) % beats_per_bar == 0]
     total = seconds or (beats[-1] + ibi)
     n = int(total * SR)
-    buf = [0.0] * n
+    rng = random.Random(7)
+    buf = [(rng.uniform(-0.0316, 0.0316) if i < intro_noise_s * SR else 0.0) for i in range(n)]
     for b in beats:
         accent = b in downbeats
         f, amp = (1500.0, 0.9) if accent else (800.0, 0.45)
@@ -42,17 +47,19 @@ def golden():
     bpm, bpb, pickup = 120.0, 4, 2
     beats = [round(0.5 + k * 0.5, 6) for k in range(44)]
     downbeats = [b for k, b in enumerate(beats) if k >= pickup and (k - pickup) % bpb == 0]
-    meta = {"schema": "choppad.meta/1", "id": "golden120", "source": "fixture:golden120", "title": "Golden 120 BPM click",
-            "duration_s": 23.0, "video": "video.mp4", "audio": "audio.wav", "audio_sr": 44100, "audio_channels": 2}
-    analysis = {"schema": "choppad.analysis/1", "bpm": bpm, "meter": {"beats_per_bar": bpb, "beat_unit": 4},
-                "beats": beats, "downbeats": downbeats, "confidence": 1.0, "method": "fixture"}
+    meta = {"schema": "choppad.meta/2", "id": "golden120", "source": "fixture:golden120", "title": "Golden 120 BPM click",
+            "duration_s": 23.0, "video": "video.mp4", "audio": "audio.wav", "audio_sr": 44100, "audio_channels": 2,
+            "video_info": {"codec": "h264", "height": 480, "gop": 6, "b_frames": 0, "has_audio": False}}
+    analysis = {"schema": "choppad.analysis/2", "duration_s": 23.0, "bpm": bpm, "bpm_candidates": [bpm, bpm / 2, bpm * 2],
+                "meter": {"beats_per_bar": bpb, "beat_unit": 4}, "beats": beats, "downbeats": downbeats,
+                "confidence": 1.0, "meter_confidence": 1.0, "method": "fixture"}
     chops = []
     for k in range(pickup, len(beats) - 1):
         i = len(chops)
         chops.append({"index": i, "start": beats[k], "end": beats[k + 1], "bar": i // bpb, "beat": i % bpb})
     banks = [list(range(s, min(s + 16, len(chops)))) for s in range(0, len(chops), 16)]
-    chops_doc = {"schema": "choppad.chops/1", "grid": "1/4", "bpm": bpm, "beats_per_bar": bpb,
-                 "pads_per_bank": 16, "chops": chops, "banks": banks}
+    chops_doc = {"schema": "choppad.chops/2", "grid": "1/4", "bpm": bpm, "beats_per_bar": bpb, "bpm_mult": 1,
+                 "beat_offset": 0, "pads_per_bank": 16, "bank_size": 16, "chops": chops, "banks": banks}
     return meta, analysis, chops_doc
 
 

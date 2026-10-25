@@ -35,6 +35,8 @@ def ask(session, prompt):
     os.makedirs(ws, exist_ok=True)
     st = load()
     cmd = ["agy", "-p", prompt, "--model", MODEL, "--output-format", "json", "--print-timeout", "20m"]
+    if os.environ.get("AGBRIDGE_SKIP_PERMS") == "1":
+        cmd.append("--dangerously-skip-permissions")
     if session in st:
         cmd += ["--conversation", st[session]]
     log(f"{session}-prompt", f"---\nsession: {session}\nmodel: {MODEL}\n---\n\n{prompt}\n")

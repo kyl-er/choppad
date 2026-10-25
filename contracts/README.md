@@ -1,59 +1,72 @@
-# ChopPad contracts (v1)
+# ChopPad contracts (v2)
 
 Owner: orchestrator. Components MUST NOT edit this folder; request changes via the vault Inbox
 (type `contract-change`). `validate.py` is the executable definition — if prose and code disagree, code wins.
+v2 = PRD v2 §8 (debate-merged). All times are seconds (float) from the start of `audio.wav`.
+Pipeline per source lives in `media/<id>/`.
 
-All times are seconds (float) from the start of `audio.wav`. Pipeline per source lives in `media/<id>/`.
+## 0. Entry points (module boundaries)
+| Component | File | Signature |
+|---|---|---|
+| ingest | `components/ingest/choppad_ingest.py` | `ingest(source, media_root, *, max_duration_s=420, cookies_from_browser=None, force=False, cap_bytes=500 MiB) -> media_dir` · `enforce_cap(media_root, cap_bytes, keep=None) -> [removed]` |
+| rhythm | `components/rhythm/choppad_rhythm.py` | `analyze(audio_path, meter=None, bpm=None) -> analysis` |
+| chop | `components/chop/choppad_chop.py` | `chop(analysis, grid="1/4", *, meter=None, beat_offset=0, bpm_mult=1) -> chops` (pure, < 50 ms) |
+| midi | `components/midi/midi.js` | `parseMidiMessage(data, mapping?, time?)`, `createInput({midiAccess, keyboardTarget, mapping, storage})`, `defaultMapping`, `STORAGE_KEY` |
+| ui | `components/ui/engine.js` | `resolveChop`, `normalizationGain`, `createEngine`, `FADE_IN`, `FADE_OUT` |
+| ui | `components/ui/layout.js` | `padToCell(pad)`, `cellToPad(row, col)` |
+| ui | `components/ui/ui.js` | `mountUI(rootEl, {meta, analysis, chops, engine, input, onRegrid}) -> {updateChops, destroy}` (page; not unit-tested) |
+| integrate | `components/integrate/choppad.py` | `run_pipeline(source, media_root, grid, meter, bpm, **ingest_kw)`, `make_server(media_root, port)`; `components/ui/main.js` wiring |
 
-## 1. `meta.json` — produced by **ingest**
+## 1. `meta.json` — **ingest**
 ```json
-{ "schema": "choppad.meta/1", "id": "dQw4w9WgXcQ", "source": "https://youtu.be/…",
-  "title": "…", "duration_s": 212.3,
-  "video": "video.mp4", "audio": "audio.wav", "audio_sr": 44100, "audio_channels": 2 }
+{ "schema": "choppad.meta/2", "id": "dQw4w9WgXcQ", "source": "https://youtu.be/…", "title": "…",
+  "duration_s": 212.3, "video": "video.mp4", "audio": "audio.wav", "audio_sr": 44100, "audio_channels": 2,
+  "video_info": { "codec": "h264", "height": 480, "gop": 6, "b_frames": 0, "has_audio": false } }
 ```
-- `video`/`audio` are paths relative to the media dir and must exist.
-- `audio.wav`: PCM s16le, 44100 Hz, stereo, sample-aligned with the video's audio track (t=0 identical).
+- `audio.wav`: PCM s16le, 44100 Hz, stereo; `video.mp4`: H.264 baseline ≤ 480p, max keyframe distance ≤ 6 frames, no B-frames, **no audio stream**. Both from the same source so t=0 aligns. Raw download deleted.
+- `video_info` is measured with ffprobe, not copied from flags.
+- Sources longer than `max_duration_s` raise `ValueError` before download. `media/` total ≤ `cap_bytes` (LRU by dir mtime).
+- Cookies are **opt-in** (`cookies_from_browser`), never default (locked-keyring hang on this machine).
 
-## 2. `analysis.json` — produced by **rhythm**
+## 2. `analysis.json` — **rhythm**
 ```json
-{ "schema": "choppad.analysis/1", "bpm": 120.0,
-  "meter": { "beats_per_bar": 4, "beat_unit": 4 },
-  "beats": [0.5, 1.0, 1.5, …], "downbeats": [0.5, 2.5, …],
-  "confidence": 0.83, "method": "librosa-0.11/beat_track+onset-accent" }
+{ "schema": "choppad.analysis/2", "duration_s": 212.3, "bpm": 120.0, "bpm_candidates": [120.0, 60.0, 240.0],
+  "meter": { "beats_per_bar": 4, "beat_unit": 4 }, "beats": [0.5, 1.0, …], "downbeats": [1.5, 3.5, …],
+  "confidence": 0.83, "meter_confidence": 0.6, "method": "scipy-ellis-dp-v1" }
 ```
-- `beats` strictly increasing, all in `[0, duration_s]`.
-- `downbeats` ⊆ `beats`; consecutive downbeats are exactly `beats_per_bar` beats apart.
-- `60 / median(diff(beats))` within 2% of `bpm`. `confidence` in `[0,1]`.
-- `beats_per_bar` ∈ {2,3,4,6,7}; default 4 when unsure (confidence reflects it). CLI flag `--meter 3/4` overrides.
+- `beats` strictly increasing within `[0, duration_s]`, at least `beats_per_bar + 1` of them.
+- `bpm` is **derived**: within 0.5% of `60 / median(diff(beats))`. `bpm_candidates` includes `bpm` (and should include ½× and 2×).
+- `downbeats ⊆ beats`, exactly `beats_per_bar` beats apart, last downbeat is not the final beat. Quiet/spoken intros are skipped.
+- `beats_per_bar ∈ {2,3,4}`, `beat_unit = 4` (6/8, 7/8 deferred). `method` is any non-empty string.
 
-## 3. `chops.json` — produced by **chop**
+## 3. `chops.json` — **chop**
 ```json
-{ "schema": "choppad.chops/1", "grid": "1/4", "bpm": 120.0, "beats_per_bar": 4,
-  "pads_per_bank": 16,
-  "chops": [ { "index": 0, "start": 0.5, "end": 1.0, "bar": 0, "beat": 0 }, … ],
-  "banks": [ [0,1,…,15], [16,…,31], … ] }
+{ "schema": "choppad.chops/2", "grid": "1/4", "bpm": 120.0, "beats_per_bar": 4, "bpm_mult": 1, "beat_offset": 0,
+  "pads_per_bank": 16, "bank_size": 16,
+  "chops": [ { "index": 0, "start": 1.5, "end": 2.0, "bar": 0, "beat": 0 }, … ], "banks": [[0,…,15], [16,…], …] }
 ```
-- Chops are contiguous: `chops[i].end == chops[i+1].start`; `start < end`.
-- `grid` ∈ {"1/4","1/8","1/16"}; for "1/4" one chop per beat, finer grids subdivide beats evenly.
-- `bar`/`beat` locate the chop's start (beat = grid step within bar, 0-based).
-- Every bank starts on a downbeat chop (`beat == 0`). Last bank may be short; pads beyond it are empty.
-- Audio before the first downbeat (pickup) is not chopped.
+- Pure function of `analysis` + params. Pipeline: (1) `bpm_mult` re-grids the beat list from the first downbeat (2 = insert midpoints, 0.5 = keep every other beat); (2) bar 1 = first downbeat moved by `beat_offset` beats; (3) `meter` overrides `beats_per_bar`; (4) slice each beat interval into `steps` (1/4→1, 1/8→2, 1/16→4).
+- Chops contiguous (`end[i] == start[i+1]`), `bar = i // steps_per_bar`, `beat = i % steps_per_bar`. Pickup before bar 1 and the trailing beat with no end are dropped.
+- `bank_size = (16 // steps_per_bar) × steps_per_bar` if `steps_per_bar ≤ 16` else 16. Every bank starts on `beat == 0`; only the last bank may be short.
+- `resolveChop(chops, bank, pad) = chops.chops[chops.banks[bank]?.[pad]] ?? null`.
 
-## 4. Pad events (JS, **midi** → **ui**)
+## 4. Pad events (JS, **midi** → **ui**/**integrate**)
 ```js
-{ type: "pad-on",  pad: 0..15, velocity: 0..1, time: <performance.now() ms>, source: "midi"|"keyboard" }
-{ type: "pad-off", pad: 0..15, time, source }
-{ type: "bank", delta: +1|-1, time, source }
+{ type: "pad-on", pad: 0..15, velocity: 0..1, time, source: "midi"|"keyboard" }   { type: "pad-off", pad, time, source }
+{ type: "bank", delta: ±1, time, source }   { type: "panic", time, source }
+{ type: "devices", devices: [{ id, name, state }] }   { type: "learn-state", active: bool, nextPad: 0..15|null }
 ```
-- Emitted as `CustomEvent(type, { detail: event })` on the EventTarget returned by `createInput()`.
-- Default MIDI map: note 36..51 → pad 0..15 (MPC/GM layout, pad 0 = bottom-left). Note-on vel 0 ≡ pad-off.
-- Default keyboard map (4×4, bottom row first): `z x c v` / `a s d f` / `q w e r` / `1 2 3 4`; `[` `]` = bank.
+- `CustomEvent(type, { detail })` on the EventTarget from `createInput()`, which also has `getDevices() startLearn() cancelLearn() resetMap() mapping destroy()`.
+- MIDI: note on/off on **any channel**, vel 0 ≡ off; default notes 36–51 → pads 0–15; hot-plug via `statechange` emits `devices`.
+- MIDI learn: next 16 note-ons → pads 0..15 (no pad events while learning); saved as JSON `{note: pad}` in `storage[STORAGE_KEY]`, loaded on create; `resetMap()` clears it.
+- Keyboard by **`KeyboardEvent.code`**: `KeyZ KeyX KeyC KeyV` (pads 0–3) / `KeyA KeyS KeyD KeyF` / `KeyQ KeyW KeyE KeyR` / `Digit1–4` (pads 12–15); `BracketLeft/Right` = bank; `Space` = panic. Ignore `event.repeat` and events from `INPUT`/`TEXTAREA`/`SELECT`.
 
-## 5. Engine API (JS, **ui** → **integrate**)
+## 5. Engine (JS, **ui** → **integrate**)
 ```js
-createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate", choke: true })
-  .trigger(pad, velocity) .release(pad) .setBank(n) .bank -> n
-resolveChop(chops, bank, pad) -> chop | null      // pure, unit-tested
+createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate", choke: true, fullLevel: true })
+  .trigger(pad, velocity) .release(pad) .setBank(n) .bank .setChops(c) .setMode(m) .setChoke(b) .setFullLevel(b) .stopAll()
 ```
-- Audio plays from the decoded buffer (sample-accurate); video is *visual follow only*:
-  on trigger, `video.currentTime = chop.start` and plays; on release (gate) or chop end (oneshot) it pauses.
+- Voice = `BufferSource → Gain → destination`. Gain: set 0 at start, ramp to level by `+FADE_IN` (2.5 ms), ramp to ~0 at chop end (oneshot); choke/release/stop: ramp to ~0 over `FADE_OUT` (3 ms) then `stop()`.
+- Level = `normalizationGain(buffer)` (peak → −1 dBFS, ≤ 4×) × (`fullLevel` ? 1 : `velocity^1.4`). Choke = one mute group across all banks.
+- Video: `video.muted = true`; on trigger seek to `chop.start` + `play().catch(()=>{})`; while `video.seeking`, keep only the latest target and apply it on `"seeked"`; pause at chop end / release. Audio is the clock.
+- Page shows an "enable audio" banner while `ctx.state !== "running"` and resumes on the first pointer/key event (Web MIDI is not a user gesture).

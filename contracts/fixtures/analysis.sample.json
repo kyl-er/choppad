@@ -1,6 +1,12 @@
 {
- "schema": "choppad.analysis/1",
+ "schema": "choppad.analysis/2",
+ "duration_s": 23.0,
  "bpm": 120.0,
+ "bpm_candidates": [
+  120.0,
+  60.0,
+  240.0
+ ],
  "meter": {
   "beats_per_bar": 4,
   "beat_unit": 4
@@ -65,5 +71,6 @@
   21.5
  ],
  "confidence": 1.0,
+ "meter_confidence": 1.0,
  "method": "fixture"
 }

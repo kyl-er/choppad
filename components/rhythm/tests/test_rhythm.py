@@ -12,10 +12,10 @@ def frac_close(found, truth, tol=0.02):
 class Rhythm(unittest.TestCase):
     tmp = tempfile.mkdtemp(prefix="choppad-rhythm-")
 
-    def run_case(self, bpm, bpb=4, offset=0.5, meter=None, n_beats=48):
-        wav = os.path.join(self.tmp, f"{bpm}-{bpb}-{offset}.wav")
-        truth = click_track(wav, bpm, beats_per_bar=bpb, offset_s=offset, n_beats=n_beats)
-        a = analyze(wav, meter=meter)
+    def run_case(self, bpm, bpb=4, offset=0.5, meter=None, n_beats=48, intro=0.0, force_bpm=None):
+        wav = os.path.join(self.tmp, f"{bpm}-{bpb}-{offset}-{intro}.wav")
+        truth = click_track(wav, bpm, beats_per_bar=bpb, offset_s=offset, n_beats=n_beats, intro_noise_s=intro)
+        a = analyze(wav, meter=meter, bpm=force_bpm)
         validate_analysis(a, duration_s=truth["duration_s"])
         return a, truth
 
@@ -46,6 +46,21 @@ class Rhythm(unittest.TestCase):
     def test_meter_override(self):
         a, _ = self.run_case(90, bpb=3, meter="4/4")
         self.assertEqual(a["meter"]["beats_per_bar"], 4)
+
+
+    def test_candidates_include_half_and_double(self):
+        a, _ = self.run_case(120)
+        for target in (60, 240):
+            self.assertTrue(any(abs(x - target) <= 2 for x in a["bpm_candidates"]), a["bpm_candidates"])
+
+    def test_quiet_intro_is_skipped(self):
+        a, t = self.run_case(110, intro=5.0)
+        self.assertGreaterEqual(a["downbeats"][0], 5.0 - 0.03)
+        self.assertGreaterEqual(frac_close(a["downbeats"], t["downbeats"], tol=0.03), 0.8)
+
+    def test_bpm_override(self):
+        a, _ = self.run_case(120, force_bpm=60)
+        self.assertAlmostEqual(a["bpm"], 60, delta=0.6)
 
 
 if __name__ == "__main__":

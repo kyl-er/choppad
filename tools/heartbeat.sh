@@ -2,9 +2,10 @@
 # heartbeat: watch Claude's session; when Claude is out of usage (or silent too long while work is open),
 # hand orchestration to the herdr agent "orchestrator" (agy). Afterwards, nudge it every 30 min when idle.
 #
-#   tools/heartbeat.sh <claude-session.jsonl> [interval_s=300] [stale_min=90]
+#   tools/heartbeat.sh <~/.claude/projects/<proj>/ dir> [interval_s=300] [stale_min=90]
 set -u
-T=${1:?claude transcript path}; IV=${2:-300}; STALE=${3:-90}
+TDIR=${1:?claude projects dir or transcript}; IV=${2:-300}; STALE=${3:-90}
+[ -d "$TDIR" ] || TDIR=$(dirname "$TDIR")  # always follow the newest session file (resumes create new ones)
 V=~/01-System/MegaVault/Projects/ChopPad
 LOCK=$V/ORCHESTRATOR.lock          # "claude" | "agy <iso time>"
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -19,6 +20,7 @@ takeover() {
 }
 
 while true; do
+  T=$(ls -t "$TDIR"/*.jsonl | head -1)
   now=$(date +%s); age=$(( (now - $(stat -c %Y "$T")) / 60 ))
   owner=$(cut -d' ' -f1 "$LOCK")
   # only real API-error entries count (never text Claude wrote about limits)

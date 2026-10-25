@@ -1,9 +1,12 @@
 {
- "schema": "choppad.chops/1",
+ "schema": "choppad.chops/2",
  "grid": "1/4",
  "bpm": 120.0,
  "beats_per_bar": 4,
+ "bpm_mult": 1,
+ "beat_offset": 0,
  "pads_per_bank": 16,
+ "bank_size": 16,
  "chops": [
   {
    "index": 0,
