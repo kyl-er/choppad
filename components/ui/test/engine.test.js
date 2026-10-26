@@ -151,3 +151,46 @@ test("video pauses at the chop end in oneshot, on release in gate, never in play
   const v3 = new FakeVideo(); timers.length = 0; const c = engine({ video: v3, mode: "playthrough", schedule }); c.eng.trigger(2, 1);
   c.eng.release(2); assert.equal(v3.paused, false); assert.equal(timers.length, 0);
 });
+
+class RevCtx extends FakeCtx {
+  createBuffer(ch, length, sampleRate) { const b = new FakeBuffer(0); b.numberOfChannels = ch; b.length = length; b.sampleRate = sampleRate;
+    b.data = Array.from({ length: ch }, () => new Float32Array(length)); return b; }
+}
+
+test("pitch +12 doubles the playback rate and halves the wall-clock length", () => {
+  const { ctx, eng } = engine(); eng.setPadParams(0, { pitch: 12 }); eng.trigger(0, 1);
+  const [s] = starts(ctx); const dur = chops.chops[0].end - chops.chops[0].start;
+  assert.equal(s.node.playbackRate.value, 2);
+  assert.ok(Math.abs(s.duration - dur) < 1e-9, "duration arg is in buffer time");
+  assert.ok(gainOf(s).calls.some(([op, v, t]) => op === "ramp" && v <= 1e-3 && Math.abs(t - (ctx.currentTime + dur / 2)) < 1e-6));
+});
+
+test("reverse plays a reversed copy from the mirrored offset", () => {
+  const ctx = new RevCtx(); const buffer = new FakeBuffer(0.5); buffer.data[0][0] = 0.1;
+  const eng = createEngine({ ctx, buffer, chops }); eng.setPadParams(3, { reverse: true }); eng.trigger(3, 1);
+  const [s] = starts(ctx); const c = chops.chops[3];
+  assert.notEqual(s.node.buffer, buffer);
+  assert.ok(Math.abs(s.node.buffer.getChannelData(0)[buffer.length - 1] - 0.1) < 1e-6);
+  assert.ok(Math.abs(s.offset - (buffer.duration - c.end)) < 1e-9);
+});
+
+test("pad gain in dB scales the level", () => {
+  const peak = (s) => Math.max(...gainOf(s).calls.filter((c) => c[0] === "ramp").map((c) => c[1]));
+  const { ctx, eng } = engine({ choke: false }); eng.trigger(0, 1); eng.setPadParams(1, { gainDb: -6 }); eng.trigger(1, 1);
+  const [a, b] = starts(ctx); assert.ok(Math.abs(peak(b) / peak(a) - 0.5012) < 0.01);
+});
+
+test("overrides put any slice on any pad, null restores the grid chop", () => {
+  const { ctx, eng } = engine(); eng.setOverride(0, 5, { start: 3.25, end: 4.0 }); eng.trigger(5, 1);
+  assert.equal(starts(ctx)[0].offset, 3.25); assert.ok(Math.abs(starts(ctx)[0].duration - 0.75) < 1e-9);
+  assert.deepEqual(eng.getOverrides(), { "0:5": { start: 3.25, end: 4.0 } });
+  eng.setOverride(0, 5, null); eng.trigger(5, 1);
+  assert.equal(starts(ctx)[1].offset, chops.chops[5].start);
+});
+
+test("per-pad mode overrides the global mode", () => {
+  const { ctx, eng } = engine({ choke: false }); eng.setPadParams(2, { mode: "gate" }); eng.trigger(2, 1); eng.release(2);
+  assert.equal(starts(ctx)[0].node.stopped, true);
+  eng.trigger(4, 1); eng.release(4);
+  assert.ok(!starts(ctx)[1].node.stopped, "pad 4 still oneshot");
+});

@@ -74,11 +74,19 @@ def regrid(media_dir: str, *, grid="1/4", meter=None, beat_offset=0, bpm_mult=1)
     return chops
 
 
+def reanalyze(media_dir: str, *, bpm=None, meter=None) -> tuple[dict, dict]:
+    """Re-run rhythm with a forced tempo/meter (e.g. from tap tempo), then chop with defaults."""
+    analysis = _analyze(os.path.join(media_dir, "audio.wav"), meter=meter, bpm=bpm)
+    with open(os.path.join(media_dir, "analysis.json"), "w") as f:
+        json.dump(analysis, f, indent=2)
+    return analysis, regrid(media_dir, meter=meter)
+
+
 def make_server(media_root: str, port: int = 8960):
     """App + media + API server (see server.py). Import jobs run the full pipeline in a thread."""
     from server import make_server as _make
     os.makedirs(media_root, exist_ok=True)
-    return _make(media_root, port, pipeline=run_pipeline, regrid=regrid)
+    return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze)
 
 
 def main():

@@ -5,7 +5,7 @@ import RegionsPlugin from "/vendor/regions.esm.js";
 
 const BAR_COLORS = ["rgba(80,220,120,0.22)", "rgba(80,160,255,0.22)", "rgba(255,180,60,0.22)", "rgba(230,90,200,0.22)"];
 
-export function createWaveform(container, { peaks, duration, media, onChopClick, onUserSeek }) {
+export function createWaveform(container, { peaks, duration, media, onPadClick, onSliceEdit, onUserSeek }) {
   const regions = RegionsPlugin.create();
   const ws = WaveSurfer.create({
     container,
@@ -28,24 +28,25 @@ export function createWaveform(container, { peaks, duration, media, onChopClick,
   });
   regions.on("region-clicked", (region, e) => {
     e.stopPropagation();
-    onChopClick?.(Number(region.id));
+    onPadClick?.(Number(region.id));
   });
+  regions.on("region-updated", (region) => onSliceEdit?.(Number(region.id), region.start, region.end));
   ws.on("interaction", (t) => onUserSeek?.(t));
 
   return {
-    /** Show chops (array of {index,start,end,bar}) labelled with their pad numbers. */
-    showChops(chops, padOf) {
+    /** Show the current bank's pad slices [{pad, start, end, bar, custom}] — drag/resize edits a pad's slice. */
+    showSlices(slices) {
       regions.clearRegions();
-      for (const c of chops) {
+      for (const sl of slices) {
         const el = document.createElement("span");
         el.className = "region-label";
-        el.textContent = String(padOf(c.index) + 1);
-        regions.addRegion({ id: String(c.index), start: c.start, end: c.end, color: BAR_COLORS[c.bar % 4],
-          drag: false, resize: false, content: el });
+        el.textContent = String(sl.pad + 1) + (sl.custom ? "*" : "");
+        regions.addRegion({ id: String(sl.pad), start: sl.start, end: sl.end, drag: true, resize: true, content: el,
+          color: sl.custom ? "rgba(255,216,74,0.30)" : BAR_COLORS[sl.bar % 4] });
       }
     },
-    flash(chopIndex) {
-      const r = regions.getRegions().find((x) => x.id === String(chopIndex));
+    flash(pad) {
+      const r = regions.getRegions().find((x) => x.id === String(pad));
       if (!r?.element) return;
       r.element.classList.add("hit");
       setTimeout(() => r.element?.classList.remove("hit"), 140);

@@ -1,6 +1,6 @@
 // Song screen: LCD + master volume/meter, video, 4x4 pads, bank strip (navigate the song), waveform,
 // song transport (play the original, pads follow), regrid, modes, MIDI.
-import { createEngine, resolveChop } from "/engine.js";
+import { DEFAULT_PAD, createEngine } from "/engine.js";
 import { cellToPad } from "/layout.js";
 import { createWaveform } from "/waveform.js";
 
@@ -43,16 +43,27 @@ export async function mountSong(root, { id, audio, input }) {
     <div class="transport">
       <button class="play">▶ Play song</button><button class="stop">■ Stop</button>
       <label><input type="checkbox" class="follow" checked> pads follow song</label>
-      <label class="zoom">zoom <input class="zoom-in" type="range" min="0" max="300" step="10" value="0"></label>
+      <label class="zoom" title="0 = fit the current bank">zoom <input class="zoom-in" type="range" min="0" max="400" step="10" value="0"></label>
       <span class="hint muted">Pads Z X C V / A S D F / Q W E R / 1 2 3 4 · banks [ ] · Enter play/pause · Space stop</span>
     </div>
     <div class="panels">
       <div class="panel"><h3>Grid</h3><div class="row grid-btns"></div><div class="row meter-btns"></div>
-        <div class="row tempo-btns"></div></div>
+        <div class="row tempo-btns"></div>
+        <div class="row"><button class="tap" title="T">tap tempo (T)</button><span class="tap-bpm muted">tap 4×…</span><button class="tap-apply" disabled>apply</button></div></div>
       <div class="panel"><h3>Pads</h3>
         <label>mode <select class="mode"><option value="oneshot">one-shot</option><option value="gate">gate (hold)</option><option value="playthrough">play-through</option></select></label>
         <label><input type="checkbox" class="choke" checked> choke</label>
         <label><input type="checkbox" class="full" checked> full level</label></div>
+      <div class="panel inspector"><h3 class="insp-title">Pad 1</h3>
+        <label class="slider">gain <input name="gainDb" type="range" min="-24" max="12" step="0.5"><output data-out="gainDb"></output></label>
+        <label class="slider">pitch <input name="pitch" type="range" min="-12" max="12" step="1"><output data-out="pitch"></output></label>
+        <label class="slider">attack <input name="attack" type="range" min="0" max="200" step="1"><output data-out="attack"></output></label>
+        <label class="slider">release <input name="release" type="range" min="3" max="800" step="1"><output data-out="release"></output></label>
+        <div class="row"><label><input name="reverse" type="checkbox"> reverse</label>
+          <label>mode <select name="padmode"><option value="">(global)</option><option value="oneshot">one-shot</option><option value="gate">gate</option><option value="playthrough">play-through</option></select></label></div>
+        <div class="row"><button class="grab" title="Put the current playhead on this pad">grab from playhead</button><button class="unslice">reset slice</button>
+          <button class="all">copy sound to all pads</button><button class="resetpad">reset sound</button></div>
+        <p class="muted small">Hit a pad to select it. Drag or resize its region on the waveform to re-slice.</p></div>
       <div class="panel"><h3>MIDI</h3><ul class="devices"></ul>
         <div class="row"><button class="learn">Learn pads</button><button class="reset">Reset map</button></div>
         <div class="learn-state muted"></div></div>
@@ -67,6 +78,7 @@ export async function mountSong(root, { id, audio, input }) {
   let bank = 0;
   let chopToBank = [];
   let lastChop = null;
+  let selected = 0;
   let meterOverride = null;
 
   // ---- song transport (the original audio, pads choke it) ----
@@ -121,10 +133,12 @@ export async function mountSong(root, { id, audio, input }) {
   }
   const wave = createWaveform($(".wave"), {
     peaks: peaks.peaks, duration: peaks.duration_s, media: video,
-    onChopClick: (idx) => {
-      const b = chopToBank[idx];
-      if (b !== bank) setBank(b, false);
-      hit(chops.banks[b].indexOf(idx), 1);
+    onPadClick: (p) => hit(p, 1),
+    onSliceEdit: (p, start, end) => {
+      engine.setOverride(bank, p, { start, end });
+      select(p);
+      renderPads();
+      saveProject();
     },
     onUserSeek: (t) => { if (song) playSong(t); else if ($(".follow").checked) followTo(t); },
   });
@@ -146,21 +160,32 @@ export async function mountSong(root, { id, audio, input }) {
       track.append(seg);
     });
   }
-  function renderBank() {
-    const ids = chops.banks[bank] ?? [];
+  function renderPads() {
     for (let p = 0; p < 16; p++) {
-      const c = resolveChop(chops, bank, p);
+      const c = engine.getSlice(bank, p);
       const el = padEls[p];
       el.classList.toggle("empty", !c);
-      el.querySelector(".pad-label").textContent = c ? padLabel(c) : "";
-      el.querySelector(".pad-time").textContent = c ? fmt(c.start) : "";
-      el.style.setProperty("--hue", c ? BAR_HUES[c.bar % 4] : 0);
+      el.classList.toggle("custom", !!c?.custom);
+      el.classList.toggle("selected", p === selected);
+      el.querySelector(".pad-label").textContent = c ? (c.custom ? "★ " + fmt(c.start) : padLabel(c)) : "";
+      el.querySelector(".pad-time").textContent = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) : "";
+      el.style.setProperty("--hue", c ? (c.custom ? 48 : BAR_HUES[c.bar % 4]) : 0);
     }
+  }
+  function renderBank() {
+    const ids = chops.banks[bank] ?? [];
+    renderPads();
     const first = chops.chops[ids[0]], last = chops.chops[ids.at(-1)];
     $(".bank-label").textContent = `Bank ${bank + 1}/${chops.banks.length} · bars ${first.bar + 1}–${last.bar + 1}`;
     root.querySelectorAll(".bank-seg").forEach((s, n) => s.classList.toggle("active", n === bank));
-    wave.showChops(ids.map((i) => chops.chops[i]), (i) => ids.indexOf(i));
-    wave.scrollTo(first.start);
+    const slices = [];
+    for (let p = 0; p < 16; p++) {
+      const c = engine.getSlice(bank, p);
+      if (c) slices.push({ pad: p, start: c.start, end: c.end, bar: c.bar, custom: !!c.custom });
+    }
+    wave.showSlices(slices);
+    fitZoom(first.start, last.end);
+    renderInspector();
   }
   function setBank(n, seekVideo) {
     bank = Math.max(0, Math.min(chops.banks.length - 1, n));
@@ -173,16 +198,17 @@ export async function mountSong(root, { id, audio, input }) {
     if (i >= 0 && chopToBank[i] !== bank) setBank(chopToBank[i], false);
   }
   function hit(p, velocity) {
-    const c = resolveChop(chops, bank, p);
+    const c = engine.getSlice(bank, p);
     if (!c) return;
     stopSong();
     engine.trigger(p, velocity);
     lastChop = c;
+    select(p);
     const el = padEls[p];
     el.classList.remove("hit");
     void el.offsetWidth;
     el.classList.add("hit");
-    wave.flash(c.index);
+    wave.flash(p);
   }
   $(".bank-prev").addEventListener("click", () => setBank(bank - 1, true));
   $(".bank-next").addEventListener("click", () => setBank(bank + 1, true));
@@ -247,7 +273,14 @@ export async function mountSong(root, { id, audio, input }) {
     master.gain.value = Number(vol.value);
     try { localStorage.setItem("choppad.volume", vol.value); } catch { /* private mode */ }
   });
-  $(".zoom-in").addEventListener("input", (e) => wave.zoom(Number(e.target.value)));
+  // zoom slider: 0 = auto (fit the current bank), otherwise px per second
+  function fitZoom(start, end) {
+    const z = Number($(".zoom-in").value);
+    const width = $(".wave").clientWidth || 900;
+    wave.zoom(z > 0 ? z : width / ((end - start) * 1.25));
+    wave.scrollTo(start);
+  }
+  $(".zoom-in").addEventListener("input", () => renderBank());
   const tbuf = new Float32Array(analyser.fftSize);
   let raf = 0;
   function tick() {
@@ -266,6 +299,107 @@ export async function mountSong(root, { id, audio, input }) {
     if (song && $(".follow").checked) followTo(t);
     raf = requestAnimationFrame(tick);
   }
+
+  // ---- pad inspector (MPC program edit) ----
+  function select(p) {
+    if (p === selected) return;
+    selected = p;
+    renderPads();
+    renderInspector();
+  }
+  const insp = $(".inspector");
+  function renderInspector() {
+    const P = engine.getPadParams(selected);
+    const c = engine.getSlice(bank, selected);
+    insp.querySelector(".insp-title").textContent = `Pad ${selected + 1}` + (c ? ` · ${c.custom ? "custom slice" : "bar " + padLabel(c)} · ${fmt(c.start)}–${fmt(c.end)}` : " · empty");
+    for (const [k, el] of Object.entries(inspInputs)) {
+      if (k === "reverse") el.checked = P.reverse;
+      else if (k === "mode") el.value = P.mode ?? "";
+      else el.value = k === "attack" || k === "release" ? Math.round(P[k] * 1000) : P[k];
+      const out = insp.querySelector(`[data-out="${k}"]`);
+      if (out) out.textContent = k === "gainDb" ? `${P.gainDb > 0 ? "+" : ""}${P.gainDb} dB` : k === "pitch" ? `${P.pitch > 0 ? "+" : ""}${P.pitch} st` : `${Math.round(P[k] * 1000)} ms`;
+    }
+  }
+  const inspInputs = {
+    gainDb: insp.querySelector('[name="gainDb"]'), pitch: insp.querySelector('[name="pitch"]'),
+    attack: insp.querySelector('[name="attack"]'), release: insp.querySelector('[name="release"]'),
+    reverse: insp.querySelector('[name="reverse"]'), mode: insp.querySelector('[name="padmode"]'),
+  };
+  for (const [k, el] of Object.entries(inspInputs)) {
+    el.addEventListener(k === "reverse" || k === "mode" ? "change" : "input", () => {
+      const v = k === "reverse" ? el.checked : k === "mode" ? (el.value || null)
+        : k === "attack" || k === "release" ? Number(el.value) / 1000 : Number(el.value);
+      engine.setPadParams(selected, { [k]: v });
+      renderInspector();
+      saveProject();
+    });
+  }
+  insp.querySelector(".grab").addEventListener("click", () => {
+    const t = position();
+    const c = engine.getSlice(bank, selected);
+    const len = c ? c.end - c.start : 60 / chops.bpm;
+    engine.setOverride(bank, selected, { start: t, end: Math.min(meta.duration_s, t + len) });
+    renderBank();
+    saveProject();
+  });
+  insp.querySelector(".unslice").addEventListener("click", () => { engine.setOverride(bank, selected, null); renderBank(); saveProject(); });
+  insp.querySelector(".all").addEventListener("click", () => {
+    const P = engine.getPadParams(selected);
+    for (let p = 0; p < 16; p++) engine.setPadParams(p, { ...P });
+    saveProject();
+  });
+  insp.querySelector(".resetpad").addEventListener("click", () => { engine.setPadParams(selected, { ...DEFAULT_PAD }); renderInspector(); saveProject(); });
+
+  // ---- project persistence (pad params + custom slices) ----
+  for (let p = 0; p < 16; p++) engine.setPadParams(p, { ...DEFAULT_PAD, ...(data.project?.pads?.[p] ?? {}) });
+  for (const [k, sl] of Object.entries(data.project?.overrides ?? {})) {
+    const [b, p] = k.split(":").map(Number);
+    engine.setOverride(b, p, sl);
+  }
+  let saveTimer = 0;
+  function saveProject() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      const pads = Array.from({ length: 16 }, (_, p) => engine.getPadParams(p));
+      fetch(`/api/songs/${id}/project`, { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pads, overrides: engine.getOverrides() }) }).catch(() => {});
+    }, 300);
+  }
+
+  // ---- tap tempo ----
+  let taps = [];
+  function tap() {
+    const now = performance.now();
+    if (taps.length && now - taps.at(-1) > 2000) taps = [];
+    taps.push(now);
+    if (taps.length > 8) taps.shift();
+    const out = $(".tap-bpm");
+    if (taps.length < 3) { out.textContent = `tap ${4 - taps.length} more…`; return; }
+    const iv = taps.slice(1).map((t, i) => t - taps[i]).sort((a, b) => a - b);
+    out.dataset.bpm = (60000 / iv[Math.floor(iv.length / 2)]).toFixed(1);
+    out.textContent = `tapped ${out.dataset.bpm} BPM`;
+    $(".tap-apply").disabled = false;
+  }
+  $(".tap").addEventListener("click", tap);
+  $(".tap-apply").addEventListener("click", async () => {
+    const bpm = Number($(".tap-bpm").dataset.bpm);
+    if (!bpm) return;
+    $(".tap-bpm").textContent = "re-analyzing…";
+    const r = await fetch(`/api/songs/${id}/reanalyze`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bpm, meter: meterOverride }) });
+    if (!r.ok) { $(".tap-bpm").textContent = "failed"; return; }
+    const out = await r.json();
+    Object.assign(analysis, out.analysis);
+    const t = position();
+    chops = out.chops;
+    engine.setChops(chops);
+    indexBanks();
+    bank = 0;
+    followTo(t);
+    setBank(bank, false);
+    renderLcd();
+    $(".tap-bpm").textContent = `now ${chops.bpm.toFixed(1)} BPM`;
+  });
 
   // ---- modes ----
   $(".mode").addEventListener("change", (e) => engine.setMode(e.target.value));
@@ -292,7 +426,9 @@ export async function mountSong(root, { id, audio, input }) {
   $(".learn").addEventListener("click", () => input.startLearn());
   $(".reset").addEventListener("click", () => { input.resetMap(); $(".learn-state").textContent = "Default map (notes 36–51)."; });
   const onKey = (e) => {
-    if (e.code === "Enter" && !/INPUT|TEXTAREA|SELECT/.test(e.target?.tagName ?? "")) { e.preventDefault(); song ? stopSong() : playSong(); }
+    if (/INPUT|TEXTAREA|SELECT/.test(e.target?.tagName ?? "")) return;
+    if (e.code === "Enter") { e.preventDefault(); song ? stopSong() : playSong(); }
+    if (e.code === "KeyT" && !e.repeat) tap();
   };
   document.addEventListener("keydown", onKey);
 

@@ -3,6 +3,7 @@ export const FADE_IN = 0.0025;   // s
 export const FADE_OUT = 0.003;   // s
 export const TARGET_PEAK = 0.891; // -1 dBFS
 export const MAX_NORM_GAIN = 4;
+export const DEFAULT_PAD = Object.freeze({ gainDb: 0, pitch: 0, attack: 0.0025, release: 0.003, reverse: false, mode: null });
 
 /** Pure: chop for (bank, pad) or null when the pad is empty. = chops.chops[chops.banks[bank]?.[pad]] ?? null */
 export function resolveChop(chops, bank, pad) {
@@ -65,63 +66,88 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     });
   }
 
-  function trigger(pad, velocity = 1) {
-    const chop = resolveChop(_chops, _bank, pad);
-    if (!chop) return;
-
-    const now = ctx.currentTime;
-
-    if (_choke) {
-      for (const v of activeVoices) {
-        v.gain.gain.cancelScheduledValues(now);
-        v.gain.gain.setValueAtTime(v.gain.gain.value, now);
-        v.gain.gain.linearRampToValueAtTime(1e-6, now + FADE_OUT);
-        v.source.stop(now + FADE_OUT);
+  // Per-pad sound (MPC "program"): gain, pitch (semitones, resample), envelope, reverse, mode override.
+  const padParams = Array.from({ length: 16 }, () => ({ ...DEFAULT_PAD }));
+  // Per-pad custom slices (any part of the song on any pad): key `${bank}:${pad}` -> {start, end}
+  const overrides = new Map();
+  let revBuffer = null;
+  function reversedBuffer() {
+    if (!revBuffer) {
+      revBuffer = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
+      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+        const src = buffer.getChannelData(ch), dst = revBuffer.getChannelData(ch), n = src.length;
+        for (let i = 0; i < n; i++) dst[i] = src[n - 1 - i];
       }
-      activeVoices.length = 0;
     }
+    return revBuffer;
+  }
+  function sliceFor(bank, pad) {
+    const base = resolveChop(_chops, bank, pad);
+    const o = overrides.get(`${bank}:${pad}`);
+    if (!o) return base;
+    return { ...(base ?? { index: -1, bar: 0, beat: 0 }), start: o.start, end: o.end, custom: true };
+  }
 
-    const level = normGain * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
+  function chokeAll(now) {
+    for (const v of activeVoices) {
+      v.gain.gain.cancelScheduledValues(now);
+      v.gain.gain.setValueAtTime(v.gain.gain.value, now);
+      v.gain.gain.linearRampToValueAtTime(1e-6, now + FADE_OUT);
+      v.source.stop(now + FADE_OUT);
+    }
+    activeVoices.length = 0;
+  }
 
+  function trigger(pad, velocity = 1) {
+    const chop = sliceFor(_bank, pad);
+    if (!chop) return;
+    const P = padParams[pad];
+    const mode = P.mode ?? _mode;
+    const now = ctx.currentTime;
+    if (_choke) chokeAll(now);
+
+    const rate = Math.pow(2, P.pitch / 12);
+    const level = normGain * Math.pow(10, P.gainDb / 20) * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
     const source = ctx.createBufferSource();
-    source.buffer = buffer;
+    source.buffer = P.reverse ? reversedBuffer() : buffer;
+    source.playbackRate.value = rate;
     const gainNode = ctx.createGain();
     source.connect(gainNode);
     gainNode.connect(output ?? ctx.destination);
 
+    const dur = chop.end - chop.start;       // in song time
+    const realDur = dur / rate;              // in wall-clock time
+    const offset = P.reverse ? buffer.duration - chop.end : chop.start;
+    const attack = Math.min(P.attack, realDur / 2);
     gainNode.gain.setValueAtTime(0, now);
-    gainNode.gain.linearRampToValueAtTime(level, now + FADE_IN);
+    gainNode.gain.linearRampToValueAtTime(level, now + attack);
 
-    const dur = chop.end - chop.start;
-
-    if (_mode === "oneshot") {
-      gainNode.gain.setValueAtTime(level, now + FADE_IN);
-      gainNode.gain.linearRampToValueAtTime(1e-6, now + dur);
-      source.start(now, chop.start, dur);
-      followVideo(chop.start, dur);
+    if (mode === "oneshot") {
+      gainNode.gain.setValueAtTime(level, now + Math.max(attack, realDur - P.release));
+      gainNode.gain.linearRampToValueAtTime(1e-6, now + realDur);
+      source.start(now, offset, dur);
+      followVideo(chop.start, realDur);
     } else {
-      source.start(now, chop.start); // gate: until release; playthrough: until choked
+      source.start(now, offset); // gate: until release; playthrough: until choked
       followVideo(chop.start, null);
     }
 
-    const voice = { source, gain: gainNode, pad };
+    const voice = { source, gain: gainNode, pad, mode, release: P.release };
     activeVoices.push(voice);
     source.onended = () => { const i = activeVoices.indexOf(voice); if (i >= 0) activeVoices.splice(i, 1); };
   }
 
   function release(pad) {
-    if (_mode !== "gate") return; // oneshot plays to the chop end; playthrough until choked
     const now = ctx.currentTime;
     for (let i = activeVoices.length - 1; i >= 0; i--) {
       const v = activeVoices[i];
-      if (v.pad === pad) {
-        v.gain.gain.cancelScheduledValues(now);
-        v.gain.gain.setValueAtTime(v.gain.gain.value, now);
-        v.gain.gain.linearRampToValueAtTime(1e-6, now + FADE_OUT);
-        v.source.stop(now + FADE_OUT);
-        activeVoices.splice(i, 1);
-        if (video) video.pause();
-      }
+      if (v.pad !== pad || v.mode !== "gate") continue; // oneshot plays to the end; playthrough until choked
+      v.gain.gain.cancelScheduledValues(now);
+      v.gain.gain.setValueAtTime(v.gain.gain.value, now);
+      v.gain.gain.linearRampToValueAtTime(1e-6, now + v.release);
+      v.source.stop(now + v.release);
+      activeVoices.splice(i, 1);
+      if (video) video.pause();
     }
   }
 
@@ -156,6 +182,13 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     trigger, release, setBank,
     get bank() { return _bank; },
     setChops, setMode, setChoke, setFullLevel, stopAll,
+    /** Merge sound params into a pad: {gainDb, pitch, attack, release, reverse, mode|null}. */
+    setPadParams(pad, partial) { Object.assign(padParams[pad], partial); },
+    getPadParams(pad) { return { ...padParams[pad] }; },
+    /** Put a custom slice {start, end} on (bank, pad); null restores the grid chop. */
+    setOverride(bank, pad, slice) { if (slice) overrides.set(`${bank}:${pad}`, { start: slice.start, end: slice.end }); else overrides.delete(`${bank}:${pad}`); },
+    getOverrides() { return Object.fromEntries(overrides); },
+    getSlice(bank, pad) { return sliceFor(bank, pad); },
     _ctx: ctx,
     get _mode() { return _mode; },
   };

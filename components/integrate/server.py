@@ -48,6 +48,13 @@ def compute_peaks(media_dir: str, points: int = PEAK_POINTS) -> dict:
     return doc
 
 
+def load_project(media_dir: str) -> dict:
+    path = os.path.join(media_dir, "project.json")
+    if os.path.isfile(path):
+        return json.load(open(path))
+    return {"pads": [{} for _ in range(16)], "overrides": {}}
+
+
 class Jobs:
     def __init__(self):
         self.lock = threading.Lock()
@@ -80,7 +87,7 @@ class Jobs:
             self.update(jid, state="error", stage="error", error=f"{type(e).__name__}: {e}")
 
 
-def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, host: str = "127.0.0.1"):
+def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, host: str = "127.0.0.1"):
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
 
@@ -177,6 +184,22 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             except (BrokenPipeError, ConnectionResetError):
                 pass  # browser cancelled (normal for <video> seeking)
 
+        def do_PUT(self):
+            try:
+                m = re.match(r"^/api/songs/([^/]+)/project$", self.path.split("?", 1)[0])
+                d = self._song_dir(m.group(1)) if m else None
+                if not d:
+                    return self._err(404, "not found")
+                proj = self._body()
+                if not isinstance(proj.get("pads"), list) or not isinstance(proj.get("overrides"), dict):
+                    return self._err(400, "project needs pads[] and overrides{}")
+                json.dump({"pads": proj["pads"][:16], "overrides": proj["overrides"]}, open(os.path.join(d, "project.json"), "w"))
+                return self._json({"ok": True})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except json.JSONDecodeError:
+                self._err(400, "invalid JSON")
+
         def do_POST(self):
             try:
                 self._route_post()
@@ -205,7 +228,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._err(404, "unknown song")
                 load = lambda n: json.load(open(os.path.join(d, n)))  # noqa: E731
                 return self._json({"meta": load("meta.json"), "analysis": load("analysis.json"),
-                                   "chops": load("chops.json"), "peaks": compute_peaks(d)})
+                                   "chops": load("chops.json"), "peaks": compute_peaks(d), "project": load_project(d)})
             m = re.match(r"^/api/jobs/([0-9a-f]+)$", p)
             if m:
                 j = jobs.get(m.group(1))
@@ -238,6 +261,15 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 except (ValueError, KeyError) as e:
                     return self._err(400, str(e))
                 return self._json(chops)
+            m = re.match(r"^/api/songs/([^/]+)/reanalyze$", p)
+            if m and reanalyze:
+                d = self._song_dir(m.group(1))
+                if not d:
+                    return self._err(404, "unknown song")
+                body = self._body()
+                bpm = body.get("bpm")
+                analysis, chops = reanalyze(d, bpm=float(bpm) if bpm else None, meter=body.get("meter"))
+                return self._json({"analysis": analysis, "chops": chops})
             return self._err(404, "not found")
 
         def _library(self):
