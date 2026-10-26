@@ -139,3 +139,15 @@ test("layout: pad 0 bottom-left, pad 15 top-right, round-trips", () => {
   assert.deepEqual(padToCell(15), { row: 0, col: 3 });
   for (let p = 0; p < 16; p++) { const { row, col } = padToCell(p); assert.equal(cellToPad(row, col), p); }
 });
+
+test("video pauses at the chop end in oneshot, on release in gate, never in playthrough", () => {
+  const timers = []; const schedule = (fn, ms) => { timers.push({ fn, ms }); return () => { timers.length = 0; }; };
+  const v1 = new FakeVideo(); const a = engine({ video: v1, schedule }); a.eng.trigger(0, 1);
+  const dur = chops.chops[0].end - chops.chops[0].start;
+  assert.equal(timers.length, 1); assert.ok(Math.abs(timers[0].ms - dur * 1000) < 1e-6);
+  timers[0].fn(); assert.equal(v1.paused, true);
+  const v2 = new FakeVideo(); const b = engine({ video: v2, mode: "gate", choke: false, schedule }); b.eng.trigger(1, 1);
+  assert.equal(v2.paused, false); b.eng.release(1); assert.equal(v2.paused, true);
+  const v3 = new FakeVideo(); timers.length = 0; const c = engine({ video: v3, mode: "playthrough", schedule }); c.eng.trigger(2, 1);
+  c.eng.release(2); assert.equal(v3.paused, false); assert.equal(timers.length, 0);
+});

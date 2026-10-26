@@ -33,8 +33,8 @@ export function mountUI(rootEl, { meta, analysis, chops, engine, input, onRegrid
   const lcd = el("div", "lcd");
   const lcdTitle = el("div", "lcd-title", "", truncate(meta?.title || "ChopPad", 40));
   const lcdMeta = el("div", "lcd-meta");
-  const bpmLabel = el("span", "", "", `${meta?.bpm ?? analysis?.bpm ?? "—"} BPM`);
-  const meterLabel = el("span", "", "", `${analysis?.meter?.beats_per_bar ?? "—"}/${analysis?.meter?.beat_unit ?? "—"}`);
+  const bpmLabel = el("span", "", "", `${(chops?.bpm ?? analysis?.bpm)?.toFixed?.(1) ?? "—"} BPM`);
+  const meterLabel = el("span", "", "", `${chops?.beats_per_bar ?? analysis?.meter?.beats_per_bar ?? "—"}/4`);
   const confLabel = el("span", "", "", `${((analysis?.confidence ?? 0) * 100) | 0}%`);
   lcdMeta.append(bpmLabel, meterLabel, confLabel);
   const lcdChop = el("div", "lcd-chop", "", "");
@@ -244,6 +244,8 @@ export function mountUI(rootEl, { meta, analysis, chops, engine, input, onRegrid
 
   banner.addEventListener("click", resumeAudio);
   document.addEventListener("keydown", resumeAudio, { once: true });
+  document.addEventListener("pointerdown", resumeAudio, { once: true });
+  bannerCtx?.addEventListener?.("statechange", updateBanner);
 
   // kiss = keep it simple style: expose ctx via a property so banner can read it
   if (!engine._ctx && engine.trigger) {
@@ -263,6 +265,8 @@ export function mountUI(rootEl, { meta, analysis, chops, engine, input, onRegrid
   return {
     updateChops(c) {
       currentChops = c;
+      bpmLabel.textContent = `${c.bpm.toFixed(1)} BPM`;
+      meterLabel.textContent = `${c.beats_per_bar}/4`;
       engine.setChops(c);
       currentBank = 0;
       bankDisplay.textContent = bankLetter(currentBank);

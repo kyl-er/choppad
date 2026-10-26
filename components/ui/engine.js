@@ -33,7 +33,8 @@ export function normalizationGain(buffer) {
  *       setFullLevel(b), stopAll() }
  * Sets video.muted = true. Video seeks are coalesced while video.seeking (latest target wins on "seeked").
  */
-export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot", choke = true, fullLevel = true }) {
+export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot", choke = true, fullLevel = true,
+  schedule = (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); } }) {
   let _bank = 0;
   let _chops = chops;
   let _mode = mode;
@@ -42,6 +43,17 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   const normGain = normalizationGain(buffer);
   const activeVoices = [];
   let pendingTarget = null;
+  let cancelPause = null;
+
+  // Video is visual follow only: seek (coalesced while seeking), play, and optionally pause after `pauseAfter` s.
+  function followVideo(start, pauseAfter) {
+    if (!video) return;
+    if (cancelPause) { cancelPause(); cancelPause = null; }
+    if (video.seeking) pendingTarget = start;
+    else video.currentTime = start;
+    video.play()?.catch?.(() => {});
+    if (pauseAfter != null) cancelPause = schedule(() => { cancelPause = null; video.pause(); }, pauseAfter * 1000);
+  }
 
   if (video) {
     video.muted = true;
@@ -86,35 +98,19 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
       gainNode.gain.setValueAtTime(level, now + FADE_IN);
       gainNode.gain.linearRampToValueAtTime(1e-6, now + dur);
       source.start(now, chop.start, dur);
-      if (video && !video.seeking) {
-        video.currentTime = chop.start;
-        video.play().catch(() => {});
-      } else if (video && video.seeking) {
-        pendingTarget = chop.start;
-      }
-    } else if (_mode === "gate") {
-      source.start(now, chop.start);
-      if (video && !video.seeking) {
-        video.currentTime = chop.start;
-        video.play().catch(() => {});
-      } else if (video && video.seeking) {
-        pendingTarget = chop.start;
-      }
-    } else if (_mode === "playthrough") {
-      source.start(now, chop.start);
-      if (video && !video.seeking) {
-        video.currentTime = chop.start;
-        video.play().catch(() => {});
-      } else if (video && video.seeking) {
-        pendingTarget = chop.start;
-      }
+      followVideo(chop.start, dur);
+    } else {
+      source.start(now, chop.start); // gate: until release; playthrough: until choked
+      followVideo(chop.start, null);
     }
 
-    activeVoices.push({ source, gain: gainNode, pad });
+    const voice = { source, gain: gainNode, pad };
+    activeVoices.push(voice);
+    source.onended = () => { const i = activeVoices.indexOf(voice); if (i >= 0) activeVoices.splice(i, 1); };
   }
 
   function release(pad) {
-    if (_mode === "playthrough") return;
+    if (_mode !== "gate") return; // oneshot plays to the chop end; playthrough until choked
     const now = ctx.currentTime;
     for (let i = activeVoices.length - 1; i >= 0; i--) {
       const v = activeVoices[i];
@@ -124,6 +120,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
         v.gain.gain.linearRampToValueAtTime(1e-6, now + FADE_OUT);
         v.source.stop(now + FADE_OUT);
         activeVoices.splice(i, 1);
+        if (video) video.pause();
       }
     }
   }
