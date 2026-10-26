@@ -13,6 +13,14 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+# Sibling components are plain modules (no package install); make them importable when run as a CLI.
+_COMPONENTS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for _c in ("ingest", "rhythm", "chop", "advisor", "export"):
+    _p = os.path.join(_COMPONENTS, _c)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+sys.path.insert(0, os.path.join(_COMPONENTS, "..", "contracts"))
+
 from choppad_ingest import ingest as _ingest
 from choppad_rhythm import analyze as _analyze
 from choppad_chop import chop as _chop
