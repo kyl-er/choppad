@@ -1,13 +1,15 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ChopPad</title>
-<link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChopPad</title>
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div id="app" class="choppad"><p class="loading" style="font-family:monospace;color:#3c3;padding:2rem">Loading song &amp; decoding audio…</p></div>
-<script type="module" src="main.js"></script>
+  <div id="unlock" class="unlock" hidden>🔈 Click anywhere or press a key to enable audio (browsers block sound until you interact)</div>
+  <aside id="sidebar" class="sidebar"></aside>
+  <main id="main" class="main"><p class="loading">Loading…</p></main>
+  <script type="module" src="/main.js"></script>
 </body>
 </html>

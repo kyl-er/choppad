@@ -33,7 +33,7 @@ export function normalizationGain(buffer) {
  *       setFullLevel(b), stopAll() }
  * Sets video.muted = true. Video seeks are coalesced while video.seeking (latest target wins on "seeked").
  */
-export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot", choke = true, fullLevel = true,
+export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot", choke = true, fullLevel = true, output = null,
   schedule = (fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); } }) {
   let _bank = 0;
   let _chops = chops;
@@ -87,7 +87,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     source.buffer = buffer;
     const gainNode = ctx.createGain();
     source.connect(gainNode);
-    gainNode.connect(ctx.destination);
+    gainNode.connect(output ?? ctx.destination);
 
     gainNode.gain.setValueAtTime(0, now);
     gainNode.gain.linearRampToValueAtTime(level, now + FADE_IN);
@@ -141,6 +141,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   function setFullLevel(b) { _fullLevel = b; }
 
   function stopAll() {
+    if (cancelPause) { cancelPause(); cancelPause = null; } // a pending "pause video at chop end" must not fire later
     const now = ctx.currentTime;
     for (const v of activeVoices) {
       v.gain.gain.cancelScheduledValues(now);

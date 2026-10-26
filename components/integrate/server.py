@@ -1,0 +1,256 @@
+"""ChopPad HTTP server (v3): static app, media with streamed Range, JSON API, background import jobs.
+
+Routes
+  GET  /                         app (components/ui/index.html); other app files from components/ui/
+  GET  /midi.js                  components/midi/midi.js
+  GET  /media/<id>/<file>        media, HTTP Range -> 206 (streamed in chunks)
+  GET  /api/songs                library: [{id, title, duration_s, bpm, meter, chops, banks}]
+  GET  /api/songs/<id>           {meta, analysis, chops, peaks}
+  POST /api/songs  {url}         start import job -> {job}
+  GET  /api/jobs/<job>           {state: queued|running|done|error, stage, progress 0..1, id?, error?}
+  POST /api/regrid {id, grid, meter, beat_offset, bpm_mult}   (also /api/songs/<id>/regrid)
+"""
+import json
+import os
+import re
+import threading
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+UI_DIR = os.path.join(REPO, "components", "ui")
+MIDI_JS = os.path.join(REPO, "components", "midi", "midi.js")
+CHUNK = 256 * 1024
+MAX_RANGE = 8 * 2**20  # answer open-ended ranges with at most 8 MiB; browsers ask again for more
+MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
+        ".jpg": "image/jpeg", ".webp": "image/webp", ".mp4": "video/mp4", ".wav": "audio/wav", ".sfz": "text/plain",
+        ".xml": "application/xml", ".ico": "image/x-icon"}
+ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PEAK_POINTS = 6000
+
+
+def compute_peaks(media_dir: str, points: int = PEAK_POINTS) -> dict:
+    """Max-abs peaks of audio.wav for the waveform view; cached as peaks.json."""
+    path = os.path.join(media_dir, "peaks.json")
+    if os.path.isfile(path):
+        return json.load(open(path))
+    import numpy as np
+    import soundfile as sf
+    audio, sr = sf.read(os.path.join(media_dir, "audio.wav"), dtype="float32", always_2d=True)
+    mono = np.abs(audio).max(axis=1)
+    n = len(mono)
+    edges = np.linspace(0, n, points + 1).astype(int)
+    peaks = [float(mono[a:b].max()) if b > a else 0.0 for a, b in zip(edges, edges[1:])]
+    top = max(peaks) or 1.0
+    doc = {"duration_s": n / sr, "peaks": [round(p / top, 4) for p in peaks]}
+    json.dump(doc, open(path, "w"))
+    return doc
+
+
+class Jobs:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.jobs = {}
+
+    def get(self, jid):
+        with self.lock:
+            return dict(self.jobs.get(jid) or {})
+
+    def update(self, jid, **kw):
+        with self.lock:
+            self.jobs[jid].update(kw)
+
+    def start(self, media_root, url, pipeline):
+        jid = uuid.uuid4().hex[:12]
+        with self.lock:
+            self.jobs[jid] = {"job": jid, "state": "queued", "stage": "queued", "progress": 0.0, "url": url}
+        threading.Thread(target=self._run, args=(jid, media_root, url, pipeline), daemon=True).start()
+        return jid
+
+    def _run(self, jid, media_root, url, pipeline):
+        try:
+            def stage(name, p):
+                self.update(jid, state="running", stage=name, progress=p)
+            media_dir = pipeline(url, media_root, on_stage=stage)
+            stage("waveform", 0.95)
+            compute_peaks(media_dir)
+            self.update(jid, state="done", stage="done", progress=1.0, id=os.path.basename(media_dir))
+        except Exception as e:  # noqa: BLE001 - surfaced to the UI
+            self.update(jid, state="error", stage="error", error=f"{type(e).__name__}: {e}")
+
+
+def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, host: str = "127.0.0.1"):
+    media_root = os.path.abspath(media_root)
+    jobs = Jobs()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):  # quiet
+            pass
+
+        # ---------- helpers ----------
+        def _send(self, code, body: bytes, ctype, extra=None):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            for k, v in (extra or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _json(self, obj, code=200):
+            self._send(code, json.dumps(obj).encode(), "application/json")
+
+        def _err(self, code, msg):
+            self._json({"error": msg}, code)
+
+        def _body(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(n) or b"{}")
+
+        def _static(self, path):
+            if not os.path.isfile(path):
+                return self._err(404, "not found")
+            ext = os.path.splitext(path)[1].lower()
+            self._send(200, open(path, "rb").read(), MIME.get(ext, "application/octet-stream"))
+
+        def _media(self, path):
+            if not os.path.isfile(path):
+                return self._err(404, "not found")
+            size = os.path.getsize(path)
+            ctype = MIME.get(os.path.splitext(path)[1].lower(), "application/octet-stream")
+            rng = self.headers.get("Range")
+            start, end, code = 0, size - 1, 200
+            if rng:
+                m = re.match(r"bytes=(\d*)-(\d*)$", rng.strip())
+                if not m or (not m.group(1) and not m.group(2)):
+                    return self._err(416, "bad range")
+                if m.group(1):
+                    start = int(m.group(1))
+                    end = int(m.group(2)) if m.group(2) else min(size - 1, start + MAX_RANGE - 1)
+                else:  # suffix range: last N bytes
+                    start = max(0, size - int(m.group(2)))
+                end = min(end, size - 1)
+                if start > end:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                code = 206
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            if code == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            with open(path, "rb") as f:
+                f.seek(start)
+                left = end - start + 1
+                while left > 0:
+                    buf = f.read(min(CHUNK, left))
+                    if not buf:
+                        break
+                    self.wfile.write(buf)
+                    left -= len(buf)
+
+        def _song_dir(self, sid):
+            if not ID_RE.match(sid or ""):
+                return None
+            d = os.path.join(media_root, sid)
+            return d if os.path.isfile(os.path.join(d, "meta.json")) else None
+
+        # ---------- routes ----------
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_GET(self):
+            try:
+                self._route_get()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # browser cancelled (normal for <video> seeking)
+
+        def do_POST(self):
+            try:
+                self._route_post()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except json.JSONDecodeError:
+                self._err(400, "invalid JSON")
+
+        def _route_get(self):
+            p = self.path.split("?", 1)[0]
+            if p in ("/", "/index.html"):
+                return self._static(os.path.join(UI_DIR, "index.html"))
+            if p == "/midi.js":
+                return self._static(MIDI_JS)
+            if p.startswith("/media/"):
+                parts = p[len("/media/"):].split("/")
+                if len(parts) != 2 or not ID_RE.match(parts[0]) or not re.match(r"^[\w.-]+$", parts[1]):
+                    return self._err(404, "not found")
+                return self._media(os.path.join(media_root, parts[0], parts[1]))
+            if p == "/api/songs":
+                return self._json(self._library())
+            m = re.match(r"^/api/songs/([^/]+)$", p)
+            if m:
+                d = self._song_dir(m.group(1))
+                if not d:
+                    return self._err(404, "unknown song")
+                load = lambda n: json.load(open(os.path.join(d, n)))  # noqa: E731
+                return self._json({"meta": load("meta.json"), "analysis": load("analysis.json"),
+                                   "chops": load("chops.json"), "peaks": compute_peaks(d)})
+            m = re.match(r"^/api/jobs/([0-9a-f]+)$", p)
+            if m:
+                j = jobs.get(m.group(1))
+                return self._json(j) if j else self._err(404, "unknown job")
+            # app files (no directory traversal)
+            rel = os.path.normpath(p.lstrip("/"))
+            if rel.startswith("..") or os.path.isabs(rel):
+                return self._err(404, "not found")
+            return self._static(os.path.join(UI_DIR, rel))
+
+        def _route_post(self):
+            p = self.path.split("?", 1)[0]
+            if p == "/api/songs":
+                if pipeline is None:
+                    return self._err(501, "import disabled")
+                url = (self._body().get("url") or "").strip()
+                if not url:
+                    return self._err(400, "url required")
+                return self._json({"job": jobs.start(media_root, url, pipeline)}, 202)
+            m = re.match(r"^/api/songs/([^/]+)/regrid$", p)
+            if p == "/api/regrid" or m:
+                body = self._body()
+                sid = m.group(1) if m else body.get("id")
+                d = self._song_dir(sid)
+                if not d:
+                    return self._err(404, "unknown song")
+                try:
+                    chops = regrid(d, grid=body.get("grid") or "1/4", meter=body.get("meter"),
+                                   beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1)
+                except (ValueError, KeyError) as e:
+                    return self._err(400, str(e))
+                return self._json(chops)
+            return self._err(404, "not found")
+
+        def _library(self):
+            out = []
+            for sid in sorted(os.listdir(media_root)) if os.path.isdir(media_root) else []:
+                d = self._song_dir(sid)
+                if not d or not os.path.isfile(os.path.join(d, "chops.json")):
+                    continue
+                meta = json.load(open(os.path.join(d, "meta.json")))
+                ch = json.load(open(os.path.join(d, "chops.json")))
+                out.append({"id": sid, "title": meta.get("title"), "duration_s": meta.get("duration_s"),
+                            "bpm": ch.get("bpm"), "meter": f"{ch.get('beats_per_bar')}/4", "chops": len(ch["chops"]),
+                            "banks": len(ch["banks"]), "added": os.path.getmtime(os.path.join(d, "meta.json"))})
+            return sorted(out, key=lambda s: -s["added"])
+
+    return ThreadingHTTPServer((host, port), Handler)
