@@ -56,6 +56,14 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     if (pauseAfter != null) cancelPause = schedule(() => { cancelPause = null; video.pause(); }, pauseAfter * 1000);
   }
 
+  // Scheduled hits move the video when they actually sound.
+  function followAt(when, start, pauseAfter) {
+    const delay = when - ctx.currentTime;
+    if (!video) return;
+    if (delay > 0.02) schedule(() => followVideo(start, pauseAfter), delay * 1000);
+    else followVideo(start, pauseAfter);
+  }
+
   if (video) {
     video.muted = true;
     video.addEventListener("seeked", () => {
@@ -98,12 +106,13 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     activeVoices.length = 0;
   }
 
-  function trigger(pad, velocity = 1) {
-    const chop = sliceFor(_bank, pad);
+  /** Play `pad` now, or at AudioContext time `when` (sequencer); `bank` defaults to the current bank. */
+  function trigger(pad, velocity = 1, when = null, bank = _bank) {
+    const chop = sliceFor(bank, pad);
     if (!chop) return;
     const P = padParams[pad];
     const mode = P.mode ?? _mode;
-    const now = ctx.currentTime;
+    const now = when ?? ctx.currentTime;
     if (_choke) chokeAll(now);
 
     const rate = Math.pow(2, P.pitch / 12);
@@ -126,10 +135,10 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
       gainNode.gain.setValueAtTime(level, now + Math.max(attack, realDur - P.release));
       gainNode.gain.linearRampToValueAtTime(1e-6, now + realDur);
       source.start(now, offset, dur);
-      followVideo(chop.start, realDur);
+      followAt(now, chop.start, realDur);
     } else {
       source.start(now, offset); // gate: until release; playthrough: until choked
-      followVideo(chop.start, null);
+      followAt(now, chop.start, null);
     }
 
     const voice = { source, gain: gainNode, pad, mode, release: P.release };

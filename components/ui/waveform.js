@@ -32,6 +32,11 @@ export function createWaveform(container, { peaks, duration, media, onPadClick, 
   });
   regions.on("region-updated", (region) => onSliceEdit?.(Number(region.id), region.start, region.end));
   ws.on("interaction", (t) => onUserSeek?.(t));
+  // zoom/scroll before wavesurfer has processed the peaks throws "No audio loaded": defer until ready.
+  let ready = false;
+  let pending = null;
+  ws.on("ready", () => { ready = true; if (pending) { pending(); pending = null; } });
+  const whenReady = (fn) => { if (ready) { try { fn(); } catch { /* not laid out yet */ } } else pending = fn; };
 
   return {
     /** Show the current bank's pad slices [{pad, start, end, bar, custom}] — drag/resize edits a pad's slice. */
@@ -51,8 +56,10 @@ export function createWaveform(container, { peaks, duration, media, onPadClick, 
       r.element.classList.add("hit");
       setTimeout(() => r.element?.classList.remove("hit"), 140);
     },
-    zoom(pxPerSec) { ws.zoom(pxPerSec); },
-    scrollTo(t) { ws.setScrollTime?.(Math.max(0, t - 2)); },
+    zoom(pxPerSec, scrollTime = null) {
+      whenReady(() => { ws.zoom(pxPerSec); if (scrollTime != null) ws.setScrollTime?.(Math.max(0, scrollTime - 0.5)); });
+    },
+    scrollTo(t) { whenReady(() => ws.setScrollTime?.(Math.max(0, t - 0.5))); },
     destroy() { ws.destroy(); },
   };
 }

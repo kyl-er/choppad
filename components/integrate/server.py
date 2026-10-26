@@ -193,7 +193,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 proj = self._body()
                 if not isinstance(proj.get("pads"), list) or not isinstance(proj.get("overrides"), dict):
                     return self._err(400, "project needs pads[] and overrides{}")
-                json.dump({"pads": proj["pads"][:16], "overrides": proj["overrides"]}, open(os.path.join(d, "project.json"), "w"))
+                doc = {"pads": proj["pads"][:16], "overrides": proj["overrides"]}
+                if isinstance(proj.get("pattern"), dict):
+                    doc["pattern"] = proj["pattern"]
+                json.dump(doc, open(os.path.join(d, "project.json"), "w"))
                 return self._json({"ok": True})
             except (BrokenPipeError, ConnectionResetError):
                 pass

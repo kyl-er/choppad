@@ -3,6 +3,7 @@
 import { DEFAULT_PAD, createEngine } from "/engine.js";
 import { cellToPad } from "/layout.js";
 import { createWaveform } from "/waveform.js";
+import { createSequencer, encodeWav, patternToMidi } from "/sequencer.js";
 
 const STEPS = { "1/4": 1, "1/8": 2, "1/16": 4 };
 const MULTS = [0.5, 1, 2];
@@ -44,7 +45,18 @@ export async function mountSong(root, { id, audio, input }) {
       <button class="play">▶ Play song</button><button class="stop">■ Stop</button>
       <label><input type="checkbox" class="follow" checked> pads follow song</label>
       <label class="zoom" title="0 = fit the current bank">zoom <input class="zoom-in" type="range" min="0" max="400" step="10" value="0"></label>
-      <span class="hint muted">Pads Z X C V / A S D F / Q W E R / 1 2 3 4 · banks [ ] · Enter play/pause · Space stop</span>
+      <span class="hint muted">Pads Z X C V / A S D F / Q W E R / 1 2 3 4 · banks [ ] · Enter song · P pattern · B rec · T tap · Space stop</span>
+    </div>
+    <div class="seq">
+      <button class="rec" title="R">● rec</button><button class="seq-play" title="P">▶ pattern</button>
+      <label><input type="checkbox" class="metro" checked> click</label>
+      <label>bars <select class="seq-bars"><option>1</option><option selected>2</option><option>4</option></select></label>
+      <label>quantize <select class="seq-q"><option value="off">off</option><option value="1/8">1/8</option><option value="1/16" selected>1/16</option></select></label>
+      <label>swing <input class="seq-swing" type="range" min="0" max="0.5" step="0.05" value="0"></label>
+      <label><input type="checkbox" class="repeat"> note repeat <select class="repeat-rate"><option value="0.5">1/8</option><option value="0.25" selected>1/16</option></select></label>
+      <button class="seq-undo">undo</button><button class="seq-clear">clear</button>
+      <button class="seq-midi">⇩ .mid</button><button class="seq-wav">⇩ .wav</button>
+      <div class="steps"></div><span class="seq-info muted"></span>
     </div>
     <div class="panels">
       <div class="panel"><h3>Grid</h3><div class="row grid-btns"></div><div class="row meter-btns"></div>
@@ -202,6 +214,7 @@ export async function mountSong(root, { id, audio, input }) {
     if (!c) return;
     stopSong();
     engine.trigger(p, velocity);
+    if (seq.record(p, bank, velocity)) { renderSteps(); saveProject(); }
     lastChop = c;
     select(p);
     const el = padEls[p];
@@ -277,8 +290,7 @@ export async function mountSong(root, { id, audio, input }) {
   function fitZoom(start, end) {
     const z = Number($(".zoom-in").value);
     const width = $(".wave").clientWidth || 900;
-    wave.zoom(z > 0 ? z : width / ((end - start) * 1.25));
-    wave.scrollTo(start);
+    wave.zoom(z > 0 ? z : width / ((end - start) * 1.25), start);
   }
   $(".zoom-in").addEventListener("input", () => renderBank());
   const tbuf = new Float32Array(analyser.fftSize);
@@ -297,6 +309,10 @@ export async function mountSong(root, { id, audio, input }) {
     $(".pos").textContent = c ? `bar ${padLabel(c)}` : "—";
     $(".banks-head").style.left = `${(t / meta.duration_s) * 100}%`;
     if (song && $(".follow").checked) followTo(t);
+    if (seq.state.playing) {
+      const cell = Math.floor(seq.position() * 4);
+      [...stepsEl.children].forEach((c, i) => c.classList.toggle("now", i === cell));
+    }
     raf = requestAnimationFrame(tick);
   }
 
@@ -362,7 +378,7 @@ export async function mountSong(root, { id, audio, input }) {
     saveTimer = setTimeout(() => {
       const pads = Array.from({ length: 16 }, (_, p) => engine.getPadParams(p));
       fetch(`/api/songs/${id}/project`, { method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pads, overrides: engine.getOverrides() }) }).catch(() => {});
+        body: JSON.stringify({ pads, overrides: engine.getOverrides(), pattern: seq.state.pattern }) }).catch(() => {});
     }, 300);
   }
 
@@ -401,6 +417,91 @@ export async function mountSong(root, { id, audio, input }) {
     $(".tap-bpm").textContent = `now ${chops.bpm.toFixed(1)} BPM`;
   });
 
+  // ---- sequencer (record / loop / quantize / swing / note repeat / export) ----
+  function clickAt(when, accent) {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.frequency.value = accent ? 1600 : 1000;
+    g.gain.setValueAtTime(0, when);
+    g.gain.linearRampToValueAtTime(accent ? 0.35 : 0.2, when + 0.002);
+    g.gain.exponentialRampToValueAtTime(1e-4, when + 0.05);
+    o.connect(g).connect(master);
+    o.start(when);
+    o.stop(when + 0.06);
+  }
+  function flashPadAt(when, p, b) {
+    setTimeout(() => {
+      if (b !== bank) return;
+      const el = padEls[p];
+      el.classList.remove("hit");
+      void el.offsetWidth;
+      el.classList.add("hit");
+    }, Math.max(0, (when - ctx.currentTime) * 1000));
+  }
+  const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b) => { engine.trigger(p, vel, when, b); flashPadAt(when, p, b); } });
+  const syncSeqTempo = () => { seq.state.bpm = chops.bpm; seq.state.beatsPerBar = chops.beats_per_bar; };
+  syncSeqTempo();
+  if (data.project?.pattern) seq.load(data.project.pattern);
+  $(".seq-bars").value = String(seq.state.bars);
+  const stepsEl = $(".steps");
+  function renderSteps() {
+    const L = seq.loopBeats(), n = L * 4; // 1/16 cells
+    if (stepsEl.childElementCount !== n) stepsEl.innerHTML = Array.from({ length: n }, (_, i) => `<i class="${i % 4 === 0 ? "beat" : ""}"></i>`).join("");
+    const filled = new Set(seq.state.pattern.events.map((e) => Math.floor(e.beat * 4 + 1e-6)));
+    [...stepsEl.children].forEach((c, i) => c.classList.toggle("on", filled.has(i)));
+    $(".seq-info").textContent = `${seq.state.pattern.events.length} hits · ${chops.bpm.toFixed(1)} BPM`;
+  }
+  function seqButtons() {
+    $(".rec").classList.toggle("on", seq.state.recording);
+    $(".seq-play").textContent = seq.state.playing ? "■ pattern" : "▶ pattern";
+  }
+  $(".rec").addEventListener("click", () => { stopSong(); syncSeqTempo(); seq.toggleRecord(); seqButtons(); });
+  $(".seq-play").addEventListener("click", () => {
+    if (seq.state.playing) seq.stop(); else { stopSong(); syncSeqTempo(); seq.start(); }
+    seqButtons();
+    saveProject();
+  });
+  $(".metro").addEventListener("change", (e) => { seq.state.metronome = e.target.checked; });
+  $(".seq-bars").addEventListener("change", (e) => { seq.state.bars = Number(e.target.value); seq.state.pattern.bars = seq.state.bars; renderSteps(); saveProject(); });
+  $(".seq-q").addEventListener("change", (e) => { seq.state.quant = e.target.value; });
+  $(".seq-swing").addEventListener("input", (e) => { seq.state.swing = Number(e.target.value); });
+  $(".seq-undo").addEventListener("click", () => { seq.undo(); renderSteps(); saveProject(); });
+  $(".seq-clear").addEventListener("click", () => { seq.clear(); renderSteps(); saveProject(); });
+  const download = (bytes, name, type) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([bytes], { type }));
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  const baseName = () => meta.title.replace(/[^\w-]+/g, "_").slice(0, 40);
+  $(".seq-midi").addEventListener("click", () => download(patternToMidi(seq.state.pattern, { bpm: chops.bpm, beatsPerBar: chops.beats_per_bar }), `${baseName()}-pattern.mid`, "audio/midi"));
+  $(".seq-wav").addEventListener("click", async () => {
+    const pat = seq.state.pattern;
+    if (!pat.events.length) return;
+    const seconds = (pat.bars * chops.beats_per_bar * 60) / chops.bpm + 2;
+    const off = new OfflineAudioContext(2, Math.ceil(seconds * buffer.sampleRate), buffer.sampleRate);
+    const oe = createEngine({ ctx: off, buffer, chops, output: off.destination });
+    for (let p = 0; p < 16; p++) oe.setPadParams(p, engine.getPadParams(p));
+    for (const [k, sl] of Object.entries(engine.getOverrides())) { const [b, p] = k.split(":").map(Number); oe.setOverride(b, p, sl); }
+    const q = { off: 0, "1/8": 0.5, "1/16": 0.25 }[seq.state.quant];
+    for (const e of pat.events) {
+      const step = q ? Math.round(e.beat / q) : 0;
+      const beat = q && step % 2 === 1 ? e.beat + seq.state.swing * q : e.beat;
+      oe.trigger(e.pad, e.vel, (beat * 60) / chops.bpm, e.bank);
+    }
+    $(".seq-info").textContent = "rendering…";
+    download(encodeWav(await off.startRendering()), `${baseName()}-pattern.wav`, "audio/wav");
+    renderSteps();
+  });
+  // note repeat: held pads retrigger at the chosen rate (synced to tempo)
+  const held = new Map(); // pad -> interval handle
+  function startRepeat(p, vel) {
+    if (!$(".repeat").checked || held.has(p)) return;
+    const ms = (Number($(".repeat-rate").value) * 60000) / chops.bpm;
+    held.set(p, setInterval(() => hit(p, vel), ms));
+  }
+  function stopRepeat(p) { clearInterval(held.get(p)); held.delete(p); }
+
   // ---- modes ----
   $(".mode").addEventListener("change", (e) => engine.setMode(e.target.value));
   $(".choke").addEventListener("change", (e) => engine.setChoke(e.target.checked));
@@ -413,10 +514,10 @@ export async function mountSong(root, { id, audio, input }) {
   };
   renderDevices(input.getDevices());
   const handlers = {
-    "pad-on": (e) => hit(e.detail.pad, e.detail.velocity),
-    "pad-off": (e) => engine.release(e.detail.pad),
+    "pad-on": (e) => { hit(e.detail.pad, e.detail.velocity); startRepeat(e.detail.pad, e.detail.velocity); },
+    "pad-off": (e) => { engine.release(e.detail.pad); stopRepeat(e.detail.pad); },
     bank: (e) => setBank(bank + e.detail.delta, true),
-    panic: () => { stopSong(); engine.stopAll(); },
+    panic: () => { stopSong(); engine.stopAll(); seq.stop(); seqButtons(); for (const p of [...held.keys()]) stopRepeat(p); },
     devices: (e) => renderDevices(e.detail.devices),
     "learn-state": (e) => {
       $(".learn-state").textContent = e.detail.active ? `Learning: tap pad ${e.detail.nextPad + 1} on your controller…` : "Pad map saved.";
@@ -429,12 +530,15 @@ export async function mountSong(root, { id, audio, input }) {
     if (/INPUT|TEXTAREA|SELECT/.test(e.target?.tagName ?? "")) return;
     if (e.code === "Enter") { e.preventDefault(); song ? stopSong() : playSong(); }
     if (e.code === "KeyT" && !e.repeat) tap();
+    if (e.code === "KeyP" && !e.repeat) $(".seq-play").click();
+    if (e.code === "KeyB" && !e.repeat) $(".rec").click();
   };
   document.addEventListener("keydown", onKey);
 
   indexBanks();
   setBank(0, true);
   renderLcd();
+  renderSteps();
   tick();
 
   return {
@@ -443,6 +547,8 @@ export async function mountSong(root, { id, audio, input }) {
       for (const [t, h] of Object.entries(handlers)) input.removeEventListener(t, h);
       document.removeEventListener("keydown", onKey);
       stopSong();
+      seq.stop();
+      for (const p of [...held.keys()]) stopRepeat(p);
       engine.stopAll();
       wave.destroy();
       video.removeAttribute("src");
