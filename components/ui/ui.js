@@ -39,6 +39,7 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="bank-nav"><button class="bank-prev" title="[">◂</button><span class="bank-label"></span><button class="bank-next" title="]">▸</button></div>
       </div>
     </div>
+    <div class="sections" title="Song sections (click to jump)"></div>
     <div class="banks" title="Click a bank to jump there"><div class="banks-track"></div><i class="banks-head"></i></div>
     <div class="wave"></div>
     <div class="transport">
@@ -76,6 +77,12 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="row"><button class="grab" title="Put the current playhead on this pad">grab from playhead</button><button class="unslice">reset slice</button>
           <button class="all">copy sound to all pads</button><button class="resetpad">reset sound</button></div>
         <p class="muted small">Hit a pad to select it. Drag or resize its region on the waveform to re-slice.</p></div>
+      <div class="panel ai"><h3>AI assist</h3>
+        <div class="row"><button class="ai-run">Analyze with AI</button><button class="ai-bank" disabled>load AI bank on pads</button></div>
+        <div class="ai-out muted small">Sends a 32 kbps mono copy to an OpenRouter audio model (≤ $0.05/song, cached). Sections above work offline.</div></div>
+      <div class="panel export"><h3>Export</h3>
+        <div class="row"><button class="exp-h2">install bank → Hydrogen kit</button><button class="exp-sfz">write bank → SFZ</button></div>
+        <div class="exp-out muted small">Exports the current bank (16 pads).</div></div>
       <div class="panel"><h3>MIDI</h3><ul class="devices"></ul>
         <div class="row"><button class="learn">Learn pads</button><button class="reset">Reset map</button></div>
         <div class="learn-state muted"></div></div>
@@ -309,6 +316,7 @@ export async function mountSong(root, { id, audio, input }) {
     $(".pos").textContent = c ? `bar ${padLabel(c)}` : "—";
     $(".banks-head").style.left = `${(t / meta.duration_s) * 100}%`;
     if (song && $(".follow").checked) followTo(t);
+    markSection(t);
     if (seq.state.playing) {
       const cell = Math.floor(seq.position() * 4);
       [...stepsEl.children].forEach((c, i) => c.classList.toggle("now", i === cell));
@@ -501,6 +509,79 @@ export async function mountSong(root, { id, audio, input }) {
     held.set(p, setInterval(() => hit(p, vel), ms));
   }
   function stopRepeat(p) { clearInterval(held.get(p)); held.delete(p); }
+
+  // ---- sections (offline structure; AI can relabel) ----
+  const SECTION_HUES = { intro: 200, verse: 140, chorus: 35, bridge: 280, outro: 200 };
+  let sectionList = [];
+  function renderSections() {
+    const el = $(".sections");
+    el.innerHTML = "";
+    for (const sc of sectionList) {
+      const b = document.createElement("button");
+      b.className = "section-seg";
+      b.style.left = `${(sc.start_s / meta.duration_s) * 100}%`;
+      b.style.width = `${((sc.end_s - sc.start_s) / meta.duration_s) * 100}%`;
+      b.style.setProperty("--hue", SECTION_HUES[sc.label] ?? (sc.letter.charCodeAt(0) * 47) % 360);
+      b.textContent = sc.label;
+      b.title = `${sc.label} (${sc.letter}) · bars ${sc.start_bar + 1}–${sc.end_bar} · ${fmt(sc.start_s)}`;
+      b.addEventListener("click", () => {
+        if (song) playSong(sc.start_s); else { video.currentTime = sc.start_s; followTo(sc.start_s + 1e-3); }
+      });
+      el.append(b);
+    }
+  }
+  function markSection(t) {
+    root.querySelectorAll(".section-seg").forEach((b, i) => b.classList.toggle("active", sectionList[i] && sectionList[i].start_s <= t && t < sectionList[i].end_s));
+  }
+  fetch(`/api/songs/${id}/sections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+    .then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) { sectionList = d.sections; renderSections(); } }).catch(() => {});
+
+  // ---- AI assist ----
+  let ai = null;
+  async function runAI() {
+    const out = $(".ai-out");
+    out.textContent = "Listening to the song with an audio model…";
+    $(".ai-run").disabled = true;
+    try {
+      const r = await fetch(`/api/songs/${id}/advise`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || r.status);
+      ai = body;
+      const chk = ai.bpm_meter_check || {};
+      out.innerHTML = `<b>${esc(ai.model)}</b>: ${ai.sections.length} sections · felt ${esc(chk.felt_bpm)} BPM (${esc(chk.meter_hint)})` +
+        (chk.bpm_mult_hint && chk.bpm_mult_hint !== 1 ? ` — suggests ${chk.bpm_mult_hint === 2 ? "×2" : "÷2"}` : "") + `<br>${esc(chk.notes || "")}`;
+      sectionList = ai.sections.map((sc, i) => ({ ...sc, letter: sc.letter ?? String.fromCharCode(65 + i) }));
+      renderSections();
+      $(".ai-bank").disabled = false;
+    } catch (err) {
+      const msg = String(err.message || err);
+      out.innerHTML = `<span class="error">${esc(/401|User not found/.test(msg) ? "OpenRouter rejected the API key (401). Put a valid key in OPENROUTER_API_KEY and restart choppad." : msg)}</span>`;
+    } finally {
+      $(".ai-run").disabled = false;
+    }
+  }
+  $(".ai-run").addEventListener("click", runAI);
+  $(".ai-bank").addEventListener("click", () => {
+    if (!ai) return;
+    ai.suggested_bank.slice(0, 16).forEach((ci, p) => {
+      const c = chops.chops[ci];
+      if (c) engine.setOverride(bank, p, { start: c.start, end: c.end });
+    });
+    renderBank();
+    saveProject();
+    $(".ai-out").insertAdjacentHTML("beforeend", `<br>Loaded on bank ${bank + 1}: ${ai.pad_labels.slice(0, 16).map(esc).join(", ")}`);
+  });
+
+  // ---- export ----
+  async function doExport(kind) {
+    const out = $(".exp-out");
+    out.textContent = "exporting…";
+    const r = await fetch(`/api/songs/${id}/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, bank }) });
+    const body = await r.json().catch(() => ({}));
+    out.innerHTML = r.ok ? `✓ ${esc(body.path)}${body.note ? "<br>" + esc(body.note) : ""}` : `<span class="error">${esc(body.error || r.status)}</span>`;
+  }
+  $(".exp-h2").addEventListener("click", () => doExport("hydrogen"));
+  $(".exp-sfz").addEventListener("click", () => doExport("sfz"));
 
   // ---- modes ----
   $(".mode").addEventListener("change", (e) => engine.setMode(e.target.value));

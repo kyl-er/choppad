@@ -45,10 +45,11 @@ input[type=checkbox] { accent-color: var(--accent); }
 .songs .empty { color: var(--muted); font-size: 13px; }
 
 /* ---------- main ---------- */
-.main { overflow-y: auto; padding: 14px 18px 40px; }
+.main { overflow-y: auto; overflow-x: hidden; min-width: 0; padding: 14px 18px 40px; }
 .welcome { max-width: 640px; margin: 12vh auto; text-align: center; }
 .welcome h1 { font: 700 42px var(--mono); color: var(--accent); }
-.song-view { display: grid; gap: 12px; max-width: 1400px; }
+.song-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; max-width: 1400px; }
+.song-view > * { min-width: 0; } /* a zoomed waveform scrolls inside; it must not widen the page */
 
 .lcd { display: flex; gap: 16px; align-items: center; justify-content: space-between; background: var(--lcd);
   border: 1px solid #1d3a26; border-radius: 8px; padding: 10px 14px; font-family: var(--mono); color: var(--lcd-text); }
@@ -85,7 +86,7 @@ input[type=checkbox] { accent-color: var(--accent); }
   color: var(--muted); background: #1c2024; border: 1px solid #2c3136; overflow: hidden; }
 .bank-seg.active { background: #3a3000; color: var(--accent2); border-color: var(--accent2); }
 .banks-head { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--accent2); pointer-events: none; }
-.wave { background: #050706; border: 1px solid var(--line); border-radius: 6px; padding: 4px 0; }
+.wave { overflow: hidden; background: #050706; border: 1px solid var(--line); border-radius: 6px; padding: 4px 0; }
 .region-label { font: 700 11px var(--mono); color: #fff; padding: 2px 4px; text-shadow: 0 1px 2px #000; }
 .wave .hit { background: rgba(255, 216, 74, .55) !important; }
 
@@ -122,3 +123,10 @@ input[type=checkbox] { accent-color: var(--accent); }
 .steps i.beat { background: #2e343a; }
 .steps i.on { background: var(--accent); }
 .steps i.now { outline: 2px solid var(--accent2); }
+
+/* ---------- M4: sections, AI, export ---------- */
+.sections { position: relative; height: 24px; }
+.section-seg { --hue: 140; position: absolute; top: 0; bottom: 0; padding: 0 4px; border-radius: 4px; font: 600 11px var(--mono);
+  text-align: left; overflow: hidden; white-space: nowrap; color: hsl(var(--hue) 70% 75%);
+  background: hsl(var(--hue) 40% 16%); border: 1px solid hsl(var(--hue) 40% 28%); }
+.section-seg.active { background: hsl(var(--hue) 55% 30%); color: #fff; border-color: hsl(var(--hue) 70% 55%); }

@@ -7,6 +7,7 @@ http://127.0.0.1:<port>/?id=<id> with /media/<id>/* static. See contracts/README
 
 import argparse
 import json
+import re
 import os
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -82,11 +83,37 @@ def reanalyze(media_dir: str, *, bpm=None, meter=None) -> tuple[dict, dict]:
     return analysis, regrid(media_dir, meter=meter)
 
 
+def _sections(media_dir, body):
+    from choppad_structure import sections
+    return sections(media_dir, force=bool(body.get("force")))
+
+
+def _advise(media_dir, body):
+    from choppad_advisor import advise
+    return advise(media_dir, force=bool(body.get("force")))
+
+
+def _export(media_dir, body):
+    """kind=hydrogen: install the bank as a Hydrogen drumkit; kind=sfz: write <id>-bank<N>.sfz next to audio.wav."""
+    from choppad_export import export_hydrogen, export_sfz
+    bank = int(body.get("bank") or 0)
+    sid = os.path.basename(media_dir)
+    title = json.load(open(os.path.join(media_dir, "meta.json"))).get("title", sid)
+    if body.get("kind") == "hydrogen":
+        name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
+        out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
+        export_hydrogen(media_dir, out, bank=bank, kit_name=name)
+        return {"path": out, "kit": name, "note": "Restart Hydrogen or use Drumkits > Rescan to see it."}
+    path = export_sfz(media_dir, bank=bank)
+    return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
+
+
 def make_server(media_root: str, port: int = 8960):
     """App + media + API server (see server.py). Import jobs run the full pipeline in a thread."""
     from server import make_server as _make
     os.makedirs(media_root, exist_ok=True)
-    return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze)
+    return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
+                 actions={"sections": _sections, "advise": _advise, "export": _export})
 
 
 def main():

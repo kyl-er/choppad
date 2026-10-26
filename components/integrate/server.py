@@ -87,7 +87,9 @@ class Jobs:
             self.update(jid, state="error", stage="error", error=f"{type(e).__name__}: {e}")
 
 
-def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, host: str = "127.0.0.1"):
+def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, actions=None,
+                host: str = "127.0.0.1"):
+    actions = actions or {}  # name -> fn(media_dir, body) -> json-able; POST /api/songs/<id>/<name>
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
 
@@ -264,6 +266,15 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 except (ValueError, KeyError) as e:
                     return self._err(400, str(e))
                 return self._json(chops)
+            m = re.match(r"^/api/songs/([^/]+)/([a-z]+)$", p)
+            if m and m.group(2) in actions:
+                d = self._song_dir(m.group(1))
+                if not d:
+                    return self._err(404, "unknown song")
+                try:
+                    return self._json(actions[m.group(2)](d, self._body()))
+                except Exception as e:  # noqa: BLE001 - shown in the UI
+                    return self._err(502 if m.group(2) == "advise" else 500, f"{type(e).__name__}: {e}")
             m = re.match(r"^/api/songs/([^/]+)/reanalyze$", p)
             if m and reanalyze:
                 d = self._song_dir(m.group(1))

@@ -37,18 +37,25 @@ export function createWaveform(container, { peaks, duration, media, onPadClick, 
   let pending = null;
   ws.on("ready", () => { ready = true; if (pending) { pending(); pending = null; } });
   const whenReady = (fn) => { if (ready) { try { fn(); } catch { /* not laid out yet */ } } else pending = fn; };
+  // keyed version: before "ready", keep only the latest call per key (regions added earlier are dropped by wavesurfer)
+  const queued = new Map();
+  const whenReadyLatest = (key, fn) => { if (ready) fn(); else queued.set(key, fn); };
+  ws.on("ready", () => { for (const fn of queued.values()) fn(); queued.clear(); });
+  function drawSlices(slices) {
+    regions.clearRegions();
+    for (const sl of slices) {
+      const el = document.createElement("span");
+      el.className = "region-label";
+      el.textContent = String(sl.pad + 1) + (sl.custom ? "*" : "");
+      regions.addRegion({ id: String(sl.pad), start: sl.start, end: sl.end, drag: true, resize: true, content: el,
+        color: sl.custom ? "rgba(255,216,74,0.30)" : BAR_COLORS[sl.bar % 4] });
+    }
+  }
 
   return {
     /** Show the current bank's pad slices [{pad, start, end, bar, custom}] — drag/resize edits a pad's slice. */
     showSlices(slices) {
-      regions.clearRegions();
-      for (const sl of slices) {
-        const el = document.createElement("span");
-        el.className = "region-label";
-        el.textContent = String(sl.pad + 1) + (sl.custom ? "*" : "");
-        regions.addRegion({ id: String(sl.pad), start: sl.start, end: sl.end, drag: true, resize: true, content: el,
-          color: sl.custom ? "rgba(255,216,74,0.30)" : BAR_COLORS[sl.bar % 4] });
-      }
+      whenReadyLatest("slices", () => drawSlices(slices));
     },
     flash(pad) {
       const r = regions.getRegions().find((x) => x.id === String(pad));
