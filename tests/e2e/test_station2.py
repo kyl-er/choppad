@@ -551,7 +551,8 @@ class Station2(unittest.TestCase):
         page.wait_for_function("document.querySelector('.daw-st')?.textContent === '→ Hydrogen (bank A)'", timeout=15000)
         self.assertEqual(len(entries("launch")), 1)
         other.wait_for_function("document.querySelector('.daw-st')?.textContent === '→ Hydrogen (bank A)'", timeout=15000)
-        self.assertEqual(page.evaluate(f"{S}.remote.daw"), {"open": True, "daw": "hydrogen", "bank": 0})
+        self.assertEqual(page.evaluate(f"{S}.remote.daw"), {"open": True, "bank": 0})
+        self.assertEqual(page.evaluate(f"{S}.remote.dawName"), "hydrogen")
         self.assertIn("→ HYDROGEN (BANK A)", page.locator(".daw-out").inner_text())
         # SYNC pushes the edits, STOP stops its transport
         page.locator(".daw-sync").click()

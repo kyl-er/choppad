@@ -292,7 +292,7 @@ export function moreSubpages(ctx) {
   ], extra: rsExtra, info: { html: () => "PATTERN = INSTANT OFFLINE RENDER · MASTER = LIVE RECORDING, REAL TIME" } };
 
   // ------------------------------------------------------------------ EXPORT 4: DAW bridge
-  const bridgeText = () => { const d = session.remote.daw; return d.open ? `→ ${(d.daw ?? "DAW").toUpperCase()} (BANK ${letter(d.bank ?? 0)})` : "NO BRIDGE OPEN"; };
+  const bridgeText = () => { const d = session.remote.daw; return d.open ? `→ ${(session.remote.dawName ?? "DAW").toUpperCase()} (BANK ${letter(d.bank ?? 0)})` : "NO BRIDGE OPEN"; };
   const dawRun = (command, label) => async () => {
     out.daw = `${label}…`; ctx.refresh();
     const r = await session.dawCommand("hydrogen", command);
@@ -304,7 +304,7 @@ export function moreSubpages(ctx) {
     act("Sync", { cls: "daw-sync", disabled: () => !session.remote.daw.open, fn: dawRun("sync", "syncing") }),
     act("Stop", { cls: "daw-stop", val: "■", disabled: () => !session.remote.daw.open, fn: dawRun("stop", "stopping") }),
     blank(), blank(), blank(),
-  ], info: { cls: "daw-out", html: () => `BRIDGE: ${bridgeText()}${out.daw ? `<br>${out.daw}` : "<br>OPENS THE CURRENT BANK AS A KIT AND THE PATTERN IN HYDROGEN; SYNC PUSHES YOUR EDITS. THERE IS NO CLOSE: QUIT HYDROGEN ITSELF."}` } };
+  ], info: { cls: "daw-out", html: () => `BRIDGE: ${bridgeText()}${out.daw ? `<br>${out.daw}` : "<br>OPENS THIS BANK AND THE PATTERN IN HYDROGEN · NO CLOSE: QUIT HYDROGEN"}` } };
 
   // ------------------------------------------------------------------ AI 2: stems
   const stemsList = () => (meta.stems?.length ? meta.stems : null);

@@ -825,7 +825,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
 
   return {
     id, meta, analysis, peaks, buffer, video, store, engine, seq,
-    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, daw: daw.name, bank: daw.bank }; }, get primary() { return primary; }, flush },
+    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, get dawName() { return daw.name; }, get primary() { return primary; }, flush },
     on: (type, fn) => events.addEventListener(type, fn),
     off: (type, fn) => events.removeEventListener(type, fn),
     position, playSong, stopSong,

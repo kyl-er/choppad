@@ -118,7 +118,7 @@ export function mountShell(root, session, env) {
     if (now - lastLook < 250) return;
     lastLook = now;
     const dw = session.remote.daw, primary = session.remote.primary;
-    const a = dw.open ? `→ ${dw.daw ? dw.daw[0].toUpperCase() + dw.daw.slice(1) : "DAW"} (bank ${String.fromCharCode(65 + ((dw.bank ?? 0) % 26))})` : "";
+    const a = dw.open ? `→ ${session.remote.dawName ? session.remote.dawName[0].toUpperCase() + session.remote.dawName.slice(1) : "DAW"} (bank ${String.fromCharCode(65 + ((dw.bank ?? 0) % 26))})` : "";
     if (dawEl.textContent !== a) { dawEl.textContent = a; dawEl.hidden = !a; }
     const r = primary ? "" : "display only";
     if (roleEl.textContent !== r) { roleEl.textContent = r; roleEl.hidden = !r; roleEl.title = r ? "Another tab on this song is the primary one: it plays agent and remote commands. This tab only shows." : ""; }
