@@ -230,6 +230,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._static(MIDI_JS)
             if p.startswith("/media/"):
                 parts = p[len("/media/"):].split("/")
+                if len(parts) == 3 and parts[1] == "stretch":  # W3: rendered time-stretched slices
+                    if not ID_RE.match(parts[0]) or not re.match(r"^[0-9a-f]{16}\.wav$", parts[2]):
+                        return self._err(404, "not found")
+                    return self._media(os.path.join(media_root, parts[0], "stretch", parts[2]))
                 if len(parts) != 2 or not ID_RE.match(parts[0]) or not re.match(r"^[\w.-]+$", parts[1]):
                     return self._err(404, "not found")
                 return self._media(os.path.join(media_root, parts[0], parts[1]))
@@ -285,6 +289,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._err(404, "unknown song")
                 try:
                     return self._json(actions[m.group(2)](d, self._body()))
+                except ValueError as e:  # bad input for the action (W3: stretch, export of a mixed kit, ...)
+                    return self._err(400, str(e))
                 except Exception as e:  # noqa: BLE001 - shown in the UI
                     return self._err(502 if m.group(2) == "advise" else 500, f"{type(e).__name__}: {e}")
             m = re.match(r"^/api/songs/([^/]+)/reanalyze$", p)

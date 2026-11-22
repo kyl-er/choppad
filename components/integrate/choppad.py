@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(_COMPONENTS, "..", "contracts"))
 from choppad_ingest import ingest as _ingest
 from choppad_rhythm import analyze as _analyze
 from choppad_chop import chop as _chop
+from choppad_stretch import StretchError as _StretchError, ratio_for_tempo as _ratio_for_tempo, stretch_slice as _stretch_slice
 from choppad_transient import chop_transients as _chop_transients, detect_onsets as _detect_onsets
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -123,7 +124,7 @@ def _export(media_dir, body):
     if body.get("kind") == "hydrogen":
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        export_hydrogen(media_dir, out, bank=bank, kit_name=name)
+        export_hydrogen(media_dir, out, bank=bank, kit_name=name, overrides=body.get("overrides"))
         note = "Restart Hydrogen or use Drumkits > Rescan to see it."
         fx = body.get("fx")
         if fx:
@@ -134,8 +135,48 @@ def _export(media_dir, body):
                         apply_to_file(os.path.join(out, wav), fx)
                 note = "Tone/reverb baked into the samples. " + note
         return {"path": out, "kit": name, "note": note}
-    path = export_sfz(media_dir, bank=bank)
+    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"))
     return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
+
+
+# ---- W3: time-stretch ----
+def _pad_slice(media_dir, bank, pad, project=None):
+    """(start, end) of the slice on (bank, pad): the custom slice if the project has one, else the grid/transient chop."""
+    chops = json.load(open(os.path.join(media_dir, "chops.json")))
+    from server import load_project
+    ov = ((project or load_project(media_dir)).get("overrides") or {}).get(f"{bank}:{pad}")
+    if ov and ov.get("end", 0) > ov.get("start", 0) and not ov.get("song"):
+        return float(ov["start"]), float(ov["end"])
+    try:
+        ch = chops["chops"][chops["banks"][bank][pad]]
+    except (IndexError, TypeError):
+        raise ValueError(f"pad {pad} on bank {bank} is empty")
+    return ch["start"], ch["end"]
+
+
+def _stretch(media_dir, body):
+    """POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]}
+    Renders the pad's slice at `ratio` x its length (same pitch) into media/<id>/stretch/<hash>.wav (cached).
+    target_bpm: the slice is fitted so the song's tempo (or source_bpm) becomes target_bpm.
+    Returns {url, duration, ratio, hash, start, end}."""
+    sid = os.path.basename(media_dir)
+    try:
+        if body.get("start") is not None and body.get("end") is not None:
+            start, end = float(body["start"]), float(body["end"])
+        else:
+            start, end = _pad_slice(media_dir, int(body.get("bank") or 0), int(body.get("pad") or 0))
+        if body.get("ratio") is not None:
+            ratio = float(body["ratio"])
+        elif body.get("target_bpm") is not None:
+            src = float(body.get("source_bpm") or json.load(open(os.path.join(media_dir, "chops.json")))["bpm"])
+            ratio = _ratio_for_tempo(src, float(body["target_bpm"]))
+        else:
+            raise _StretchError("ratio or target_bpm required")
+        r = _stretch_slice(media_dir, start, end, ratio)
+    except (_StretchError, ValueError) as e:
+        raise ValueError(str(e))
+    return {"url": f"/media/{sid}/stretch/{r['file']}", "duration": r["duration"], "ratio": r["ratio"], "hash": r["hash"],
+            "start": start, "end": end}
 
 
 def make_server(media_root: str, port: int = 8960):
@@ -143,7 +184,7 @@ def make_server(media_root: str, port: int = 8960):
     from server import make_server as _make
     os.makedirs(media_root, exist_ok=True)
     return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
-                 actions={"sections": _sections, "advise": _advise, "export": _export})
+                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch})
 
 
 def main():

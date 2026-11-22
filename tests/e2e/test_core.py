@@ -168,6 +168,104 @@ class CoreScreen(unittest.TestCase):
         self.assertEqual(errors + errors2, [])
         page.close()
 
+    # ------------------------------------------------------------------ 2. time-stretch
+    RENDER_JS = """async () => {
+        const s = window.choppad.song.session;
+        const bytes = new Uint8Array(await s.renderPatternWav());
+        const dv = new DataView(bytes.buffer);
+        const ch = dv.getUint16(22, true), sr = dv.getUint32(24, true), n = (bytes.length - 44) / 2 / ch;
+        const x = new Float32Array(n);
+        for (let i = 0; i < n; i++) x[i] = dv.getInt16(44 + i * 2 * ch, true) / 32768;
+        let peak = 0; for (const v of x) peak = Math.max(peak, Math.abs(v));
+        let last = 0; for (let i = n - 1; i >= 0; i--) if (Math.abs(x[i]) > peak * 0.002) { last = i; break; }
+        const head = Array.from(x.slice(0, Math.floor(0.25 * sr)));
+        return { sr, peak, length: last / sr, head };
+    }"""
+
+    def render_pad0(self, page):
+        return page.evaluate(self.RENDER_JS)
+
+    def test_stretch_pad(self):
+        page, errors = self.open_song()
+        S = self.S
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.toggleStep', pad: 0, step: 0, bank: 0 }})")
+        sl = page.evaluate(f"{S}.engine.getSlice(0, 0)")
+        dur = sl["end"] - sl["start"]
+        base = self.render_pad0(page)
+        self.assertGreater(base["peak"], 0.01)
+        self.assertAlmostEqual(base["length"], dur, delta=0.012)
+
+        # fit the pad to a faster tempo from the Time-stretch panel
+        bpm = page.evaluate(f"{S}.store.get().chops.bpm")
+        target = bpm * 1.25
+        ratio = bpm / target
+        page.locator(".st-bpm").fill(str(target))
+        page.locator(".st-pad").click()
+        page.wait_for_function(f"{S}.store.get().project.overrides['0:0']?.stretch && {S}.engine.getPadBuffer(0, 0)", timeout=60000)
+        ov = page.evaluate(f"{S}.store.get().project.overrides['0:0']")
+        self.assertAlmostEqual(ov["stretch"]["ratio"], ratio, places=3)
+        self.assertEqual((ov["start"], ov["end"]), (sl["start"], sl["end"]))
+        self.assertIn("stretched", page.locator('.pad[data-pad="0"]').get_attribute("class"))
+        self.assertAlmostEqual(page.evaluate(f"{S}.engine.getPadBuffer(0, 0).duration"), dur * ratio, delta=0.004)
+
+        # the offline WAV render uses it: its length follows the ratio and the audio is the stretched audio
+        r = self.render_pad0(page)
+        self.assertAlmostEqual(r["length"], dur * ratio, delta=0.012)
+        self.assertLess(abs(r["length"] - dur * ratio), abs(r["length"] - dur))
+        # (the master limiter delays the render by a few ms, so look for the best alignment)
+        corr = """([head, alt]) => {
+            const n = 8000, from = 600;
+            let bestC = -1;
+            for (let lag = 0; lag < 700; lag++) {
+                let dot = 0, na = 0, nb = 0;
+                for (let i = from; i < from + n; i++) { const x = head[i + lag] ?? 0, y = alt[i]; dot += x * y; na += x * x; nb += y * y; }
+                bestC = Math.max(bestC, dot / Math.sqrt(na * nb + 1e-12));
+            }
+            return bestC;
+        }"""
+        alt = page.evaluate(f"Array.from({S}.engine.getPadBuffer(0, 0).getChannelData(0).slice(0, 20000))")
+        best = page.evaluate(corr, [r["head"], alt])
+        self.assertGreater(best, 0.95, "render does not play the stretched buffer")
+
+        # pitch works on top: +12 semitones halves the rendered length again
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pad.set', pad: 0, params: {{ pitch: 12 }} }})")
+        self.assertAlmostEqual(self.render_pad0(page)["length"], dur * ratio / 2, delta=0.012)
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pad.set', pad: 0, params: {{ pitch: 0 }} }})")
+
+        # a hit on the pad plays the stretched sound live
+        page.keyboard.press("KeyZ")
+        peak = page.evaluate("""async () => {
+            const a = window.choppad.audio.analyser, buf = new Float32Array(a.fftSize);
+            let peak = 0;
+            for (let i = 0; i < 20; i++) { a.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => setTimeout(r, 15)); }
+            return peak;
+        }""")
+        self.assertGreater(peak, 0.001)
+
+        # exported with the stretched sound (SFZ points at the rendering)
+        code, out = api(self.base, f"/api/songs/{self.sid}/export", {"kind": "sfz", "bank": 0, "overrides": ov and {"0:0": ov}})
+        self.assertEqual(code, 200, out)
+        sfz = open(out["path"]).read()
+        self.assertIn("sample=stretch/" + ov["stretch"]["url"].rsplit("/", 1)[1], sfz)
+
+        # saved, and still there (buffer loaded again) after a reload
+        page.wait_for_timeout(700)
+        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        self.assertEqual(saved["overrides"]["0:0"]["stretch"]["url"], ov["stretch"]["url"])
+        page.close()
+        page, errors2 = self.open_song()
+        self.assertAlmostEqual(page.evaluate(f"{S}.engine.getPadBuffer(0, 0).duration"), dur * ratio, delta=0.004)
+        self.assertAlmostEqual(self.render_pad0(page)["length"], dur * ratio, delta=0.012)
+
+        # reset pad goes back to the song region
+        page.locator(".st-clear").click()
+        page.wait_for_function(f"!{S}.store.get().project.overrides['0:0']?.stretch && !{S}.engine.getPadBuffer(0, 0)")
+        back = self.render_pad0(page)
+        self.assertAlmostEqual(back["length"], dur, delta=0.012)
+        self.assertLess(page.evaluate(corr, [back["head"], alt]), 0.8, "control: the plain slice must not match the stretched audio")
+        self.assertEqual(errors + errors2, [])
+        page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

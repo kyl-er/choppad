@@ -95,6 +95,43 @@ export function reduce(state, action) {
       return withProject(state, { overrides });
     }
 
+    case "slice.stretch": {   // W3: attach (or, with stretch null, remove) a time-stretched rendering of the pad's slice
+      if (!isPad(a.pad)) return state;
+      const key = `${a.bank}:${a.pad}`;
+      const cur = state.project.overrides[key];
+      if (!a.stretch) {
+        if (!cur?.stretch) return state;
+        const { stretch: _s, ...rest } = cur;
+        return withProject(state, { overrides: { ...state.project.overrides, [key]: rest } });
+      }
+      const ratio = Number(a.stretch.ratio);
+      if (!(ratio > 0) || typeof a.stretch.url !== "string" || !a.stretch.url) return state;
+      let base = cur;
+      if (!base) {
+        const ch = state.chops?.chops?.[state.chops?.banks?.[a.bank]?.[a.pad]];
+        if (!ch) return state;
+        base = { start: ch.start, end: ch.end };
+      }
+      return withProject(state, { overrides: { ...state.project.overrides, [key]: { ...base, stretch: { ratio, url: a.stretch.url } } } });
+    }
+
+    case "kit.load": {   // W3: put a kit's pads (kit.json `pads`, 16 entries or null) on a bank; null = leave the pad alone
+      const bank = Number(a.bank);
+      if (!Number.isInteger(bank) || bank < 0 || !Array.isArray(a.pads)) return state;
+      const overrides = { ...state.project.overrides };
+      let pads = state.project.pads;
+      a.pads.slice(0, PADS).forEach((k, pad) => {
+        if (!k || typeof k.song_id !== "string" || !(k.end > k.start) || !(k.start >= 0)) return;
+        const o = { start: k.start, end: k.end };
+        if (k.song_id !== a.song) o.song = k.song_id;   // `song` = the open song's id: its own slices need no source
+        if (k.stretch && k.stretch.url && Number(k.stretch.ratio) > 0) o.stretch = { ratio: Number(k.stretch.ratio), url: k.stretch.url };
+        overrides[`${bank}:${pad}`] = o;
+        const params = pick(k.params, PAD_KEYS);
+        if (Object.keys(params).length) pads = pads.map((P, i) => (i === pad ? { ...P, ...params } : P));
+      });
+      return withProject(state, { overrides, pads });
+    }
+
     case "fx.set": {
       const params = pick(a.params, FX_KEYS);
       if (same(state.project.fx, params)) return state;

@@ -32,6 +32,21 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   video.preload = "auto";
   video.src = `/media/${id}/video.mp4`;
 
+  // W3: a pad can play a time-stretched rendering of its slice, or a slice of another song (kits). Buffers are fetched and
+  // decoded once (cached by url) and handed to the engine; none of this happens on the trigger path.
+  const decoded = new Map();   // url -> AudioBuffer
+  const loading = new Map();   // url -> Promise<AudioBuffer>
+  const pending = new Set();   // promises of in-flight pad-source loads
+  const loadBuffer = (url) => {
+    if (decoded.has(url)) return Promise.resolve(decoded.get(url));
+    if (!loading.has(url)) {
+      loading.set(url, fetch(url).then((r) => { if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`); return r.arrayBuffer(); })
+        .then((b) => ctx.decodeAudioData(b)).then((buf) => { decoded.set(url, buf); return buf; })
+        .finally(() => loading.delete(url)));
+    }
+    return loading.get(url);
+  };
+  decoded.set(`/media/${id}/audio.wav`, buffer);
   const events = new EventTarget();
   const emit = (type, detail) => events.dispatchEvent(new CustomEvent(type, { detail }));
   const store = createStore(reduce, initialState({ project: data.project, chops: data.chops }));
@@ -79,11 +94,23 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     for (const [k, sl] of Object.entries(s.project.overrides)) {
       const [b, p] = k.split(":").map(Number);
       engine.setOverride(b, p, sl);
+      bindSource(b, p, sl);
     }
     fx.set(s.project.fx);
     seq.state.quant = s.settings.quant;
     seq.state.swing = s.settings.swing;
     seq.state.metronome = s.settings.metronome;
+  }
+  /** Point the engine at the right sound source for (bank, pad) given its override (stretch url, other song, or the song). */
+  function bindSource(b, p, o) {
+    const same = () => { const cur = store.get().project.overrides[`${b}:${p}`]; return cur && cur.song === o.song && cur.stretch?.url === o.stretch?.url; };
+    if (o?.stretch) {
+      const job = loadBuffer(o.stretch.url).then((buf) => { if (same()) engine.setPadBuffer(b, p, buf, { whole: false }); }).catch(() => {});
+      pending.add(job); job.finally(() => pending.delete(job));
+    } else if (o?.song && o.song !== id) {
+      const job = loadBuffer(`/media/${o.song}/audio.wav`).then((buf) => { if (same()) engine.setPadBuffer(b, p, buf, { whole: true }); }).catch(() => {});
+      pending.add(job); job.finally(() => pending.delete(job));
+    } else engine.setPadBuffer(b, p, null);
   }
   let saveTimer = 0;
   let chopToBank = [];
@@ -110,6 +137,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
         if (P.overrides[k] === Q.overrides[k]) continue;
         const [b, p] = k.split(":").map(Number);
         engine.setOverride(b, p, P.overrides[k] ?? null);
+        bindSource(b, p, P.overrides[k]);
       }
     }
     if (P.fx !== Q.fx) fx.set(P.fx);
@@ -122,6 +150,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     }, SAVE_DELAY_MS);
   });
   applyAll(store.get());
+  if (pending.size) { onProgress("Loading stretched and kit sounds…"); await Promise.all([...pending]); }
   indexBanks(store.get().chops);
   seq.load(store.get().project.pattern);
   syncSeqTempo();
@@ -262,7 +291,13 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     ofx.output.connect(off.destination);
     const oe = createEngine({ ctx: off, buffer, chops, output: ofx.input });
     for (let p = 0; p < PADS; p++) oe.setPadParams(p, project.pads[p]);
-    for (const [k, sl] of Object.entries(project.overrides)) { const [b, p] = k.split(":").map(Number); oe.setOverride(b, p, sl); }
+    await Promise.all([...pending]);
+    for (const [k, sl] of Object.entries(project.overrides)) {
+      const [b, p] = k.split(":").map(Number);
+      oe.setOverride(b, p, sl);
+      const alt = sl.stretch ? decoded.get(sl.stretch.url) : sl.song && sl.song !== id ? decoded.get(`/media/${sl.song}/audio.wav`) : null;
+      if (alt) oe.setPadBuffer(b, p, alt, { whole: !sl.stretch });
+    }
     const q = { off: 0, "1/8": 0.5, "1/16": 0.25 }[settings.quant];
     for (const e of pat.events) {
       const step = q ? Math.round(e.beat / q) : 0;
@@ -300,10 +335,37 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   /** kind: "hydrogen" | "sfz". Returns { ok, path, note, error }. */
   async function exportBank(kind) {
     const { bank, project } = store.get();
-    const r = await postJson(`/api/songs/${id}/export`, { kind, bank, fx: project.fx });
+    const r = await postJson(`/api/songs/${id}/export`, { kind, bank, fx: project.fx, overrides: project.overrides });
     const body = await r.json().catch(() => ({}));
     return { ok: r.ok, ...body, error: r.ok ? undefined : (body.error || r.status) };
   }
+
+  // ---- time-stretch (rubberband on the server; the result is a cached WAV the pad plays instead of the song region) ----
+  /** Fit the slice on (bank, pad) to `{ target_bpm }` or `{ ratio }` (new length / old). Resolves { ok, ratio, url, duration, error }. */
+  async function stretchPad(bank, pad, how) {
+    const sl = engine.getSlice(bank, pad);
+    if (!sl) return { ok: false, error: `pad ${pad + 1} is empty` };
+    const src = sl.song ?? id;   // a kit pad from another song is rendered from that song's audio
+    const r = await postJson(`/api/songs/${src}/stretch`, { bank, pad, start: sl.start, end: sl.end, ...how });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
+    store.dispatch({ type: "slice.stretch", bank, pad, stretch: { ratio: body.ratio, url: body.url } });
+    await Promise.all([...pending]);
+    return { ok: true, ...body };
+  }
+  /** Stretch every pad on the current bank. Resolves the list of per-pad results (empty pads skipped). */
+  async function stretchBank(how) {
+    const { bank } = store.get();
+    const jobs = [];
+    for (let p = 0; p < PADS; p++) if (engine.getSlice(bank, p)) jobs.push(stretchPad(bank, p, how).then((r) => ({ pad: p, ...r })));
+    return Promise.all(jobs);
+  }
+  /** Stretch every pad the pattern uses (all banks it touches). */
+  async function stretchPattern(how) {
+    const seen = new Set(store.get().project.pattern.events.map((e) => `${e.bank}:${e.pad}`));
+    return Promise.all([...seen].map((k) => { const [b, p] = k.split(":").map(Number); return stretchPad(b, p, how).then((r) => ({ bank: b, pad: p, ...r })); }));
+  }
+  function clearStretch(bank, pad) { store.dispatch({ type: "slice.stretch", bank, pad, stretch: null }); }
 
   function panic() {
     stopSong();
@@ -325,6 +387,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     regrid, reanalyze,
     toggleRecord, togglePattern, patternMidi, renderPatternWav,
     loadSections, advise, loadAiBank, exportBank,
+    stretchPad, stretchBank, stretchPattern, clearStretch,
     panic,
     destroy() {
       unsubscribe();

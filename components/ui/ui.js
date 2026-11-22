@@ -80,6 +80,13 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="row grid-btns"></div><div class="row meter-btns"></div>
         <div class="row tempo-btns"></div>
         <div class="row"><button class="tap" title="T">tap tempo (T)</button><span class="tap-bpm muted">tap 4×…</span><button class="tap-apply" disabled>apply</button></div></div>
+      <div class="panel stretch"><h3>Time-stretch</h3>
+        <div class="row"><label>fit to <input class="st-bpm" type="number" min="30" max="300" step="0.1" style="width:5em"> BPM</label></div>
+        <div class="row"><button class="st-pad">pad</button><button class="st-bank">bank</button><button class="st-pattern">pattern pads</button><button class="st-clear">reset pad</button></div>
+        <div class="st-out muted small">Same pitch, new length (rubberband). A stretched pad plays its rendering instead of the song region; pitch still works on top.</div></div>
+      <div class="panel kit"><h3>Kit</h3>
+        <div class="row"><input class="kit-name" placeholder="kit name" style="width:9em"><button class="kit-save">save bank as kit</button></div>
+        <div class="kit-out muted small">Kits (16 pads, any songs) are listed in the library on the left; click one to put it on this bank.</div></div>
       <div class="panel"><h3>Pads</h3>
         <label>mode <select class="mode"><option value="oneshot">one-shot</option><option value="gate">gate (hold)</option><option value="playthrough">play-through</option></select></label>
         <label><input type="checkbox" class="choke" checked> choke</label>
@@ -166,9 +173,11 @@ export async function mountSong(root, { id, audio, input }) {
       const el = padEls[p];
       el.classList.toggle("empty", !c);
       el.classList.toggle("custom", !!c?.custom);
+      el.classList.toggle("stretched", !!c?.stretch);   // W3: plays a time-stretched rendering
+      el.classList.toggle("foreign", !!c?.song);         // W3: slice of another song (kit)
       el.classList.toggle("selected", p === selected);
       el.querySelector(".pad-label").textContent = c ? (c.custom ? "★ " + fmt(c.start) : padLabel(c)) : "";
-      el.querySelector(".pad-time").textContent = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) : "";
+      el.querySelector(".pad-time").textContent = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) + (c.stretch ? ` ×${c.stretch.ratio.toFixed(2)}` : "") + (c.song ? " ♪" : "") : "";
       el.style.setProperty("--hue", c ? (c.custom ? 48 : BAR_HUES[c.bar % 4]) : 0);
     }
   }
@@ -225,6 +234,19 @@ export async function mountSong(root, { id, audio, input }) {
   btn(".tempo-btns", "beat −1", () => regrid({ shift: -1 }));
   btn(".tempo-btns", "beat +1", () => regrid({ shift: 1 }));
   btn(".tempo-btns", "set bar 1 = last pad", () => regrid({ bar1: true }));
+
+  // ---- time-stretch ----
+  const stBpm = $(".st-bpm");
+  stBpm.value = st().chops.bpm.toFixed(1);
+  const stretchTo = () => ({ target_bpm: Number(stBpm.value) });
+  const stretchDone = (r) => {
+    const list = [].concat(r), bad = list.filter((x) => !x.ok);
+    $(".st-out").innerHTML = bad.length ? `<span class="error">${esc(bad[0].error)}</span>` : `✓ ${list.length} pad${list.length === 1 ? "" : "s"} fitted to ${stBpm.value} BPM`;
+  };
+  $(".st-pad").addEventListener("click", async () => { $(".st-out").textContent = "stretching…"; stretchDone(await session.stretchPad(st().bank, st().selected, stretchTo())); });
+  $(".st-bank").addEventListener("click", async () => { $(".st-out").textContent = "stretching…"; stretchDone(await session.stretchBank(stretchTo())); });
+  $(".st-pattern").addEventListener("click", async () => { $(".st-out").textContent = "stretching…"; stretchDone(await session.stretchPattern(stretchTo())); });
+  $(".st-clear").addEventListener("click", () => session.clearStretch(st().bank, st().selected));
 
   // ---- LCD, volume, meter ----
   function renderLcd() {

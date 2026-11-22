@@ -59,6 +59,39 @@ class CoreApi(unittest.TestCase):
         self.assertEqual(code, 400)
         self.call(f"/api/songs/{self.id}/regrid", {"grid": "1/4"})
 
+    # ---------------- time-stretch ----------------
+    def test_stretch_endpoint(self):
+        import wave
+        code, ch = self.call(f"/api/songs/{self.id}/regrid", {"mode": "grid", "grid": "1/4"})
+        pad0 = ch["chops"][ch["banks"][0][0]]
+        dur = pad0["end"] - pad0["start"]
+        code, r = self.call(f"/api/songs/{self.id}/stretch", {"bank": 0, "pad": 0, "ratio": 2.0})
+        self.assertEqual(code, 200, r)
+        self.assertAlmostEqual(r["duration"], dur * 2, delta=0.003)
+        self.assertEqual((r["start"], r["end"]), (pad0["start"], pad0["end"]))
+        self.assertRegex(r["url"], rf"^/media/{self.id}/stretch/[0-9a-f]{{16}}\.wav$")
+        with urllib.request.urlopen(self.base + r["url"]) as resp:
+            body = resp.read()
+        self.assertEqual(body[:4], b"RIFF")
+        path = os.path.join(self.media_root, self.id, "stretch", r["url"].rsplit("/", 1)[1])
+        with wave.open(path) as w:
+            self.assertAlmostEqual(w.getnframes() / w.getframerate(), r["duration"], delta=1e-4)
+        # cached: same hash, same file; target_bpm = source tempo / target (120 -> 150 BPM)
+        code, r2 = self.call(f"/api/songs/{self.id}/stretch", {"bank": 0, "pad": 0, "ratio": 2.0})
+        self.assertEqual(r2["hash"], r["hash"])
+        code, r3 = self.call(f"/api/songs/{self.id}/stretch", {"bank": 0, "pad": 0, "target_bpm": 150})
+        self.assertAlmostEqual(r3["ratio"], 120 / 150, places=3)
+        # explicit start/end win over the pad (custom slice), bad input is a 400
+        code, r4 = self.call(f"/api/songs/{self.id}/stretch", {"start": 3.0, "end": 3.5, "ratio": 1.5})
+        self.assertAlmostEqual(r4["duration"], 0.75, delta=0.003)
+        for bad in ({"bank": 0, "pad": 0}, {"bank": 0, "pad": 0, "ratio": 99}, {"bank": 7, "pad": 3, "ratio": 1.2},
+                    {"start": 5, "end": 4, "ratio": 1.2}):
+            code, e = self.call(f"/api/songs/{self.id}/stretch", bad)
+            self.assertEqual(code, 400, bad)
+            self.assertIn("error", e)
+        self.assertEqual(self.call("/media/%s/stretch/../audio.wav" % self.id)[0], 404)
+        self.assertEqual(self.call(f"/media/{self.id}/stretch/nothex.wav")[0], 404)
+
 
 if __name__ == "__main__":
     unittest.main()
