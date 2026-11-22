@@ -14,6 +14,9 @@ Routes
   POST /api/songs/<id>/actions   {actions:[...]} -> contracts §8 reducer -> project.json -> {project, applied, ...}
   GET  /api/songs/<id>/events    server-sent events: actions | chops | transport (contracts §10)
   POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
+                                 with `local: true` (a tab reporting its own hit/play/stop): not rebroadcast, only handed to
+                                 an open DAW bridge (rate limited; 429 when too fast, delivered:false when no bridge)
+  `daw` event {open, daw, bank} on the song stream (first message of every stream, and on open/close of a bridge)
   POST /api/songs/<id>/daw       {daw: hydrogen|ardour, command: open|sync|play|stop, bank?} -> DAW bridge (contracts §11)
 Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
@@ -26,6 +29,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -198,13 +202,38 @@ class Jobs:
             self.update(jid, state="error", stage="error", error=f"{type(e).__name__}: {e}")
 
 
+class TokenBucket:
+    """Allows `rate` events a second with bursts up to `burst`; thread-safe, never blocks."""
+    def __init__(self, rate, burst):
+        self.rate, self.burst, self.tokens, self.t = float(rate), float(burst), float(burst), time.monotonic()
+        self.lock = threading.Lock()
+
+    def take(self):
+        with self.lock:
+            now = time.monotonic()
+            self.tokens = min(self.burst, self.tokens + (now - self.t) * self.rate)
+            self.t = now
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True
+            return False
+
+
+LOCAL_RATE = (80, 40)  # a tab's own pad hits and play/stop handed to a DAW bridge: events per second, burst
+
+
 def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, actions=None,
-                host: str = "127.0.0.1", on_transport=None):
+                host: str = "127.0.0.1", on_transport=None, daw_state=None):
     actions = actions or {}  # name -> fn(media_dir, body) -> json-able; POST /api/songs/<id>/<name>
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
     hub = Hub()
     view_state = {}  # song id -> {bank, selected, settings, sections}: what the player looks at (never saved)
+    local_buckets, buckets_guard = {}, threading.Lock()  # song id -> TokenBucket for `local` transport
+
+    def daw_of(sid):
+        """{open, daw, bank} of the DAW bridge holding song `sid` (W2 DawManager.state_for), or "closed"."""
+        return daw_state(sid) if daw_state else {"open": False, "daw": None, "bank": None}
     locks, locks_guard = {}, threading.Lock()
 
     def song_lock(sid):
@@ -304,6 +333,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 self.wfile.write(b"retry: 1500\n: connected\n\n")
+                # CHOP-11: a new stream starts knowing whether a DAW bridge is open for this song
+                self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(sid), separators=(',', ':'))}\n\n".encode())
                 self.wfile.flush()
                 while True:
                     try:
@@ -366,10 +397,26 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     msg["bank"] = body["bank"]
             if cmd == "play-song" and isinstance(body.get("from"), (int, float)):
                 msg["from"] = body["from"]
+            if body.get("local") is True:
+                return self._local_transport(sid, msg)
             listeners = hub.publish(sid, "transport", msg)
             if on_transport:  # W2: mirror to open DAW bridges (never lets a DAW problem fail the request)
                 on_transport(sid, msg)
             return self._json({"ok": True, "listeners": listeners})
+
+        # ---- CHOP-11: what a tab played itself (pad hit, pattern play/stop) goes to the open DAW bridge only ----
+        def _local_transport(self, sid, msg):
+            """`local: true`: the tab already did it. NOT published to the other tabs (they would play it too); handed to
+            the DAW bridge when one is open, rate limited per song. Answers at once; never waits on the DAW."""
+            if not daw_of(sid).get("open"):
+                return self._json({"ok": True, "delivered": False, "reason": "no bridge open"})
+            with buckets_guard:
+                bucket = local_buckets.setdefault(sid, TokenBucket(*LOCAL_RATE))
+            if not bucket.take():
+                return self._json({"ok": True, "delivered": False, "reason": "rate limited"}, 429)
+            if on_transport:
+                on_transport(sid, {**msg, "local": True})
+            return self._json({"ok": True, "delivered": True})
 
         def _song_dir(self, sid):
             if not ID_RE.match(sid or ""):
@@ -472,7 +519,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 load = lambda n: read_json(os.path.join(d, n))  # noqa: E731
                 return self._json({"meta": load("meta.json"), "analysis": load("analysis.json"),
                                    "chops": load("chops.json"), "peaks": compute_peaks(d), "project": load_project(d),
-                                   "view": {k: (view_state.get(m.group(1)) or {}).get(k) for k in ("bank", "selected")}})
+                                   "view": {k: (view_state.get(m.group(1)) or {}).get(k) for k in ("bank", "selected")},
+                                   "daw": daw_of(m.group(1))})
             m = re.match(r"^/api/jobs/([0-9a-f]+)$", p)
             if m:
                 j = jobs.get(m.group(1))
@@ -596,4 +644,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                             "banks": len(ch["banks"]), "added": os.path.getmtime(os.path.join(d, "meta.json"))})
             return sorted(out, key=lambda s: -s["added"])
 
-    return ChopPadServer((host, port), Handler, hub)
+    srv = ChopPadServer((host, port), Handler, hub)
+
+    def announce_daw(sid):
+        """A bridge opened or closed for `sid`: tell every tab on it (`daw` event {open, daw, bank})."""
+        hub.publish(sid, "daw", daw_of(sid))
+    srv.announce_daw = announce_daw
+    return srv

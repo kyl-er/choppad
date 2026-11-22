@@ -259,6 +259,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     lastChop = c;
     store.dispatch({ type: "pad.select", pad });
     emit("hit", { pad, velocity });
+    dawHit(bank, pad, velocity); // CHOP-11: tell an open DAW bridge (fire and forget, after the sound)
   }
   // note repeat: a held pad retriggers at the chosen rate, in time with the tempo
   const held = new Map(); // pad -> interval handle
@@ -320,6 +321,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   function togglePattern() {
     if (seq.state.playing) seq.stop(); else { stopSong(); syncSeqTempo(); seq.start(); }
     emit("seq", {});
+    dawTransport(seq.state.playing ? "play-pattern" : "stop"); // CHOP-11
   }
   const patternMidi = () => {
     const { chops, project } = store.get();
@@ -463,15 +465,37 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
 
   // ---- remote control: what an agent (or another tab) does arrives on /events and is played here ----
   const remoteMeta = { remote: true, save: false }; // already on disk, and not ours to send back
+  // ---- CHOP-11: while a DAW bridge is open on the server, our own pad hits and pattern play/stop are reported to it ----
+  // The server tells us on the stream (`daw` event, first message of every stream) whether one is open and which bank its
+  // kit holds. Reports are `local: true` transport posts: the server hands them to the bridge and does NOT rebroadcast
+  // them, so other tabs do not play them too. Nothing here waits for the network or can fail the audio trigger.
+  const daw = { open: false, bank: null, tokens: 40, t: 0 };
+  let fromRemote = false; // true while executing a command that came from the stream: never reported back
+  function dawSend(body) {
+    send(`/api/songs/${id}/transport`, { method: "POST", body: JSON.stringify({ ...body, local: true }) }).catch(() => {});
+  }
+  function dawHit(bank, pad, velocity) {
+    if (fromRemote || !daw.open || (daw.bank != null && daw.bank !== bank)) return;
+    const now = performance.now(); // 80 hits a second, bursts of 40: well above what hands can play
+    daw.tokens = Math.min(40, daw.tokens + (now - daw.t) * 0.08);
+    daw.t = now;
+    if (daw.tokens < 1) return;
+    daw.tokens -= 1;
+    dawSend({ command: "hit", pad, velocity, bank });
+  }
+  function dawTransport(command) {
+    if (!fromRemote && daw.open) dawSend({ command });
+  }
   function runTransport(msg) {
     if (ctx.state !== "running") ctx.resume().catch(() => {});
     switch (msg.command) {
-      case "play-pattern": if (!seq.state.playing) togglePattern(); break;
+      case "play-pattern": if (!seq.state.playing) { fromRemote = true; try { togglePattern(); } finally { fromRemote = false; } } break;
       case "stop": panic(); break;
       case "play-song": playSong(Number.isFinite(msg.from) ? msg.from : undefined); break;
       case "hit":
         if (Number.isInteger(msg.bank)) setBank(msg.bank);
-        if (Number.isInteger(msg.pad)) hit(msg.pad, Number.isFinite(msg.velocity) ? msg.velocity : 1);
+        fromRemote = true;
+        try { if (Number.isInteger(msg.pad)) hit(msg.pad, Number.isFinite(msg.velocity) ? msg.velocity : 1); } finally { fromRemote = false; }
         break;
     }
   }
@@ -517,11 +541,12 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     onMessage("actions", (d) => { for (const a of d.actions ?? []) store.dispatch(a, remoteMeta); });
     onMessage("chops", (d) => adoptChops(d.chops));
     onMessage("transport", runTransport);
+    onMessage("daw", (d) => { daw.open = !!d.open; daw.bank = Number.isInteger(d.bank) ? d.bank : null; });
   }
 
   return {
     id, meta, analysis, peaks, buffer, video, store, engine, seq,
-    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, flush },
+    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, flush },
     on: (type, fn) => events.addEventListener(type, fn),
     off: (type, fn) => events.removeEventListener(type, fn),
     position, playSong, stopSong,

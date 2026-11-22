@@ -217,15 +217,21 @@ def make_server(media_root: str, port: int = 8960):
     os.makedirs(media_root, exist_ok=True)
     # --- W2 DAW bridge: POST /api/songs/<id>/daw, and mirroring of agent-driven transport (components/daw) ---
     from manager import DawManager
-    daw = DawManager()
+    fake_log = os.environ.get("CHOPPAD_DAW_FAKE")  # test hook (tests/e2e/test_bridge.py): bridges that only write a log, no DAW
+    if fake_log:
+        from fake_bridge import fake_bridges, no_midi
+        daw = DawManager(bridges=fake_bridges(fake_log), midi_factory=no_midi)
+    else:
+        daw = DawManager()
 
     def _daw(media_dir, body):
         return daw.command(os.path.basename(media_dir), media_dir, body)
     srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
                          "savekit": _savekit, "key": _key, "daw": _daw},
-                on_transport=daw.on_transport)
+                on_transport=daw.on_transport, daw_state=daw.state_for)
     srv.daw = daw
+    daw.on_change = lambda sid: srv.announce_daw(sid)  # `daw` events when a bridge opens or closes
     _shutdown = srv.shutdown
 
     def shutdown():

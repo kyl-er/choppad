@@ -28,7 +28,7 @@ class DawError(Exception):
 
 
 class DawManager:
-    def __init__(self, state_dir=None, *, bridges=None, midi_factory=None, project_builder=None):
+    def __init__(self, state_dir=None, *, bridges=None, midi_factory=None, project_builder=None, on_change=None):
         self.state_dir = state_dir or state_root()
         self._factories = bridges or {"hydrogen": lambda: HydrogenBridge(self.state_dir),
                                       "ardour": lambda: ArdourBridge(self.state_dir)}
@@ -39,7 +39,26 @@ class DawManager:
         self.projects = {}   # daw name -> DawProject last pushed
         self.midi = None
         self.midi_error = None
+        self.on_change = on_change   # fn(song_id): called after a bridge opened or closed for that song (server -> `daw` event)
         self._lock = threading.RLock()
+
+    # ---- state the browser needs (GET /api/songs/<id> `daw`, the `daw` event) ----
+    def state_for(self, sid):
+        """{open, daw, bank}: is a bridge holding this song, which one, and which bank its kit holds. No lock: a plain
+        read, so the transport path never waits behind a slow `open`."""
+        for daw, held in list(self.open.items()):
+            project = self.projects.get(daw)
+            if held == sid and project is not None:
+                return {"open": True, "daw": daw, "bank": project.bank}
+        return {"open": False, "daw": None, "bank": None}
+
+    def _changed(self, *sids):
+        if self.on_change:
+            for sid in dict.fromkeys(sids):
+                try:
+                    self.on_change(sid)
+                except Exception:  # noqa: BLE001 - a broken listener must not break the DAW command
+                    pass
 
     # ---- helpers ----
     def _bridge(self, daw):
@@ -94,6 +113,7 @@ class DawManager:
             out = {"ok": True, "daw": daw, "command": cmd, "song": sid}
             if cmd in ("open", "sync"):
                 project = self._project(media_dir, body)
+                before = self.open.get(daw)
                 try:
                     if cmd == "open" or daw not in self.open:
                         out["detail"] = bridge.launch(project)
@@ -104,6 +124,7 @@ class DawManager:
                     self.open[daw], self.projects[daw] = sid, project
                     self._port()
                     out["midi"] = self._midi_info()
+                    self._changed(sid, before)
                     return out
                 except RuntimeError as e:
                     raise DawError(str(e), 502)
@@ -111,6 +132,7 @@ class DawManager:
                 self._port()
                 out["midi"] = self._midi_info()
                 out.update(bpm=project.bpm, bank=project.bank, kit=project.kit_name)
+                self._changed(sid, before)
                 return out
             if daw not in self.open:
                 raise DawError(f"{daw} is not open; run the open command first", 409)
@@ -139,33 +161,39 @@ class DawManager:
 
     # ---- server hook: agent-driven transport ----
     def on_transport(self, sid, msg):
-        """Called by the server after it publishes a `transport` event. Mirrors to open bridges holding this song."""
+        """Called by the server after it publishes a `transport` event (agent-driven), or directly for a browser's own
+        action (`msg["local"]`: a pad hit or pattern play/stop made in a tab). Mirrors to open bridges holding this song.
+        A local hit never waits for the lock: while an `open` is in progress it is dropped rather than queued."""
+        local = bool(msg.get("local"))
+        if not self._lock.acquire(blocking=not local):
+            return
         try:
-            with self._lock:
-                for daw, held in list(self.open.items()):
-                    if held != sid:
+            for daw, held in list(self.open.items()):
+                if held != sid:
+                    continue
+                project = self.projects.get(daw)
+                cmd = msg.get("command")
+                if cmd == "hit" and project is not None:
+                    if "bank" in msg and msg["bank"] != project.bank:
                         continue
-                    project = self.projects.get(daw)
-                    cmd = msg.get("command")
-                    if cmd == "hit" and project is not None:
-                        if "bank" in msg and msg["bank"] != project.bank:
-                            continue
-                        pad, vel = int(msg["pad"]), float(msg.get("velocity", 1.0))
-                        note = getattr(self.bridges[daw], "note", None)
-                        if note:
-                            note(pad, vel)
-                        port = self.midi
-                        if port is not None:
-                            port.note_on(36 + pad, vel)
-                            t = threading.Timer(NOTE_LENGTH_S, port.note_off, args=(36 + pad,))
-                            t.daemon = True
-                            t.start()
-                    elif cmd in ("play-pattern", "play-song") and project is not None:
-                        self._transport(daw, "play", project)
-                    elif cmd == "stop" and project is not None:
-                        self._transport(daw, "stop", project)
+                    pad, vel = int(msg["pad"]), float(msg.get("velocity", 1.0))
+                    note = getattr(self.bridges[daw], "note", None)
+                    if note:
+                        note(pad, vel)
+                    port = self.midi
+                    if port is not None:
+                        port.note_on(36 + pad, vel)
+                        t = threading.Timer(NOTE_LENGTH_S, port.note_off, args=(36 + pad,))
+                        t.daemon = True
+                        t.start()
+                elif cmd in ("play-pattern", "play-song") and project is not None:
+                    self._transport(daw, "play", project)
+                elif cmd == "stop" and project is not None:
+                    self._transport(daw, "stop", project)
         except Exception:  # noqa: BLE001 - a DAW problem must never break the browser transport
             pass
+        finally:
+            self._lock.release()
 
     def status(self):
         with self._lock:
@@ -173,6 +201,7 @@ class DawManager:
 
     def close(self):
         with self._lock:
+            held = list(self.open.values())
             for b in self.bridges.values():
                 try:
                     b.close()
@@ -184,3 +213,4 @@ class DawManager:
                 except Exception:  # noqa: BLE001
                     pass
             self.bridges, self.open, self.projects, self.midi = {}, {}, {}, None
+        self._changed(*held)
