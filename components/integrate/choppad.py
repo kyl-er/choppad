@@ -5,7 +5,8 @@ Runs ingest -> rhythm -> chop into media/<id>/, then (with --serve) serves the w
 http://127.0.0.1:<port>/?id=<id> with /media/<id>/* static. See contracts/README.md.
 
 Agent verbs (clients of a running server): `choppad songs | show ID | import SRC | regrid ID | assign ID | pad ID P |
-pattern ID set|add|clear|show | fx ID | play ID pattern|song|stop | hit ID P | export ID hydrogen|sfz | daw open|sync`.
+pattern ID set|add|clear|show | fx ID | play ID pattern|song|stop | hit ID P | export ID hydrogen|sfz |
+daw open|sync|play|stop ID [--daw hydrogen|ardour] | station [ID] [--daw ...]`.
 `choppad <verb> --help` for each; `--server URL` or $CHOPPAD_SERVER picks the server (default http://127.0.0.1:8960).
 """
 
@@ -14,13 +15,14 @@ import json
 import re
 import os
 import sys
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 # Sibling components are plain modules (no package install); make them importable when run as a CLI.
 _COMPONENTS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-for _c in ("ingest", "rhythm", "chop", "advisor", "export", "control"):
+for _c in ("ingest", "rhythm", "chop", "advisor", "export", "control", "daw"):
     _p = os.path.join(_COMPONENTS, _c)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -126,15 +128,30 @@ def make_server(media_root: str, port: int = 8960):
     """App + media + API server (see server.py). Import jobs run the full pipeline in a thread."""
     from server import make_server as _make
     os.makedirs(media_root, exist_ok=True)
-    return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
-                 actions={"sections": _sections, "advise": _advise, "export": _export})
+    # --- W2 DAW bridge: POST /api/songs/<id>/daw, and mirroring of agent-driven transport (components/daw) ---
+    from manager import DawManager
+    daw = DawManager()
+
+    def _daw(media_dir, body):
+        return daw.command(os.path.basename(media_dir), media_dir, body)
+    srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
+                actions={"sections": _sections, "advise": _advise, "export": _export, "daw": _daw},
+                on_transport=daw.on_transport)
+    srv.daw = daw
+    _shutdown = srv.shutdown
+
+    def shutdown():
+        daw.close()  # stops the Hydrogen / Ardour this server started and closes the MIDI port
+        _shutdown()
+    srv.shutdown = shutdown
+    return srv
 
 
 # ---------------------------------------------------------------------------------------------------------------
 # Agent verbs: `choppad songs|show|import|regrid|assign|pad|pattern|fx|play|hit|export|daw ...`
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
-VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw")
+VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station")
 
 
 def build_verb_parser():
@@ -202,10 +219,69 @@ def build_verb_parser():
     s.add_argument("id")
     s.add_argument("kind", choices=["hydrogen", "sfz"])
     s.add_argument("--bank", type=int, default=0)
-    s = add("daw", "DAW bridge (not built yet)")
-    s.add_argument("op", choices=["open", "sync"])
-    s.add_argument("id", nargs="?")
+    # --- W2 DAW bridge (components/daw) ---
+    s = add("daw", "DAW bridge: open a song in Hydrogen or Ardour, re-sync it after edits, drive its transport")
+    s.add_argument("op", choices=["open", "sync", "play", "stop"])
+    s.add_argument("id", nargs="?", help="song id (required)")
+    s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
+    s.add_argument("--bank", type=int, help="bank to export (default: the bank the pattern plays, else 0)")
+    s = add("station", "start ChopPad (if it is not running), open a song in the DAW wired to it, print the URL")
+    s.add_argument("id", nargs="?", help="song id (default: the newest song in the library)")
+    s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
+    s.add_argument("--bank", type=int)
+    s.add_argument("--port", type=int, default=8960, help="port for the server this command starts (default 8960)")
     return p
+
+
+def _station(a, c, out, err):
+    """`choppad station`: make sure a server answers, open the song in the DAW through it, print where everything is.
+    A server this command starts runs until Ctrl-C (it owns the DAW it launched); an existing server keeps its bridge."""
+    import threading
+    import choppad_client as cc
+    base = (a.server or os.environ.get("CHOPPAD_SERVER") or f"http://127.0.0.1:{a.port}").rstrip("/")
+    started = None
+    try:
+        try:
+            c.server = base
+            c.songs()
+        except cc.ControlError:
+            if a.server or os.environ.get("CHOPPAD_SERVER"):
+                raise  # an explicit server that does not answer is an error, not a reason to start another
+            repo = os.environ.get("CHOPPAD_REPO", REPO_DIR)
+            started = make_server(os.path.join(repo, "media"), port=a.port)
+            threading.Thread(target=started.serve_forever, daemon=True).start()
+            err(f"started ChopPad server on {base}")
+            import signal
+            signal.signal(signal.SIGINT, signal.default_int_handler)   # a backgrounded job inherits SIGINT=ignored
+            signal.signal(signal.SIGTERM, signal.default_int_handler)  # so `kill` also closes the DAW cleanly
+        sid = a.id or next(iter(c.songs()), {}).get("id")
+        if not sid:
+            raise cc.ControlError("the library is empty; import a song first (`choppad import <url|file>`)")
+        r = c.daw(sid, a.daw, "open", a.bank)
+        out(json.dumps({k: r[k] for k in r if k != "detail"}, separators=(",", ":")))
+        out(f"ChopPad: {base}/#/song/{sid}")
+        if r.get("detail"):
+            out(f"{a.daw}: " + json.dumps({k: v for k, v in r["detail"].items() if k in ("song", "osc_port", "headless", "file", "pid", "tracks", "regions")}))
+        if r.get("not_implemented"):
+            err("note: " + r["not_implemented"])
+        if r.get("midi", {}).get("port"):
+            out(f"MIDI out: ALSA port '{r['midi']['port']}' ({r['midi'].get('address')}) carries notes, clock and start/stop")
+        sys.stdout.flush()
+        if started is not None:
+            out("station is running; Ctrl-C (or SIGTERM) stops the server and the DAW it started")
+            sys.stdout.flush()
+            try:
+                while True:
+                    time.sleep(3600)
+            except KeyboardInterrupt:
+                pass
+        else:
+            out("(the server that was already running keeps the DAW bridge; stop it there)")
+    finally:
+        if started is not None:
+            started.shutdown()
+            started.server_close()
+    return 0
 
 
 def run_verb(argv, client=None, out=None, err=None):
@@ -215,11 +291,17 @@ def run_verb(argv, client=None, out=None, err=None):
     err = err or (lambda s: print(s, file=sys.stderr))
     a = build_verb_parser().parse_args(argv)
     j = lambda o: out(json.dumps(o, separators=(",", ":")))  # noqa: E731
-    if a.verb == "daw":
-        # TODO(W2, components/daw): `choppad daw open|sync <id>` -> POST /api/songs/<id>/daw (contracts §11). W1 only reserves the verb.
-        err("daw: not implemented yet (owned by workstream W2)")
+    if a.verb == "daw" and not a.id:  # explicit on purpose: a DAW should never open the "newest song" by accident
+        err("daw: a song id is required (see `choppad songs`); `choppad station` opens the newest song. "
+            "DAW bridge: components/daw, workstream W2")
         return 2
     c = client or cc.Client(a.server)
+    if a.verb == "station":
+        try:
+            return _station(a, c, out, err)
+        except cc.ControlError as e:
+            err(f"choppad: {e}")
+            return 1
 
     def reply(r):  # what an edit answered: how much changed and whether anyone is watching
         j({k: r[k] for k in ("applied", "ignored", "listeners") if k in r})
@@ -272,6 +354,11 @@ def run_verb(argv, client=None, out=None, err=None):
                 err("note: no browser has this song open, so nothing is playing")
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
+        elif a.verb == "daw":
+            r = c.daw(a.id, a.daw, a.op, a.bank)
+            j(r)
+            if r.get("not_implemented"):
+                err("note: " + r["not_implemented"])
     except cc.ControlError as e:
         err(f"choppad: {e}")
         return 1

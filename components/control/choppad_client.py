@@ -76,6 +76,15 @@ class Client:
     def transport(self, sid, command, **kw):
         return self.post(f"/api/songs/{_sid(sid)}/transport", {"command": command, **kw})
 
+    # --- W2 DAW bridge (contracts §11) ---
+    def daw(self, sid, daw, command, bank=None):
+        """open | sync | play | stop on a DAW bridge (hydrogen or ardour) held by the server. Opening can take a while
+        (Ardour builds a session), hence the long timeout."""
+        body = {"daw": daw, "command": command}
+        if bank is not None:
+            body["bank"] = bank
+        return self.post(f"/api/songs/{_sid(sid)}/daw", body, timeout=300)
+
     def regrid_to(self, sid, **change):
         """change: grid, meter, bpm_mult, beat_offset (absolute) and/or mult, shift (relative). Returns the new chops."""
         chops = self.song(sid)["chops"]
