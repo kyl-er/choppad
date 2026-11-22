@@ -40,7 +40,8 @@ def _watch(r):
     return out
 
 
-def build_tools(client):
+def build_tools(client, progress=lambda: None):
+    """`progress()` returns the callback of the call being served (it sends MCP progress notifications) or None."""
     c = client
 
     def regrid(a):
@@ -70,7 +71,8 @@ def build_tools(client):
         _tool("pattern_text", "The step pattern as a 16-row text grid (pads as rows, 1/16 steps as columns).",
               {"id": _ID, "bank": _BANK}, ["id"], lambda a: c.pattern_view(a["id"], a.get("bank"))),
         _tool("import_song", "Import a YouTube/URL or a local audio/video file path as a new song; waits until it is chopped.",
-              {"source": _S("URL or absolute file path")}, ["source"], lambda a: c.import_source(a["source"], wait_s=600)),
+              {"source": _S("URL or absolute file path")}, ["source"],
+              lambda a: c.import_source(a["source"], wait_s=600, progress=progress())),
         _tool("regrid", "Change the chop grid. Give any of: grid (1/4, 1/8, 1/16), meter (e.g. 3/4), mult (0.5 or 2, relative "
               "tempo), bpm_mult (absolute), shift (beats to move bar 1), beat_offset, or bpm (re-detect with this tempo).",
               {"id": _ID, "grid": _S("1/4, 1/8 or 1/16", enum=["1/4", "1/8", "1/16"]), "meter": _S("e.g. 3/4"),
@@ -127,8 +129,10 @@ def build_tools(client):
 
 
 class McpServer:
-    def __init__(self, client=None):
-        self.tools = build_tools(client or cc.Client())
+    def __init__(self, client=None, notify=None):
+        self.notify = notify        # fn(json-rpc message): how this server sends notifications (stdout in serve())
+        self._progress = None       # callback of the tools/call being served, when the client asked for progress
+        self.tools = build_tools(client or cc.Client(), progress=lambda: self._progress)
 
     def tools_list(self):
         return [{k: v for k, v in t.items() if k != "_fn"} for t in self.tools.values()]
@@ -171,12 +175,26 @@ class McpServer:
         if method == "tools/list":
             return ok({"tools": self.tools_list()})
         if method == "tools/call":
-            return ok(self.call(params.get("name"), params.get("arguments")))
+            token = (params.get("_meta") or {}).get("progressToken")
+            self._progress = None
+            if token is not None and self.notify:  # MCP progress: the client sees the import move while the tool waits
+                def _progress(ev, token=token):
+                    self.notify({"jsonrpc": "2.0", "method": "notifications/progress", "params": {
+                        "progressToken": token, "progress": round(float(ev.get("progress") or 0), 3), "total": 1,
+                        "message": f"import: {ev.get('step')}"}})
+                self._progress = _progress
+            try:
+                return ok(self.call(params.get("name"), params.get("arguments")))
+            finally:
+                self._progress = None
         return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"method not found: {method}"}}
 
 
 def serve(stdin=sys.stdin, stdout=sys.stdout, client=None):
-    server = McpServer(client)
+    def notify(msg):
+        stdout.write(json.dumps(msg, separators=(",", ":")) + "\n")
+        stdout.flush()
+    server = McpServer(client, notify=notify)
     for line in stdin:
         line = line.strip()
         if not line:

@@ -3,6 +3,7 @@
 Shared by the CLI verbs (components/integrate/choppad.py) and the MCP server (choppad_mcp.py). Stdlib only.
 Everything here talks to the endpoints in contracts §10 and the existing /api routes; nothing touches media/ directly.
 """
+import http.client
 import json
 import os
 import time
@@ -102,7 +103,9 @@ class Client:
         return self.post(f"/api/songs/{_sid(sid)}/export", {"kind": kind, "bank": bank, "fx": fx}, timeout=300)
 
     def import_source(self, source, wait_s=900, progress=None):
-        """URL -> import job; an existing file path -> upload. Waits for the job; returns {id}."""
+        """URL -> import job; an existing file path -> upload. Waits for the job and returns {id, job, steps}: the new
+        song id, the job id and the names of the steps it went through. `progress(event)` is called on every change with
+        {job, state, step, progress, song?, error?}, the same shape as the server's `job` events (GET /api/events)."""
         if os.path.isfile(source):
             size = os.path.getsize(source)
             with open(source, "rb") as f:
@@ -110,17 +113,77 @@ class Client:
                     "X-Filename": urllib.parse.quote(os.path.basename(source)), "Content-Length": str(size)})["job"]
         else:
             job = self.post("/api/songs", {"url": source})["job"]
+        return self.wait_job(job, wait_s, progress)
+
+    def wait_job(self, job, wait_s=900, progress=None):
+        """Follow import job `job` on the server's event stream (`GET /api/events`); falls back to polling `/api/jobs/<job>`
+        when the stream cannot be used. Returns {id, job, steps}; raises ControlError when the job fails or times out."""
         end = time.time() + wait_s
+        steps, seen = [], [None]
+
+        def see(ev):
+            """One job event: report changes once, finish on done or error."""
+            key = (ev.get("state"), ev.get("step"), round(float(ev.get("progress") or 0), 2))
+            if key != seen[0]:
+                seen[0] = key
+                if ev.get("step") and (not steps or steps[-1] != ev["step"]):
+                    steps.append(ev["step"])
+                if progress:
+                    progress(ev)
+            if ev.get("state") == "done":
+                return {"id": ev["song"], "job": job, "steps": steps}
+            if ev.get("state") == "error":
+                raise ControlError(f"import failed: {ev.get('error')}")
+            return None
+
+        try:
+            done = self._follow_stream(job, end, see)
+            if done:
+                return done
+        except (OSError, http.client.HTTPException):
+            pass  # no stream (older server, proxy, dropped): poll below, nothing is lost, the job lives on the server
         while time.time() < end:
             j = self.get(f"/api/jobs/{job}")
-            if progress:
-                progress(j)
-            if j.get("state") == "done":
-                return {"id": j["id"]}
-            if j.get("state") == "error":
-                raise ControlError(f"import failed: {j.get('error')}")
+            done = see({"job": job, "state": j.get("state"), "step": j.get("stage"), "progress": j.get("progress", 0.0),
+                        "song": j.get("id"), "error": j.get("error")})
+            if done:
+                return done
             time.sleep(1)
         raise ControlError(f"import still running after {wait_s}s (job {job}); check `choppad songs` later")
+
+    def _follow_stream(self, job, end, see):
+        """Read `job` events from /api/events until `see` returns a result or time is up. None = ran out of time."""
+        u = urllib.parse.urlparse(self.server)
+        conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=35)  # the server pings every 10 s
+        try:
+            conn.request("GET", "/api/events", headers={"Accept": "text/event-stream", "X-ChopPad-Origin": self.origin})
+            r = conn.getresponse()
+            if r.status != 200:
+                raise OSError(f"events stream answered HTTP {r.status}")
+            name, data = None, []
+            while time.time() < end:
+                line = r.readline()
+                if not line:
+                    raise OSError("events stream closed")
+                line = line.decode().rstrip("\r\n")
+                if line.startswith("event:"):
+                    name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].strip())
+                elif line == "":
+                    if name == "job" and data:
+                        try:
+                            ev = json.loads("".join(data))
+                        except ValueError:
+                            ev = {}
+                        if ev.get("job") == job:
+                            done = see(ev)
+                            if done:
+                                return done
+                    name, data = None, []
+            return None
+        finally:
+            conn.close()
 
     # ---- verbs (one call each; CLI and MCP both use these) ----
     def assign(self, sid, bank, pad, start=None, end=None, clear=False):

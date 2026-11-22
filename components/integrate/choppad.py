@@ -410,7 +410,7 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "show":
             j(c.summary(a.id))
         elif a.verb == "import":
-            j(c.import_source(a.source, wait_s=a.wait, progress=lambda job: err(f"{job.get('stage')} {job.get('progress', 0):.0%}")))
+            j(c.import_source(a.source, wait_s=a.wait, progress=lambda ev: err(f"import: {ev.get('step')} {ev.get('progress') or 0:.0%}")))
         elif a.verb == "regrid":
             if a.bpm is not None:
                 chops = c.reanalyze(a.id, a.bpm, a.meter)

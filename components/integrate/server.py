@@ -12,7 +12,9 @@ Routes
   POST /api/regrid {id, grid, meter, beat_offset, bpm_mult}   (also /api/songs/<id>/regrid)
   PUT  /api/songs/<id>/project   whole-document save (kept for compatibility; also broadcast as actions)
   POST /api/songs/<id>/actions   {actions:[...]} -> contracts §8 reducer -> project.json -> {project, applied, ...}
-  GET  /api/songs/<id>/events    server-sent events: actions | chops | transport (contracts §10)
+  GET  /api/songs/<id>/events    server-sent events: actions | chops | transport | daw (contracts §10)
+  GET  /api/events               library-level server-sent events: `job` {job, state: queued|running|done|error, step, progress,
+                                 song?, error?} for every import; a new stream is first told the recent jobs
   POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
                                  with `local: true` (a tab reporting its own hit/play/stop): not rebroadcast, only handed to
                                  an open DAW bridge (rate limited; 429 when too fast, delivered:false when no bridge)
@@ -170,23 +172,51 @@ class ChopPadServer(ThreadingHTTPServer):
         super().shutdown()
 
 
+LIBRARY = "*"  # hub key of the library-level stream (GET /api/events): events that belong to no song yet
+
+
+def job_event(j):
+    """A job document as the `job` event sent on GET /api/events: {job, state, step, progress, song?, error?}."""
+    ev = {"job": j["job"], "state": j["state"], "step": j.get("stage"), "progress": j.get("progress", 0.0)}
+    if j.get("id"):
+        ev["song"] = j["id"]
+    if j.get("error"):
+        ev["error"] = j["error"]
+    return ev
+
+
 class Jobs:
     def __init__(self):
         self.lock = threading.Lock()
         self.jobs = {}
+        self.on_change = None  # fn(job document) after every change; make_server wires it to the library stream
 
     def get(self, jid):
         with self.lock:
             return dict(self.jobs.get(jid) or {})
 
+    def snapshot(self, limit=50):
+        """The newest jobs, oldest first (what a new library stream is told first, so it cannot miss a job that moved on)."""
+        with self.lock:
+            return [dict(j) for j in list(self.jobs.values())[-limit:]]
+
+    def _changed(self, jid):
+        if self.on_change:
+            try:
+                self.on_change(self.get(jid))
+            except Exception:  # noqa: BLE001 - a listener must not break an import
+                pass
+
     def update(self, jid, **kw):
         with self.lock:
             self.jobs[jid].update(kw)
+        self._changed(jid)
 
     def start(self, media_root, url, pipeline):
         jid = uuid.uuid4().hex[:12]
         with self.lock:
             self.jobs[jid] = {"job": jid, "state": "queued", "stage": "queued", "progress": 0.0, "url": url}
+        self._changed(jid)
         threading.Thread(target=self._run, args=(jid, media_root, url, pipeline), daemon=True).start()
         return jid
 
@@ -228,6 +258,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
     hub = Hub()
+    jobs.on_change = lambda j: hub.publish(LIBRARY, "job", job_event(j))
     view_state = {}  # song id -> {bank, selected, settings, sections}: what the player looks at (never saved)
     local_buckets, buckets_guard = {}, threading.Lock()  # song id -> TokenBucket for `local` transport
 
@@ -321,7 +352,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             return (self.headers.get("X-ChopPad-Origin") or "")[:64]
 
         def _events(self, sid):
-            """Server-sent events: stays open until the client goes away or the server shuts down."""
+            """Server-sent events: stays open until the client goes away or the server shuts down.
+            sid is a song id, or LIBRARY for the library-level stream (`job` events of imports)."""
             origin = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("origin", [""])[0][:64]
             client = hub.subscribe(sid, origin)
             self.close_connection = True
@@ -333,8 +365,11 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 self.wfile.write(b"retry: 1500\n: connected\n\n")
-                # CHOP-11: a new stream starts knowing whether a DAW bridge is open for this song
-                self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(sid), separators=(',', ':'))}\n\n".encode())
+                if sid == LIBRARY:  # CHOP-11: told about every recent job first, so a job that moved on cannot be missed
+                    for j in jobs.snapshot():
+                        self.wfile.write(f"event: job\ndata: {json.dumps(job_event(j), separators=(',', ':'))}\n\n".encode())
+                else:  # CHOP-11: a new stream starts knowing whether a DAW bridge is open for this song
+                    self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(sid), separators=(',', ':'))}\n\n".encode())
                 self.wfile.flush()
                 while True:
                     try:
@@ -502,6 +537,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._media(os.path.join(media_root, parts[0], parts[1]))
             if p == "/api/kits" or p.startswith("/api/kits/"):
                 return self._kits("GET")
+            if p == "/api/events":  # CHOP-11: library-level stream: `job` events {job, state, step, progress, song?, error?}
+                if self.command == "HEAD":
+                    return self._err(405, "GET only")
+                return self._events(LIBRARY)
             if p == "/api/songs":
                 return self._json(self._library())
             m = re.match(r"^/api/songs/([^/]+)/events$", p)
