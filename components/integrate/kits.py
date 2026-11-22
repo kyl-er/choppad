@@ -169,7 +169,7 @@ def kit_from_bank(media_root, song_id, bank, name, *, overrides=None, pads=None,
 def export_kit(media_root, kid, kind, *, hydrogen_root=None):
     """Write a kit as a Hydrogen drumkit or an SFZ. Pads from other songs and stretched pads work in both;
     a kit whose songs are gone fails with a clear ValueError."""
-    from choppad_export import kit_pads, write_hydrogen, write_sfz
+    from choppad_export import kit_pads, render_bank_kit, write_sfz
     kit = read_kit(media_root, kid)
     pads = kit_pads(media_root, kit)
     if not pads:
@@ -188,15 +188,10 @@ def export_kit(media_root, kid, kind, *, hydrogen_root=None):
     name = re.sub(r"[^\w -]+", "", f"ChopPad kit {kit['name']}")[:60].strip()
     root = hydrogen_root or os.environ.get("CHOPPAD_HYDROGEN_DIR") or os.path.expanduser("~/.local/share/hydrogen/data/drumkits")
     out = os.path.join(root, name)
-    write_hydrogen(pads, out, name)
+    _, baked = render_bank_kit(pads, out, name, fx=kit.get("fx"))
     note = "Restart Hydrogen or use Drumkits > Rescan to see it."
-    if kit.get("fx"):
-        from choppad_fx import apply_to_file, is_neutral
-        if not is_neutral(kit["fx"]):
-            for wav in sorted(os.listdir(out)):
-                if wav.endswith(".wav"):
-                    apply_to_file(os.path.join(out, wav), kit["fx"])
-            note = "Tone/reverb baked into the samples. " + note
+    if baked:
+        note = "Tone/reverb baked into the samples. " + note
     return {"path": out, "kit": name, "note": note}
 
 

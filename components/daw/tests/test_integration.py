@@ -3,7 +3,7 @@ ardour9-export renders a generated session. Default test runs skip all of this a
 
 Every test also checks that the owner's own config files (~/.hydrogen, ~/.config/ardour9) are not touched.
 """
-import glob, hashlib, os, shutil, sys, tempfile, time, unittest
+import glob, hashlib, os, shutil, subprocess, sys, tempfile, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from support import make_media  # noqa: E402
 import daw_project  # noqa: E402
@@ -101,6 +101,62 @@ class RealDaws(unittest.TestCase):
             b.close()
         time.sleep(0.5)
         self.assertFalse(os.path.exists(f"/proc/{pid}"), "bridge Hydrogen still running after close()")
+        self.assert_owner_config_untouched()
+
+    # ---- CHOP-11: kit quality, against the real h2cli (private --config, offscreen, offline render) ----
+    def h2_bridge(self, name):
+        b = H.HydrogenBridge(os.path.join(self.tmp, name), headless=True, base_conf=H.DEFAULT_CONF)  # system default, not the owner's
+        if not b._which("h2cli"):
+            self.skipTest("h2cli not installed")
+        return b
+
+    def render_song(self, b, name, pattern, pads=None, **kw):
+        extra = {"pads": pads} if pads else None
+        media, song = make_media(bpm=120, pattern=pattern, sid=name, project_extra=extra)
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        proj = daw_project.build_project(song, os.path.join(self.tmp, "kits-" + name), bank=0, **kw)
+        out = os.path.join(self.tmp, name + ".wav")
+        b.render(proj, out)
+        return out
+
+    @staticmethod
+    def activity(path):
+        import numpy as np
+        import soundfile as sf
+        x, sr = sf.read(path, always_2d=True)
+        m = np.abs(x).max(axis=1)
+        idx = np.nonzero(m > 0.05 * float(m.max()))[0]
+        return float(m.max()), idx[0] / sr, idx[-1] / sr
+
+    def test_hydrogen_accepts_the_generated_kit_as_current_format(self):
+        b = self.h2_bridge("state-kit")
+        proj = daw_project.build_project(os.path.join(self.media, "song1"), os.path.join(self.tmp, "kits-check"), bank=0)
+        os.makedirs(b.dir, exist_ok=True)
+        H.patch_config(H.DEFAULT_CONF, b.conf, osc_port=9731)
+        for d in (b.userdata, b.songs):
+            os.makedirs(d, exist_ok=True)
+        cmd = ["h2cli", "-c", proj.kit_dir, "--config", b.conf, "--user-data", b.userdata, "-L", os.path.join(b.dir, "h2cli-check.log")]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90, env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertNotIn("legacy", out.lower(), out)
+        self.assertNotIn("INVALID", out, out)
+        self.assert_owner_config_untouched()
+
+    def test_hydrogen_renders_pad_gain_pitch_and_swing(self):
+        b = self.h2_bridge("state-quality")
+        hit = {"bars": 1, "events": [{"beat": 0, "pad": 0, "bank": 0, "vel": 1.0}]}
+        peak0, on0, end0 = self.activity(self.render_song(b, "q-base", hit))
+        quiet = self.render_song(b, "q-gain", hit, pads=[{"gainDb": -12.0}] + [{} for _ in range(15)])
+        self.assertAlmostEqual(self.activity(quiet)[0] / peak0, 10 ** (-12 / 20), delta=0.05)   # gain reached the instrument
+        up = self.render_song(b, "q-pitch", hit, pads=[{"pitch": 12.0}] + [{} for _ in range(15)])
+        _, on2, end2 = self.activity(up)
+        self.assertGreater(end0 - on0, 0.005)
+        self.assertAlmostEqual((end2 - on2) / (end0 - on0), 0.5, delta=0.15)                    # +12 semitones: half as long
+        step = {"bars": 1, "events": [{"beat": 0.25, "pad": 0, "bank": 0, "vel": 1.0}]}
+        straight = self.render_song(b, "q-straight", step)
+        swung = self.render_song(b, "q-swung", step, swing=0.5, quant="1/16")
+        self.assertAlmostEqual(self.activity(swung)[1] - self.activity(straight)[1], 0.0625, delta=0.01)   # half a 1/16 at 120 BPM
         self.assert_owner_config_untouched()
 
     def test_ardour_session_renders_the_pattern_on_the_beat(self):

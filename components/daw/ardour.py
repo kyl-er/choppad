@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hydrogen import state_root  # noqa: E402
+from daw_project import QUANT_BEATS, swung_beat  # noqa: E402
 
 SUPERCLOCK = 282240000  # Temporal::superclock_ticks_per_second in Ardour 9 (5880 ticks per sample at 48 kHz)
 SESSION_RATE = 48000
@@ -80,6 +81,7 @@ def hit_layout(project, loops):
         if not 0 <= beat < bars * bpb:
             continue
         vel = max(0.05, min(1.0, float(e.get("vel", 1.0))))
+        beat = swung_beat(beat, QUANT_BEATS.get(getattr(project, "quant", "1/16"), 0.25), getattr(project, "swing", 0.0))
         for k in range(loops):
             out.setdefault(pad, []).append((k * loop_s + beat * sec_per_beat, vel))
     return out, loop_s * loops
@@ -273,13 +275,14 @@ class ArdourBridge:
 
     # ---- contract ----
     def launch(self, project):
-        """Build the session and open it in Ardour's GUI (your normal Ardour config; first run shows its wizard)."""
+        """Build the session and open it in Ardour's GUI with the bridge's PRIVATE config (never ~/.config/ardour9; the
+        first run in a private config shows Ardour's wizard once)."""
         info = self.build_session(project)
         if self.proc is not None and self.proc.poll() is None:
             raise NotImplementedError("Ardour is already open; it cannot load a new session without a control surface. "
                                       "Close it and run `daw open` again. " + TRANSPORT_MANUAL_STEPS)
-        self.proc = self._popen(["ardour9", "-n", "-a", info["file"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True)
+        self.proc = self._popen(["ardour9", "-n", "-a", info["file"]], env=self._env(), stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True)
         self.session = info
         return {**info, "pid": self.proc.pid, "note": "opened in Ardour's GUI; transport control is not wired "
                 "(see ArdourBridge.transport)"}

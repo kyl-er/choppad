@@ -80,13 +80,16 @@ class BuildProject(unittest.TestCase):
         self.assertEqual(frames(base.chops[2].path), frames(p.chops[2].path))   # other pads untouched
         self.assertEqual(p.pattern, {"bars": 1, "events": []})
 
-    def test_effective_chops_does_not_mutate_and_skips_bad_overrides(self):
-        chops = json.loads(get(os.path.join(self.song, "chops.json")))
-        before = json.dumps(chops)
-        out = daw_project.effective_chops(chops, {"0:1": {"start": 2, "end": 1}, "0:2": {"start": "x"}, "1:0": {"start": 0, "end": 1}}, 0)
-        self.assertEqual(json.dumps(chops), before)
-        self.assertEqual(out["banks"][0], chops["banks"][0])   # nothing valid for bank 0
-        self.assertEqual(len(out["chops"]), len(chops["chops"]))
+    def test_bad_overrides_are_skipped_and_nothing_is_mutated(self):
+        # was test_effective_chops_...: the bridge has no slice logic of its own any more, it asks choppad_export.bank_pads
+        import choppad_export as X
+        before = get(os.path.join(self.song, "chops.json"))
+        ov = {"0:1": {"start": 2, "end": 1}, "0:2": {"start": "x"}, "1:0": {"start": 0, "end": 1}}
+        pads = X.bank_pads(self.song, 0, ov)
+        chops = json.loads(before)
+        grid = [(chops["chops"][i]["start"], chops["chops"][i]["end"]) for i in chops["banks"][0]]
+        self.assertEqual([(p["start"], p["end"]) for p in pads], grid)   # nothing valid for bank 0
+        self.assertEqual(get(os.path.join(self.song, "chops.json")), before)
 
     def test_pick_bank(self):
         ev = lambda *banks: {"events": [{"bank": b} for b in banks]}  # noqa: E731

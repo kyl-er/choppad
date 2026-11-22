@@ -60,19 +60,37 @@ def project_overrides(media_dir):
     return {}
 
 
-def bank_pads(media_dir, bank=0, overrides=None):
-    """The pads of `bank` for export: the chop table plus the project's custom slices (`overrides`, default: the
-    saved project.json), their stretch renderings and slices from other songs. Empty pads are left out."""
+def project_pad_params(media_dir):
+    """The saved project's per-pad sound settings (contracts §8 `pads`), 16 dicts (missing ones empty)."""
+    path = os.path.join(media_dir, "project.json")
+    pads = []
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            pads = json.load(f).get("pads") or []
+    return [p if isinstance(p, dict) else {} for p in (list(pads) + [{}] * 16)[:16]]
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def bank_pads(media_dir, bank=0, overrides=None, pad_params=None):
+    """THE definition of "the audio of pad p on bank b, as played": the chop table plus the project's custom slices
+    (`overrides`, default: the saved project.json), their stretch renderings and slices from other songs. Empty pads are
+    left out. Every pad dict also carries the pad's sound settings that a DAW kit can express: `gain_db` and `pitch`
+    (semitones), from `pad_params` (16 dicts, default: the saved project's `pads`).
+    The Export button (Hydrogen kit, SFZ, zip) and the DAW bridge both start here."""
     chops = _read_json(media_dir, "chops.json")
     media_root = os.path.dirname(os.path.abspath(media_dir))
     own = os.path.join(media_dir, "audio.wav")
     if overrides is None:
         overrides = project_overrides(media_dir)
     indices = chops["banks"][bank] if 0 <= bank < len(chops["banks"]) else []
+    params = pad_params if pad_params is not None else project_pad_params(media_dir)
     pads = []
     for pad in range(16):
         o = overrides.get(f"{bank}:{pad}")
-        if o and o.get("end", 0) > o.get("start", 0):
+        if isinstance(o, dict) and _num(o.get("start")) and _num(o.get("end")) and o["end"] > o["start"]:
             start, end = o["start"], o["end"]
             audio = own if not o.get("song") or o["song"] == os.path.basename(os.path.abspath(media_dir)) else _song_audio(media_root, o["song"])
             stretch = _stretch_path(media_root, o["stretch"]["url"]) if o.get("stretch") else None
@@ -81,7 +99,10 @@ def bank_pads(media_dir, bank=0, overrides=None):
             start, end, audio, stretch = ch["start"], ch["end"], own, None
         else:
             continue
-        pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch})
+        pr = params[pad] if pad < len(params) and isinstance(params[pad], dict) else {}
+        pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch,
+                     "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
+                     "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
     return pads
 
 
@@ -92,8 +113,11 @@ def kit_pads(media_root, kit):
         if not p:
             continue
         audio = _song_audio(media_root, p["song_id"])
+        pr = p.get("params") or {}
         pads.append({"pad": pad, "start": p["start"], "end": p["end"], "audio": audio,
-                     "stretch": _stretch_path(media_root, p["stretch"]["url"]) if p.get("stretch") else None})
+                     "stretch": _stretch_path(media_root, p["stretch"]["url"]) if p.get("stretch") else None,
+                     "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
+                     "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
     return pads
 
 
@@ -154,12 +178,13 @@ def _slice_declicked(frames, nch, sampwidth, start, end, sr):
     return bytes(out)
 
 
-def export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None, overrides=None):
+def export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None, overrides=None, choke=True):
     """Slice audio.wav for each pad in the bank into out_dir/chop_00.wav..chop_NN.wav (s16le 44.1k stereo
-    with 2.5 ms fade-in and 3 ms fade-out) and write out_dir/drumkit.xml (muteGroup=0, midiOutNote=36+pad).
+    with 2.5 ms fade-in and 3 ms fade-out) and write out_dir/drumkit.xml (muteGroup 0 = choke, or -1 with choke=False;
+    midiOutNote=36+pad; per-pad gain and pitch in the instrument's `gain` and `pitchOffset`).
     Custom slices follow `overrides` (default: the saved project); a stretched pad writes its rendering, a pad from
     another song is cut from that song. Returns the written drumkit.xml path."""
-    return write_hydrogen(bank_pads(media_dir, bank, overrides), out_dir, kit_name)
+    return write_hydrogen(bank_pads(media_dir, bank, overrides), out_dir, kit_name, choke=choke)
 
 
 def _read_wav(path, cache):
@@ -205,38 +230,115 @@ def write_zip(pads, out_path):
     return out_path
 
 
-def write_hydrogen(pads, out_dir, kit_name=None):
+def hydrogen_gain(gain_db):
+    """Hydrogen instrument `gain` (linear multiplier, its knob runs 0..5) for a ChopPad pad gain in dB."""
+    return round(max(0.0, min(5.0, 10 ** (float(gain_db or 0.0) / 20.0))), 6)
+
+
+def hydrogen_pitch(pitch):
+    """Hydrogen instrument `pitchOffset` (semitones, resampling like ChopPad's pad pitch; its knob runs -24..24)."""
+    return round(max(-24.0, min(24.0, float(pitch or 0.0))), 4)
+
+
+def _hy_instrument(inst_list, p, wav_name, choke):
+    """One <instrument> in the element order drumkit.xsd demands (so `h2cli -c` accepts the kit as current format).
+    Per-pad gain and pitch go into the instrument (`gain`, `pitchOffset`), not into the WAV, so the WAVs stay identical
+    to the zip export and a Hydrogen user can still change them."""
+    pad = p["pad"]
+    inst = ET.SubElement(inst_list, "instrument")
+    el = lambda tag, v: setattr(ET.SubElement(inst, tag), "text", str(v))  # noqa: E731
+    el("id", pad)
+    el("name", f"Pad {pad + 1}")
+    el("volume", "1.0")
+    el("isMuted", "false")
+    el("isSoloed", "false")
+    el("pan", "0.0")
+    el("pitchOffset", hydrogen_pitch(p.get("pitch")))
+    el("randomPitchFactor", "0.0")
+    el("gain", hydrogen_gain(p.get("gain_db")))
+    el("applyVelocity", "true")
+    el("filterActive", "false")
+    el("filterCutoff", "1.0")
+    el("filterResonance", "0.0")
+    el("Attack", "0")
+    el("Decay", "0")
+    el("Sustain", "1.0")
+    el("Release", "1000")
+    # Hydrogen: -1 = no mute group, 0 and up = a real group (all instruments of one group cut each other off; the
+    # shipped kits use -1). ChopPad's "choke" setting (on by default) is exactly "one pad at a time", i.e. one group.
+    el("muteGroup", "0" if choke else "-1")
+    el("midiOutChannel", "-1")
+    el("midiOutNote", 36 + pad)
+    el("isStopNote", "false")
+    el("sampleSelectionAlgo", "VELOCITY")
+    el("isHihat", "-1")
+    el("lower_cc", "0")
+    el("higher_cc", "127")
+    for n in range(1, 5):
+        el(f"FX{n}Level", "0.0")
+    comp = ET.SubElement(inst, "instrumentComponent")
+    ET.SubElement(comp, "component_id").text = "0"
+    ET.SubElement(comp, "gain").text = "1.0"
+    layer = ET.SubElement(comp, "layer")
+    ET.SubElement(layer, "filename").text = wav_name
+    ET.SubElement(layer, "min").text = "0.0"
+    ET.SubElement(layer, "max").text = "1.0"
+    ET.SubElement(layer, "gain").text = "1.0"
+    ET.SubElement(layer, "pitch").text = "0.0"
+
+
+def write_hydrogen(pads, out_dir, kit_name=None, *, choke=True):
+    """Write the pads as a Hydrogen 1.2 drumkit (current format, valid against drumkit.xsd): chop_NN.wav + drumkit.xml.
+    choke=True puts every pad in mute group 0 (one pad at a time, ChopPad's default), False gives -1 (pads overlap)."""
     os.makedirs(out_dir, exist_ok=True)
     cache = {}
     root = ET.Element("drumkit_info", xmlns=HYDROGEN_NS)
     ET.SubElement(root, "name").text = kit_name or "ChopPad"
+    ET.SubElement(root, "author").text = "ChopPad"
+    ET.SubElement(root, "info").text = "Generated by ChopPad"
+    ET.SubElement(root, "license").text = "undefined license"
+    ET.SubElement(root, "image").text = ""
+    ET.SubElement(root, "imageLicense").text = "undefined license"
+    comps = ET.SubElement(root, "componentList")
+    comp = ET.SubElement(comps, "drumkitComponent")
+    ET.SubElement(comp, "id").text = "0"
+    ET.SubElement(comp, "name").text = "Main"
+    ET.SubElement(comp, "volume").text = "1.0"
     inst_list = ET.SubElement(root, "instrumentList")
 
     for p in pads:
         pad = p["pad"]
         sr, nch, sampwidth, data = pad_pcm(p, cache)
-
         wav_name = f"chop_{pad:02d}.wav"
         with wave.open(os.path.join(out_dir, wav_name), "wb") as dst:
             dst.setnchannels(nch)
             dst.setsampwidth(sampwidth)
             dst.setframerate(sr)
             dst.writeframes(data)
+        _hy_instrument(inst_list, p, wav_name, choke)
 
-        inst = ET.SubElement(inst_list, "instrument")
-        ET.SubElement(inst, "id").text = str(pad)
-        ET.SubElement(inst, "name").text = f"Pad {pad + 1}"
-        ET.SubElement(inst, "volume").text = "1.0"
-        ET.SubElement(inst, "isMuted").text = "false"
-        ET.SubElement(inst, "muteGroup").text = "0"
-        ET.SubElement(inst, "midiOutNote").text = str(36 + pad)
-        layer = ET.SubElement(ET.SubElement(inst, "instrumentComponent"), "layer")
-        ET.SubElement(layer, "filename").text = wav_name
-        ET.SubElement(layer, "min").text = "0.0"
-        ET.SubElement(layer, "max").text = "1.0"
-        ET.SubElement(layer, "gain").text = "1.0"
-        ET.SubElement(layer, "pitch").text = "0.0"
-
+    ET.indent(root, space=" ")
     xml_path = os.path.join(out_dir, "drumkit.xml")
     ET.ElementTree(root).write(xml_path, encoding="utf-8", xml_declaration=True)
     return xml_path
+
+
+def bake_fx(out_dir, fx):
+    """Bake the master fx (tone/reverb ...) into every chop_NN.wav of a kit folder. Returns True when anything changed."""
+    if not fx:
+        return False
+    from choppad_fx import apply_to_file, is_neutral
+    if is_neutral(fx):
+        return False
+    for wav in sorted(os.listdir(out_dir)):
+        if wav.endswith(".wav"):
+            apply_to_file(os.path.join(out_dir, wav), fx)
+    return True
+
+
+def render_bank_kit(pads, out_dir, kit_name=None, *, fx=None, choke=True):
+    """The ONE path from pads (bank_pads / kit_pads) to a Hydrogen kit folder with the master fx baked in. The Export
+    button and the DAW bridge both call this, so a pad sounds the same whichever way it leaves ChopPad.
+    Returns (drumkit.xml path, fx_baked)."""
+    xml = write_hydrogen(pads, out_dir, kit_name, choke=choke)
+    return xml, bake_fx(out_dir, fx)

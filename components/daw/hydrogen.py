@@ -120,7 +120,11 @@ class HydrogenBridge:
         path = os.path.join(self.songs, f"{project.song_id}.h2song")
         info = h2song.write_song(path, title=project.title, bpm=project.bpm, beats_per_bar=project.beats_per_bar,
                                  wavs=[os.path.basename(w) if w else None for w in project.wavs()], pattern=project.pattern,
-                                 bank=project.bank, kit_name=project.kit_name, empty_wav=self._silence(project))
+                                 bank=project.bank, kit_name=project.kit_name, empty_wav=self._silence(project),
+                                 choke=getattr(project, "choke", True),
+                                 gains_db=[c.gain_db if c else 0.0 for c in project.chops],
+                                 pitches=[c.pitch if c else 0.0 for c in project.chops],
+                                 swing=getattr(project, "swing", 0.0), quant=getattr(project, "quant", "1/16"))
         return path, info
 
     def render(self, project, out_wav, *, timeout=120):

@@ -259,6 +259,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     lastChop = c;
     store.dispatch({ type: "pad.select", pad });
     emit("hit", { pad, velocity });
+    dawHit(bank, pad, velocity); // CHOP-11: tell an open DAW bridge (fire and forget, after the sound)
   }
   // note repeat: a held pad retriggers at the chosen rate, in time with the tempo
   const held = new Map(); // pad -> interval handle
@@ -320,6 +321,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   function togglePattern() {
     if (seq.state.playing) seq.stop(); else { stopSong(); syncSeqTempo(); seq.start(); }
     emit("seq", {});
+    dawTransport(seq.state.playing ? "play-pattern" : "stop"); // CHOP-11
   }
   const patternMidi = () => {
     const { chops, project } = store.get();
@@ -463,15 +465,41 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
 
   // ---- remote control: what an agent (or another tab) does arrives on /events and is played here ----
   const remoteMeta = { remote: true, save: false }; // already on disk, and not ours to send back
+  // ---- CHOP-11: while a DAW bridge is open on the server, our own pad hits and pattern play/stop are reported to it ----
+  // The server tells us on the stream (`daw` event, first message of every stream) whether one is open and which bank its
+  // kit holds. Reports are `local: true` transport posts: the server hands them to the bridge and does NOT rebroadcast
+  // them, so other tabs do not play them too. Nothing here waits for the network or can fail the audio trigger.
+  const daw = { open: false, bank: null, tokens: 40, t: 0 };
+  // Roles: with several tabs on one song only the primary one (the first to connect; the server says so with a `role` event)
+  // executes transport commands, so an agent's `hit` or `play` sounds once, not once per tab. Others only display.
+  let primary = true;
+  let fromRemote = false; // true while executing a command that came from the stream: never reported back
+  function dawSend(body) {
+    send(`/api/songs/${id}/transport`, { method: "POST", body: JSON.stringify({ ...body, local: true }) }).catch(() => {});
+  }
+  function dawHit(bank, pad, velocity) {
+    if (fromRemote || !daw.open || (daw.bank != null && daw.bank !== bank)) return;
+    const now = performance.now(); // 80 hits a second, bursts of 40: well above what hands can play
+    daw.tokens = Math.min(40, daw.tokens + (now - daw.t) * 0.08);
+    daw.t = now;
+    if (daw.tokens < 1) return;
+    daw.tokens -= 1;
+    dawSend({ command: "hit", pad, velocity, bank });
+  }
+  function dawTransport(command) {
+    if (!fromRemote && daw.open) dawSend({ command });
+  }
   function runTransport(msg) {
+    if (!primary) return;
     if (ctx.state !== "running") ctx.resume().catch(() => {});
     switch (msg.command) {
-      case "play-pattern": if (!seq.state.playing) togglePattern(); break;
+      case "play-pattern": if (!seq.state.playing) { fromRemote = true; try { togglePattern(); } finally { fromRemote = false; } } break;
       case "stop": panic(); break;
       case "play-song": playSong(Number.isFinite(msg.from) ? msg.from : undefined); break;
       case "hit":
         if (Number.isInteger(msg.bank)) setBank(msg.bank);
-        if (Number.isInteger(msg.pad)) hit(msg.pad, Number.isFinite(msg.velocity) ? msg.velocity : 1);
+        fromRemote = true;
+        try { if (Number.isInteger(msg.pad)) hit(msg.pad, Number.isFinite(msg.velocity) ? msg.velocity : 1); } finally { fromRemote = false; }
         break;
     }
   }
@@ -480,6 +508,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const r = await fetch(`/api/songs/${id}`);
     if (!r.ok) return;
     const d = await r.json();
+    if (d.daw) { daw.open = !!d.daw.open; daw.bank = Number.isInteger(d.daw.bank) ? d.daw.bank : null; } // CHOP-11
     const want = initialState({ project: d.project, chops: d.chops }).project;
     const have = store.get().project;
     const apply = (a) => store.dispatch(a, remoteMeta);
@@ -503,11 +532,11 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   let stream = null;
   let streamDropped = false;
   if (typeof EventSource !== "undefined") {
-    stream = new EventSource(`/api/songs/${id}/events?origin=${ORIGIN}`);
+    stream = new EventSource(`/api/songs/${id}/events?origin=${ORIGIN}&role=1`);
     stream.addEventListener("open", () => {
       if (streamDropped) { streamDropped = false; resync().catch(() => {}); }
     });
-    stream.addEventListener("error", () => { streamDropped = true; }); // EventSource reconnects by itself
+    stream.addEventListener("error", () => { streamDropped = true; primary = false; }); // reconnects by itself and is told its role again
     const onMessage = (type, handle) => stream.addEventListener(type, (e) => {
       let data;
       try { data = JSON.parse(e.data); } catch { return; }
@@ -517,11 +546,13 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     onMessage("actions", (d) => { for (const a of d.actions ?? []) store.dispatch(a, remoteMeta); });
     onMessage("chops", (d) => adoptChops(d.chops));
     onMessage("transport", runTransport);
+    onMessage("role", (d) => { primary = !!d.primary; });
+    onMessage("daw", (d) => { daw.open = !!d.open; daw.bank = Number.isInteger(d.bank) ? d.bank : null; });
   }
 
   return {
     id, meta, analysis, peaks, buffer, video, store, engine, seq,
-    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, flush },
+    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, get primary() { return primary; }, flush },
     on: (type, fn) => events.addEventListener(type, fn),
     off: (type, fn) => events.removeEventListener(type, fn),
     position, playSong, stopSong,

@@ -12,20 +12,32 @@ Routes
   POST /api/regrid {id, grid, meter, beat_offset, bpm_mult}   (also /api/songs/<id>/regrid)
   PUT  /api/songs/<id>/project   whole-document save (kept for compatibility; also broadcast as actions)
   POST /api/songs/<id>/actions   {actions:[...]} -> contracts §8 reducer -> project.json -> {project, applied, ...}
-  GET  /api/songs/<id>/events    server-sent events: actions | chops | transport (contracts §10)
+  GET  /api/songs/<id>/events    server-sent events: actions | chops | transport | daw (contracts §10)
+  GET  /api/events               library-level server-sent events: `job` {job, state: queued|running|done|error, step, progress,
+                                 song?, error?} for every import; a new stream is first told the recent jobs
   POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
+                                 with `local: true` (a tab reporting its own hit/play/stop): not rebroadcast, only handed to
+                                 an open DAW bridge (rate limited; 429 when too fast, delivered:false when no bridge)
+  `role` event {primary, tabs} on a song stream opened with `?role=1` (a browser tab): the first tab to connect is primary and
+                                 executes transport commands, later tabs only display; the next oldest is promoted when it leaves
+  `daw` event {open, daw, bank} on the song stream (on open/close of a bridge; also first on a stream that connects while one
+                                 is open; GET /api/songs/<id> has the same state as `daw`)
   POST /api/songs/<id>/daw       {daw: hydrogen|ardour, command: open|sync|play|stop, bank?} -> DAW bridge (contracts §11)
 Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
 import hashlib
+import itertools
 import json
 import os
 import queue
 import re
+import select
 import shutil
+import socket
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -99,10 +111,15 @@ KEEPALIVE_S = 10.0
 
 
 class Client:
-    """One open event stream."""
-    def __init__(self, origin: str = ""):
+    """One open event stream. `roles`: a browser tab that asked for a role (`?role=1`): see Hub._assign_locked."""
+    _seq = itertools.count()
+
+    def __init__(self, origin: str = "", roles: bool = False):
         self.origin = origin
         self.q = queue.Queue(maxsize=1000)
+        self.roles = roles
+        self.seq = next(Client._seq)  # connection order
+        self.primary = None           # None until told
 
 
 class Hub:
@@ -112,17 +129,32 @@ class Hub:
         self.subs = {}  # song id -> set[Client]
         self.closed = False
 
-    def subscribe(self, sid, origin=""):
-        c = Client(origin)
+    def subscribe(self, sid, origin="", roles=False):
+        c = Client(origin, roles)
         with self.lock:
             if self.closed:
                 c.q.put(None)
             self.subs.setdefault(sid, set()).add(c)
+            self._assign_locked(sid)
         return c
 
     def unsubscribe(self, sid, c):
         with self.lock:
             self.subs.get(sid, set()).discard(c)
+            self._assign_locked(sid)
+
+    def _assign_locked(self, sid):
+        """CHOP-11: of the tabs that asked for a role the first to connect is `primary` (the only one that executes
+        transport commands: play, stop, hit), the others only display. Each tab is told its role (`role` event
+        {primary}) when it changes; when the primary goes away the next oldest tab is promoted. Caller holds the lock."""
+        tabs = sorted((c for c in self.subs.get(sid, ()) if c.roles), key=lambda c: c.seq)
+        for i, c in enumerate(tabs):
+            if c.primary != (i == 0):
+                c.primary = i == 0
+                try:
+                    c.q.put_nowait(f"event: role\ndata: {json.dumps({'primary': c.primary, 'tabs': len(tabs)}, separators=(',', ':'))}\n\n")
+                except queue.Full:
+                    pass
 
     def listeners(self, sid):
         with self.lock:
@@ -141,6 +173,7 @@ class Hub:
                     n += 1
                 except queue.Full:  # a stuck client must not stall the others
                     self.subs[sid].discard(c)
+                    self._assign_locked(sid)
         return n
 
     def close_all(self):
@@ -166,23 +199,51 @@ class ChopPadServer(ThreadingHTTPServer):
         super().shutdown()
 
 
+LIBRARY = "*"  # hub key of the library-level stream (GET /api/events): events that belong to no song yet
+
+
+def job_event(j):
+    """A job document as the `job` event sent on GET /api/events: {job, state, step, progress, song?, error?}."""
+    ev = {"job": j["job"], "state": j["state"], "step": j.get("stage"), "progress": j.get("progress", 0.0)}
+    if j.get("id"):
+        ev["song"] = j["id"]
+    if j.get("error"):
+        ev["error"] = j["error"]
+    return ev
+
+
 class Jobs:
     def __init__(self):
         self.lock = threading.Lock()
         self.jobs = {}
+        self.on_change = None  # fn(job document) after every change; make_server wires it to the library stream
 
     def get(self, jid):
         with self.lock:
             return dict(self.jobs.get(jid) or {})
 
+    def snapshot(self, limit=50):
+        """The newest jobs, oldest first (what a new library stream is told first, so it cannot miss a job that moved on)."""
+        with self.lock:
+            return [dict(j) for j in list(self.jobs.values())[-limit:]]
+
+    def _changed(self, jid):
+        if self.on_change:
+            try:
+                self.on_change(self.get(jid))
+            except Exception:  # noqa: BLE001 - a listener must not break an import
+                pass
+
     def update(self, jid, **kw):
         with self.lock:
             self.jobs[jid].update(kw)
+        self._changed(jid)
 
     def start(self, media_root, url, pipeline):
         jid = uuid.uuid4().hex[:12]
         with self.lock:
             self.jobs[jid] = {"job": jid, "state": "queued", "stage": "queued", "progress": 0.0, "url": url}
+        self._changed(jid)
         threading.Thread(target=self._run, args=(jid, media_root, url, pipeline), daemon=True).start()
         return jid
 
@@ -198,13 +259,39 @@ class Jobs:
             self.update(jid, state="error", stage="error", error=f"{type(e).__name__}: {e}")
 
 
+class TokenBucket:
+    """Allows `rate` events a second with bursts up to `burst`; thread-safe, never blocks."""
+    def __init__(self, rate, burst):
+        self.rate, self.burst, self.tokens, self.t = float(rate), float(burst), float(burst), time.monotonic()
+        self.lock = threading.Lock()
+
+    def take(self):
+        with self.lock:
+            now = time.monotonic()
+            self.tokens = min(self.burst, self.tokens + (now - self.t) * self.rate)
+            self.t = now
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return True
+            return False
+
+
+LOCAL_RATE = (80, 40)  # a tab's own pad hits and play/stop handed to a DAW bridge: events per second, burst
+
+
 def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, actions=None,
-                host: str = "127.0.0.1", on_transport=None):
+                host: str = "127.0.0.1", on_transport=None, daw_state=None):
     actions = actions or {}  # name -> fn(media_dir, body) -> json-able; POST /api/songs/<id>/<name>
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
     hub = Hub()
+    jobs.on_change = lambda j: hub.publish(LIBRARY, "job", job_event(j))
     view_state = {}  # song id -> {bank, selected, settings, sections}: what the player looks at (never saved)
+    local_buckets, buckets_guard = {}, threading.Lock()  # song id -> TokenBucket for `local` transport
+
+    def daw_of(sid):
+        """{open, daw, bank} of the DAW bridge holding song `sid` (W2 DawManager.state_for), or "closed"."""
+        return daw_state(sid) if daw_state else {"open": False, "daw": None, "bank": None}
     locks, locks_guard = {}, threading.Lock()
 
     def song_lock(sid):
@@ -291,10 +378,19 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
         def _origin(self):
             return (self.headers.get("X-ChopPad-Origin") or "")[:64]
 
+        def _peer_gone(self):
+            """True when the client closed its end of this connection (readable with EOF)."""
+            try:
+                r, _, _ = select.select([self.connection], [], [], 0)
+                return bool(r) and self.connection.recv(1, socket.MSG_PEEK) == b""
+            except (OSError, ValueError):
+                return True
+
         def _events(self, sid):
-            """Server-sent events: stays open until the client goes away or the server shuts down."""
+            """Server-sent events: stays open until the client goes away or the server shuts down.
+            sid is a song id, or LIBRARY for the library-level stream (`job` events of imports)."""
             origin = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("origin", [""])[0][:64]
-            client = hub.subscribe(sid, origin)
+            client = hub.subscribe(sid, origin, roles=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("role") == ["1"])
             self.close_connection = True
             try:
                 self.send_response(200)
@@ -304,12 +400,25 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
                 self.wfile.write(b"retry: 1500\n: connected\n\n")
+                if sid == LIBRARY:  # CHOP-11: told about every recent job first, so a job that moved on cannot be missed
+                    for j in jobs.snapshot():
+                        self.wfile.write(f"event: job\ndata: {json.dumps(job_event(j), separators=(',', ':'))}\n\n".encode())
+                elif daw_of(sid).get("open"):  # CHOP-11: a tab that connects while a bridge is open is told at once
+                    self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(sid), separators=(',', ':'))}\n\n".encode())
                 self.wfile.flush()
+                last = time.monotonic()
                 while True:
                     try:
-                        msg = client.q.get(timeout=KEEPALIVE_S)
+                        msg = client.q.get(timeout=1.0)
                     except queue.Empty:
-                        msg = ": ping\n\n"  # also how a vanished client is noticed
+                        # a closed tab is noticed within a second (its socket reads EOF), so the next tab is promoted
+                        # quickly; the ping is only to keep proxies and idle timers awake
+                        if self._peer_gone():
+                            break
+                        if time.monotonic() - last < KEEPALIVE_S:
+                            continue
+                        msg = ": ping\n\n"
+                    last = time.monotonic()
                     if msg is None:
                         break
                     self.wfile.write(msg.encode())
@@ -366,10 +475,26 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     msg["bank"] = body["bank"]
             if cmd == "play-song" and isinstance(body.get("from"), (int, float)):
                 msg["from"] = body["from"]
+            if body.get("local") is True:
+                return self._local_transport(sid, msg)
             listeners = hub.publish(sid, "transport", msg)
             if on_transport:  # W2: mirror to open DAW bridges (never lets a DAW problem fail the request)
                 on_transport(sid, msg)
             return self._json({"ok": True, "listeners": listeners})
+
+        # ---- CHOP-11: what a tab played itself (pad hit, pattern play/stop) goes to the open DAW bridge only ----
+        def _local_transport(self, sid, msg):
+            """`local: true`: the tab already did it. NOT published to the other tabs (they would play it too); handed to
+            the DAW bridge when one is open, rate limited per song. Answers at once; never waits on the DAW."""
+            if not daw_of(sid).get("open"):
+                return self._json({"ok": True, "delivered": False, "reason": "no bridge open"})
+            with buckets_guard:
+                bucket = local_buckets.setdefault(sid, TokenBucket(*LOCAL_RATE))
+            if not bucket.take():
+                return self._json({"ok": True, "delivered": False, "reason": "rate limited"}, 429)
+            if on_transport:
+                on_transport(sid, {**msg, "local": True})
+            return self._json({"ok": True, "delivered": True})
 
         def _song_dir(self, sid):
             if not ID_RE.match(sid or ""):
@@ -455,6 +580,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._media(os.path.join(media_root, parts[0], parts[1]))
             if p == "/api/kits" or p.startswith("/api/kits/"):
                 return self._kits("GET")
+            if p == "/api/events":  # CHOP-11: library-level stream: `job` events {job, state, step, progress, song?, error?}
+                if self.command == "HEAD":
+                    return self._err(405, "GET only")
+                return self._events(LIBRARY)
             if p == "/api/songs":
                 return self._json(self._library())
             m = re.match(r"^/api/songs/([^/]+)/events$", p)
@@ -472,7 +601,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 load = lambda n: read_json(os.path.join(d, n))  # noqa: E731
                 return self._json({"meta": load("meta.json"), "analysis": load("analysis.json"),
                                    "chops": load("chops.json"), "peaks": compute_peaks(d), "project": load_project(d),
-                                   "view": {k: (view_state.get(m.group(1)) or {}).get(k) for k in ("bank", "selected")}})
+                                   "view": {k: (view_state.get(m.group(1)) or {}).get(k) for k in ("bank", "selected")},
+                                   "daw": daw_of(m.group(1))})
             m = re.match(r"^/api/jobs/([0-9a-f]+)$", p)
             if m:
                 j = jobs.get(m.group(1))
@@ -524,7 +654,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if not d:
                     return self._err(404, "unknown song")
                 try:
-                    return self._json(actions[m.group(2)](d, self._body()))
+                    abody = self._body()
+                    if m.group(2) == "daw" and isinstance(abody, dict):  # swing/quant/choke: what the player is set to
+                        abody = {**abody, "view_settings": (view_state.get(m.group(1)) or {}).get("settings") or {}}
+                    return self._json(actions[m.group(2)](d, abody))
                 except ValueError as e:  # bad input for the action (W3: stretch, export of a mixed kit, ...)
                     return self._err(400, str(e))
                 except Exception as e:  # noqa: BLE001 - shown in the UI
@@ -593,4 +726,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                             "banks": len(ch["banks"]), "added": os.path.getmtime(os.path.join(d, "meta.json"))})
             return sorted(out, key=lambda s: -s["added"])
 
-    return ChopPadServer((host, port), Handler, hub)
+    srv = ChopPadServer((host, port), Handler, hub)
+
+    def announce_daw(sid):
+        """A bridge opened or closed for `sid`: tell every tab on it (`daw` event {open, daw, bank})."""
+        hub.publish(sid, "daw", daw_of(sid))
+    srv.announce_daw = announce_daw
+    return srv

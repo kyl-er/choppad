@@ -123,23 +123,19 @@ def _advise(media_dir, body):
 def _export(media_dir, body):
     """kind=hydrogen: install the bank as a Hydrogen drumkit (with body.fx baked in via pedalboard);
     kind=sfz: write <id>-bank<N>.sfz next to audio.wav (zero-copy, so no fx)."""
-    from choppad_export import export_hydrogen, export_sfz
+    from choppad_export import bank_pads, export_sfz, render_bank_kit
     bank = int(body.get("bank") or 0)
     sid = os.path.basename(media_dir)
     title = json.load(open(os.path.join(media_dir, "meta.json"))).get("title", sid)
     if body.get("kind") == "hydrogen":
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        export_hydrogen(media_dir, out, bank=bank, kit_name=name, overrides=body.get("overrides"))
+        # the same pad -> audio path the DAW bridge uses (custom slice, other song, stretch, fx bake; gain/pitch in the kit)
+        _, baked = render_bank_kit(bank_pads(media_dir, bank, body.get("overrides")), out, name, fx=body.get("fx"),
+                                   choke=body.get("choke", True) is not False)
         note = "Restart Hydrogen or use Drumkits > Rescan to see it."
-        fx = body.get("fx")
-        if fx:
-            from choppad_fx import apply_to_file, is_neutral
-            if not is_neutral(fx):
-                for wav in sorted(os.listdir(out)):
-                    if wav.endswith(".wav"):
-                        apply_to_file(os.path.join(out, wav), fx)
-                note = "Tone/reverb baked into the samples. " + note
+        if baked:
+            note = "Tone/reverb baked into the samples. " + note
         return {"path": out, "kit": name, "note": note}
     if body.get("kind") == "zip":
         from choppad_export import export_zip
@@ -221,15 +217,21 @@ def make_server(media_root: str, port: int = 8960):
     os.makedirs(media_root, exist_ok=True)
     # --- W2 DAW bridge: POST /api/songs/<id>/daw, and mirroring of agent-driven transport (components/daw) ---
     from manager import DawManager
-    daw = DawManager()
+    fake_log = os.environ.get("CHOPPAD_DAW_FAKE")  # test hook (tests/e2e/test_bridge.py): bridges that only write a log, no DAW
+    if fake_log:
+        from fake_bridge import fake_bridges, no_midi
+        daw = DawManager(bridges=fake_bridges(fake_log), midi_factory=no_midi)
+    else:
+        daw = DawManager()
 
     def _daw(media_dir, body):
         return daw.command(os.path.basename(media_dir), media_dir, body)
     srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
                          "savekit": _savekit, "key": _key, "daw": _daw},
-                on_transport=daw.on_transport)
+                on_transport=daw.on_transport, daw_state=daw.state_for)
     srv.daw = daw
+    daw.on_change = lambda sid: srv.announce_daw(sid)  # `daw` events when a bridge opens or closes
     _shutdown = srv.shutdown
 
     def shutdown():
@@ -317,6 +319,9 @@ def build_verb_parser():
     s.add_argument("id", nargs="?", help="song id (required)")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
     s.add_argument("--bank", type=int, help="bank to export (default: the bank the pattern plays, else 0)")
+    s.add_argument("--swing", type=float, help="0..0.5, bake this swing into the DAW pattern (the browser's swing is not saved)")
+    s.add_argument("--quant", choices=["off", "1/8", "1/16"], help="the step swing refers to (default 1/16)")
+    s.add_argument("--choke", action=argparse.BooleanOptionalAction, default=None, help="pads cut each other off (default on)")
     s = add("station", "start ChopPad (if it is not running), open a song in the DAW wired to it, print the URL")
     s.add_argument("id", nargs="?", help="song id (default: the newest song in the library)")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
@@ -408,7 +413,7 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "show":
             j(c.summary(a.id))
         elif a.verb == "import":
-            j(c.import_source(a.source, wait_s=a.wait, progress=lambda job: err(f"{job.get('stage')} {job.get('progress', 0):.0%}")))
+            j(c.import_source(a.source, wait_s=a.wait, progress=lambda ev: err(f"import: {ev.get('step')} {ev.get('progress') or 0:.0%}")))
         elif a.verb == "regrid":
             if a.bpm is not None:
                 chops = c.reanalyze(a.id, a.bpm, a.meter)
@@ -447,7 +452,7 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
         elif a.verb == "daw":
-            r = c.daw(a.id, a.daw, a.op, a.bank)
+            r = c.daw(a.id, a.daw, a.op, a.bank, **{k: getattr(a, k) for k in ("swing", "quant", "choke") if getattr(a, k) is not None})
             j(r)
             if r.get("not_implemented"):
                 err("note: " + r["not_implemented"])
