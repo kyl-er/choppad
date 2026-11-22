@@ -50,7 +50,7 @@ def compute_peaks(media_dir: str, points: int = PEAK_POINTS) -> dict:
     """Max-abs peaks of audio.wav for the waveform view; cached as peaks.json."""
     path = os.path.join(media_dir, "peaks.json")
     if os.path.isfile(path):
-        return json.load(open(path))
+        return read_json(path)
     import numpy as np
     import soundfile as sf
     audio, sr = sf.read(os.path.join(media_dir, "audio.wav"), dtype="float32", always_2d=True)

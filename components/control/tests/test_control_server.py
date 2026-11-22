@@ -1,36 +1,8 @@
 """Actions endpoint, server-sent events, origin suppression, transport and shutdown (contracts §10).
 Runs the real server (make_server(port=0)) in a thread on a synthetic song folder; stdlib only."""
-import http.client, json, os, shutil, sys, tempfile, threading, time, unittest
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..")))
-from _common import *  # noqa: E402,F403
-sys.path.insert(0, os.path.join(ROOT, "components", "control"))  # noqa: F405
-import server as srvmod  # noqa: E402
-
-CHOPS = {"schema": "choppad.chops/2", "grid": "1/4", "bpm": 120, "beats_per_bar": 4,
-         "chops": [{"index": i, "start": i * 0.5, "end": i * 0.5 + 0.5, "bar": i // 4, "beat": i % 4} for i in range(40)],
-         "banks": [list(range(0, 16)), list(range(16, 32)), list(range(32, 40))]}
-
-
-def jwrite(path, doc):
-    with open(path, "w") as f:
-        json.dump(doc, f)
-
-
-def jread(path):
-    with open(path) as f:
-        return json.load(f)
-
-
-def make_song_root():
-    root = tempfile.mkdtemp(prefix="choppad-ctl-")
-    d = os.path.join(root, "song1")
-    os.makedirs(d)
-    jwrite(os.path.join(d, "meta.json"), {"id": "song1", "title": "Test Song", "duration_s": 20.0})
-    jwrite(os.path.join(d, "chops.json"), CHOPS)
-    jwrite(os.path.join(d, "analysis.json"), {"duration_s": 20.0, "bpm": 120, "meter": {"beats_per_bar": 4, "beat_unit": 4},
-                                              "beats": [], "downbeats": []})
-    return root
+import http.client, json, os, shutil, sys, threading, time, unittest
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from support import CHOPS, jread, jwrite, make_song_root, srvmod, start_server  # noqa: E402
 
 
 class Stream:
@@ -92,10 +64,7 @@ class ControlServer(unittest.TestCase):
             doc = {**CHOPS, "grid": kw["grid"]}
             jwrite(os.path.join(d, "chops.json"), doc)
             return doc
-        self.srv = srvmod.make_server(self.root, port=0, regrid=regrid)
-        self.port = self.srv.server_address[1]
-        self.thread = threading.Thread(target=lambda: self.srv.serve_forever(poll_interval=0.05), daemon=True)
-        self.thread.start()
+        self.srv, self.port = start_server(self.root, regrid=regrid)
         self.streams = []
         self.addCleanup(self.stop)
 
