@@ -34,7 +34,7 @@ Gaps carried into v4:
 | AI advisor dead | all OpenRouter keys return 401 |
 | No DAW link | exports write files only; no MIDI out, clock, transport sync or remote control; Hydrogen is not launched |
 | Not agent-drivable | HTTP API is partial, no CLI verbs, no MCP, API edits do not show in an open browser |
-| UI is one file | `components/ui/ui.js` (about 880 lines) mixes state, actions and DOM; the split planned in v3 §3 never happened |
+| UI is one file | `components/ui/ui.js` (746 lines) mixes state, actions and DOM; the split planned in v3 §3 never happened |
 | No browser e2e in the repo | v3 required one per milestone |
 | Phone acceptance | never run |
 
