@@ -148,11 +148,17 @@ session.on(type, fn) .off(type, fn) .destroy()
 - `meta.from === "wave"` marks a slice change made by dragging a waveform region, so the view does not redraw the regions.
 - `window.choppad.song.session` exposes the open session for tests and debugging.
 
-## 10. Agent control (W1)
-- `POST /api/songs/<id>/actions` body `{ actions: [action, …] }` → applies §8 actions to the saved project with the server reducer, writes `project.json`, returns `{ project, applied: n }`. View-only actions (`pad.select`, `bank.set`, `settings.set`) are accepted and forwarded but not saved.
-- `GET /api/songs/<id>/events` → `text/event-stream`. One message per applied batch: `event: actions`, `data: { origin, actions }`. Other events: `chops` (`data` = §3 after a regrid), `job` (import progress), `transport` (`{ command: "play-pattern"|"stop"|"play-song"|"hit", … }`).
-- Each browser tab sends a random `origin` id with its own writes (`X-ChopPad-Origin` header) and ignores messages carrying it. Messages from elsewhere are dispatched with `{ remote: true, save: false }`.
-- CLI verbs and MCP tools are thin clients of these two endpoints plus the existing ones (`/api/songs`, `/regrid`, `/reanalyze`, `/sections`, `/advise`, `/export`).
+## 10. Agent control (W1, built) — `components/control/`
+- `components/control/choppad_actions.py`: `initial_state`, `reduce`, `project_doc`, `diff_project` — the §8 reducer on the server; passes `fixtures/actions.json`.
+- `POST /api/songs/<id>/actions` body `{ actions: [action, …] }` → applies §8 actions with the server reducer, writes `project.json` atomically, returns `{ project, applied, ignored, view: { bank, selected }, listeners }`. `chops.replace` is ignored here: chops change only through `/regrid` and `/reanalyze`.
+- The server keeps per-song view state in memory only (bank, selected, settings, sections). Browsers forward `bank.set` so "the current bank" means the one on screen; `pad.select`, `settings.set` and `sections.set` stay per tab. `GET /api/songs/<id>` also returns `view`.
+- `GET /api/songs/<id>/events?origin=<id>` → `text/event-stream`. Messages: `actions` (`{ origin, actions }`), `chops` (`{ origin, chops }` after regrid or reanalyze), `transport` (`{ origin, command, pad?, velocity?, bank?, from? }`). Import `job` events are not emitted yet.
+- `POST /api/songs/<id>/transport` body `{ command: "play-pattern"|"stop"|"play-song"|"hit", pad?, velocity?, bank?, from? }` → publishes the `transport` event, returns `{ ok, listeners }`. Every open tab executes it.
+- `PUT /api/songs/<id>/project` still works; the server diffs old and new and broadcasts the difference as an ordinary `actions` batch.
+- Each tab sends a random origin id in `X-ChopPad-Origin` on every write and ignores messages carrying it. Messages from elsewhere are dispatched with `{ remote: true, save: false }`. After a dropped stream the tab re-reads the song and applies the difference.
+- Browser edits are sent as action batches about every 80 ms (runs of the same edit collapse); if that POST fails the whole project is PUT.
+- CLI (`choppad songs|show|import|regrid|assign|pad|pattern|fx|play|hit|export`, server from `--server` or `CHOPPAD_SERVER`) and the MCP server (`components/control/choppad_mcp.py`, stdio, stdlib JSON-RPC) are thin clients of these endpoints. `choppad <url> --serve` is unchanged.
+- Advisor endpoint and model: `CHOPPAD_LLM_URL`, `CHOPPAD_LLM_MODEL`, `CHOPPAD_LLM_KEY` (fallback `OPENROUTER_API_KEY`); `advise(model=None)` reads them.
 - The server keeps binding to `127.0.0.1` only.
 
 ## 11. DAW bridge (W2) — `components/daw/`

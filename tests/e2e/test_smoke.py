@@ -227,8 +227,8 @@ class SongScreenSmoke(unittest.TestCase):
         # sections arrive from the server and are drawn
         page.wait_for_function(f"{sess}.store.get().sections.length > 0", timeout=20000)
         self.assertGreater(page.locator(".section-seg").count(), 0)
-        os.makedirs(os.path.join(REPO, "docs", "screenshots"), exist_ok=True)
-        page.screenshot(path=os.path.join(REPO, "docs", "screenshots", "choppad-v4-seam.png"))
+        if os.environ.get("CHOPPAD_SHOT"):  # optional screenshot for a human to look at
+            page.screenshot(path=os.environ["CHOPPAD_SHOT"])
         self.assertEqual(errors, [])
         page.close()
 

@@ -4,3 +4,4 @@ __pycache__/
 node_modules/
 *.wav
 *.mp4
+.claude/
