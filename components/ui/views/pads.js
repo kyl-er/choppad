@@ -1,7 +1,7 @@
 // 4x4 pads (pad 1 bottom-left, MPC style), bank keys A-D with group arrows, the bank label and the note-variation slider.
 // Also the pad / bank / panic events from the keyboard and MIDI input. createPadGrid() is shared with the phone pad mode.
 import { cellToPad } from "/layout.js";
-import { PADS } from "/actions.js";
+import { PADS, sixteenLevel } from "/actions.js";
 import { createDisposer, fmt } from "./util.js";
 
 /** Builds the 16 pad buttons inside `grid` and keeps them drawn from the store. velocity() gives the hit velocity. */
@@ -17,7 +17,7 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}
       el.className = "pad";
       el.dataset.pad = p;
       el.setAttribute("aria-label", `Pad ${p + 1}`);
-      el.innerHTML = `<span class="pad-no">${p + 1}</span><span class="pad-label"></span><span class="pad-time"></span>`;
+      el.innerHTML = `<span class="pad-no">${p + 1}</span><span class="pad-label"></span><span class="pad-time"></span><span class="pad-mg" hidden></span><span class="pad-tag" hidden></span>`;
       const down = new Set();
       el.addEventListener("pointerdown", (e) => {
         e.preventDefault();
@@ -38,17 +38,34 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}
       grid.append(el);
     }
   }
+  const STEM_TAG = { drums: "DRM", bass: "BAS", vocals: "VOC", other: "OTH" };
+  const fmtLevel = (mode, lv) => (mode === "velocity" ? [`${Math.round(lv.vel * 100)}`, "vel %"] : mode === "pitch" ? [`${lv.pitch > 0 ? "+" : ""}${lv.pitch}`, "semitones"]
+    : [lv.cutoff >= 1000 ? `${(lv.cutoff / 1000).toFixed(1)}k` : String(lv.cutoff), "cutoff Hz"]);
   function render() {
-    const { bank, selected } = store.get();
+    const { bank, selected, project, settings } = store.get();
+    const sx = settings.sixteen;
     for (let p = 0; p < PADS; p++) {
       const c = engine.getSlice(bank, p), el = els[p];
+      const o = project.overrides[`${bank}:${p}`], mg = project.pads[p].muteGroup ?? 0;
+      el.classList.toggle("fitted", o?.stretch?.fit !== undefined);       // fitted to the project tempo (stretch.fit)
+      el.classList.toggle("handstretched", !!o?.stretch && o.stretch.fit === undefined);
+      el.classList.toggle("resampled", !!o?.src);
+      el.classList.toggle("levels", !!sx);
+      el.classList.toggle("tagged", !!mg || !!o?.src || !!o?.stem || o?.stretch?.fit !== undefined);   // room under the label for the badges
+      const mgEl = el.querySelector(".pad-mg"), tag = el.querySelector(".pad-tag");
+      const mgText = mg ? `M${mg}` : "";
+      if (mgEl.textContent !== mgText) { mgEl.textContent = mgText; mgEl.hidden = !mg; mgEl.title = mg ? `Mute group ${mg}` : ""; }
+      const tagText = o?.src ? "RS" : o?.stem ? STEM_TAG[o.stem] ?? "STM" : o?.stretch?.fit !== undefined ? "FIT" : "";
+      if (tag.textContent !== tagText) { tag.textContent = tagText; tag.hidden = !tagText; tag.title = o?.src ? "Resampled sound" : o?.stem ? `Plays the ${o.stem} stem` : tagText ? `Fitted to the project tempo (${o.stretch.fit} BPM)` : ""; }
+      el.setAttribute("aria-label", `Pad ${p + 1}${mg ? `, mute group ${mg}` : ""}${o?.src ? ", resample" : ""}${o?.stem ? `, ${o.stem} stem` : ""}${o?.stretch?.fit !== undefined ? ", fitted to the project tempo" : o?.stretch ? ", stretched by hand" : ""}${sx ? `, level ${fmtLevel(sx.mode, sixteenLevel(sx.mode, p)).join(" ")}` : ""}`);
       el.classList.toggle("empty", !c);
       el.classList.toggle("custom", !!c?.custom);
       el.classList.toggle("stretched", !!c?.stretch);
       el.classList.toggle("foreign", !!c?.song);
       el.classList.toggle("selected", p === selected);
-      const label = c ? (c.custom ? "★ " + fmt(c.start) : session.chopLabel(c)) : "";
-      const time = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) + (c.stretch ? ` ×${c.stretch.ratio.toFixed(2)}` : "") + (c.song ? " ♪" : "") : "";
+      let label = c ? (c.custom ? "★ " + fmt(c.start) : session.chopLabel(c)) : "";
+      let time = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) + (c.stretch ? ` ×${c.stretch.ratio.toFixed(2)}` : "") + (c.song ? " ♪" : "") : "";
+      if (sx) [label, time] = fmtLevel(sx.mode, sixteenLevel(sx.mode, p));   // 16 levels: the pad shows its level, not the bar.beat
       const l = els[p].querySelector(".pad-label"), t = els[p].querySelector(".pad-time");
       if (l.textContent !== label) l.textContent = label;
       if (t.textContent !== time) t.textContent = time;
@@ -62,7 +79,7 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}
   const onHit = (e) => flash(e.detail.pad), onFlash = (e) => flash(e.detail.pad);
   session.on("hit", onHit); session.on("flash", onFlash);
   d.add(() => { session.off("hit", onHit); session.off("flash", onFlash); });
-  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.selected !== prev.selected || s.project.overrides !== prev.project.overrides) render(); }));
+  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.selected !== prev.selected || s.project.overrides !== prev.project.overrides || s.project.pads !== prev.project.pads || s.settings.sixteen !== prev.settings.sixteen) render(); }));
   render();
   return { els, render, flash, destroy() { d.run(); for (const e of els) clearTimeout(e._t); grid.innerHTML = ""; } };
 }
@@ -74,7 +91,7 @@ export function mount(root, session, env) {
   root.innerHTML = `<div class="pad-col">
       <div class="pads" data-c="5" role="group" aria-label="Pads"></div>
       <div class="banks" data-c="6" role="group" aria-label="Banks"></div>
-      <div class="bank-label" role="status"></div>
+      <div class="padkeys"><div class="bank-label" role="status"></div><button type="button" class="lvl-key" aria-pressed="false" title="16 levels: the 16 pads play the selected pad at 16 velocities, pitches or filter cutoffs. The mode is on the PAD page of the LCD."><i>▤</i><span>16 Levels</span></button></div>
     </div>
     <div class="nvwrap" data-c="7"><span class="cap vert">Note var.</span>
       <input type="range" min="1" max="127" step="1" class="nv" aria-label="Note variation: velocity of mouse and keyboard hits"><output class="nv-out"></output></div>`;
@@ -117,6 +134,22 @@ export function mount(root, session, env) {
   }
   d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank) renderBanks(); }));
   renderBanks();
+
+  // 16 LEVELS key: on = the selected pad is the source, the 16 pads become its levels (mode: env.levelMode, set on the LCD)
+  const lvKey = $(".lvl-key"), lvText = lvKey.querySelector("span");
+  lvKey.addEventListener("click", () => {
+    if (session.sixteen) session.setSixteenLevels({ mode: "off" });
+    else session.setSixteenLevels({ pad: st().selected, mode: env.levelMode.get() });
+  });
+  function renderLevels() {
+    const sx = session.sixteen;
+    lvKey.classList.toggle("on", !!sx);
+    lvKey.setAttribute("aria-pressed", String(!!sx));
+    lvText.textContent = sx ? `16 Lvl · pad ${sx.pad + 1}` : "16 Levels";
+    lvKey.setAttribute("aria-label", sx ? `16 levels on: source pad ${sx.pad + 1}, ${sx.mode}. Press to turn off` : "16 levels: turn on with the selected pad as the source");
+  }
+  d.add(store.subscribe((s, prev) => { if (s.settings.sixteen !== prev.settings.sixteen) renderLevels(); }));
+  renderLevels();
 
   // keyboard / MIDI input -> the session (same handlers as the classic screen)
   const handlers = {

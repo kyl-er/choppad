@@ -42,7 +42,7 @@ export function createEnv({ audio, input, library = null }) {
   mq?.addEventListener?.("change", onScheme);
   return {
     audio, input, ticker, theme: { get: theme.get, on: theme.on, set: setTheme }, volume, message, toast,
-    zoom: createCell(0), noteVar: createCell(127), actions: {},
+    zoom: createCell(0), noteVar: createCell(127), levelMode: createCell("velocity"), actions: {},
     libraryHost: library?.host ?? null, parkLibrary: library?.park ?? null,
     dispose() { ticker.stop(); mq?.removeEventListener?.("change", onScheme); toastEl?.remove(); },
   };
@@ -52,6 +52,7 @@ const zones = `<div class="zt" aria-hidden="true">${[..."ABCDEFGH"].map((c) => `
 const headerHtml = (extra = "") => `<header class="hd">
     <div class="logo">Chop<i>Pad</i></div><div class="sub">${SITE}</div>
     <div class="song">${extra}</div>
+    <div class="hd-st" aria-live="polite"><span class="daw-st" hidden></span><span class="role-st" hidden></span></div>
     <button type="button" class="hbtn" data-act="callouts" aria-pressed="true" title="Show or hide the numbered callouts and their key">Key</button>
     <button type="button" class="hbtn" data-act="theme" aria-pressed="false" title="Light (blueprint) or dark (night shift)">Dark</button>
   </header>`;
@@ -102,12 +103,26 @@ export function mountShell(root, session, env) {
   const fillHeader = () => {
     const { chops, bank } = st();
     root.querySelector(".s-title").textContent = meta.title;
-    root.querySelector(".s-meta").textContent = ` · ${chops.bpm.toFixed(1)} BPM · ${chops.beats_per_bar}/4 · BANK ${bank + 1}/${chops.banks.length}`;
+    const T = session.tempoBpm;   // the project tempo when it differs from the song's own
+    const tempo = Math.abs(T - chops.bpm) > 0.005 ? `${T.toFixed(1)} BPM (song ${chops.bpm.toFixed(1)})` : `${chops.bpm.toFixed(1)} BPM`;
+    root.querySelector(".s-meta").textContent = ` · ${tempo} · ${chops.beats_per_bar}/4 · BANK ${bank + 1}/${chops.banks.length}`;
     root.querySelector(".tb-song").textContent = String(meta.id ?? session.id).slice(0, 14);
     root.querySelector(".tb-banks").textContent = String(chops.banks.length);
   };
-  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank) fillHeader(); }));
+  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.project.tempo !== prev.project.tempo) fillHeader(); }));
   fillHeader();
+  // DAW bridge and tab role: the session keeps them from the song stream; there is no event for them, so look 4 times a second
+  const dawEl = root.querySelector(".daw-st"), roleEl = root.querySelector(".role-st");
+  let lastLook = 0;
+  d.add(env.ticker.add((now) => {
+    if (now - lastLook < 250) return;
+    lastLook = now;
+    const dw = session.remote.daw, primary = session.remote.primary;
+    const a = dw.open ? `→ ${session.remote.dawName ? session.remote.dawName[0].toUpperCase() + session.remote.dawName.slice(1) : "DAW"} (bank ${String.fromCharCode(65 + ((dw.bank ?? 0) % 26))})` : "";
+    if (dawEl.textContent !== a) { dawEl.textContent = a; dawEl.hidden = !a; }
+    const r = primary ? "" : "display only";
+    if (roleEl.textContent !== r) { roleEl.textContent = r; roleEl.hidden = !r; roleEl.title = r ? "Another tab on this song is the primary one: it plays agent and remote commands. This tab only shows." : ""; }
+  }));
   wireHeader(root, env, d);
 
   session.setBank(0, true);
