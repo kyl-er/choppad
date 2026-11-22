@@ -179,12 +179,24 @@ def _stretch(media_dir, body):
             "start": start, "end": end}
 
 
+# ---- W3: kits ----
+def _savekit(media_dir, body):
+    """POST /api/songs/<id>/savekit {bank, name [, overrides, pads, fx]} -> the new kit (what the bank holds now)."""
+    from kits import create_kit, kit_from_bank
+    media_root = os.path.dirname(os.path.abspath(media_dir))
+    name = str(body.get("name") or "").strip() or f"{os.path.basename(media_dir)} bank {int(body.get('bank') or 0) + 1}"
+    doc = kit_from_bank(media_root, os.path.basename(media_dir), int(body.get("bank") or 0), name,
+                        overrides=body.get("overrides"), pads=body.get("pads"), fx=body.get("fx"))
+    return create_kit(media_root, doc)
+
+
 def make_server(media_root: str, port: int = 8960):
     """App + media + API server (see server.py). Import jobs run the full pipeline in a thread."""
     from server import make_server as _make
     os.makedirs(media_root, exist_ok=True)
     return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
-                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch})
+                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
+                          "savekit": _savekit})
 
 
 def main():

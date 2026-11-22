@@ -22,6 +22,8 @@ import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import kits  # W3: /api/kits (kits.py next to this file)
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 UI_DIR = os.path.join(REPO, "components", "ui")
 MIDI_JS = os.path.join(REPO, "components", "midi", "midi.js")
@@ -193,8 +195,24 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             except (BrokenPipeError, ConnectionResetError):
                 pass  # browser cancelled (normal for <video> seeking)
 
+        # ---- W3: kits (all logic in kits.py) ----
+        def _kits(self, method):
+            body = self._body() if method in ("POST", "PUT") else {}
+            code, obj = kits.handle(media_root, method, self.path.split("?", 1)[0], body)
+            self._json(obj, code)
+
+        def do_DELETE(self):
+            try:
+                if self.path.split("?", 1)[0].startswith("/api/kits/"):
+                    return self._kits("DELETE")
+                self._err(404, "not found")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def do_PUT(self):
             try:
+                if self.path.split("?", 1)[0].startswith("/api/kits/"):
+                    return self._kits("PUT")
                 m = re.match(r"^/api/songs/([^/]+)/project$", self.path.split("?", 1)[0])
                 d = self._song_dir(m.group(1)) if m else None
                 if not d:
@@ -237,6 +255,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if len(parts) != 2 or not ID_RE.match(parts[0]) or not re.match(r"^[\w.-]+$", parts[1]):
                     return self._err(404, "not found")
                 return self._media(os.path.join(media_root, parts[0], parts[1]))
+            if p == "/api/kits" or p.startswith("/api/kits/"):
+                return self._kits("GET")
             if p == "/api/songs":
                 return self._json(self._library())
             m = re.match(r"^/api/songs/([^/]+)$", p)
@@ -266,6 +286,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if not url:
                     return self._err(400, "url required")
                 return self._json({"job": jobs.start(media_root, url, pipeline)}, 202)
+            if p == "/api/kits" or p.startswith("/api/kits/"):
+                return self._kits("POST")
             if p == "/api/upload":
                 return self._upload()
             m = re.match(r"^/api/songs/([^/]+)/regrid$", p)

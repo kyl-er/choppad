@@ -266,6 +266,92 @@ class CoreScreen(unittest.TestCase):
         self.assertEqual(errors + errors2, [])
         page.close()
 
+    # ------------------------------------------------------------------ 3. kits across songs
+    def test_kit_saved_on_song_a_plays_on_song_b(self):
+        S = self.S
+        # song A: give pad 1 a sound of its own, save the bank as a kit from the Kit panel
+        page, errors = self.open_song(self.sid)
+        a_slice = page.evaluate(f"{S}.engine.getSlice(0, 0)")
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pad.set', pad: 0, params: {{ pitch: 0, gainDb: -2 }} }})")
+        page.locator(".kit-name").fill("e2e kit")
+        page.locator(".kit-save").click()
+        page.wait_for_function("document.querySelector('.kit-out').textContent.includes('saved kit')", timeout=20000)
+        kit = json.load(open(os.path.join(self.tmp, "media", "_kits", "e2e-kit", "kit.json")))
+        self.assertEqual(kit["schema"], "choppad.kit/1")
+        self.assertEqual(kit["pads"][0]["song_id"], self.sid)
+        self.assertEqual(kit["pads"][0]["params"]["gainDb"], -2)
+        self.assertEqual(len([p for p in kit["pads"] if p]), len(page.evaluate(f"{S}.store.get().chops.banks[0]")))
+        page.wait_for_selector('.kits li.kit[data-id="e2e-kit"]')
+        a_audio_dur = page.evaluate(f"{S}.buffer.duration")
+        page.close()
+
+        # song B: pick the kit in the library sidebar; its pads now come from song A
+        page, errors2 = self.open_song(self.sid2)
+        page.wait_for_selector('.kits li.kit[data-id="e2e-kit"]')
+        b_slice = page.evaluate(f"{S}.engine.getSlice(0, 0)")
+        page.locator('.kits li.kit[data-id="e2e-kit"] .title').click()
+        page.wait_for_function("document.querySelector('.kits li.kit .meta').textContent.includes('loaded on bank')", timeout=60000)
+        ov = page.evaluate(f"{S}.store.get().project.overrides['0:0']")
+        self.assertEqual((ov["song"], ov["start"], ov["end"]), (self.sid, a_slice["start"], a_slice["end"]))
+        self.assertNotEqual((a_slice["start"], a_slice["end"]), (b_slice["start"], b_slice["end"]))
+        self.assertAlmostEqual(page.evaluate(f"{S}.engine.getPadBuffer(0, 0).duration"), a_audio_dur, delta=0.01)
+        self.assertEqual(page.evaluate(f"{S}.store.get().project.pads[0].gainDb"), -2)
+        self.assertIn("foreign", page.locator('.pad[data-pad="0"]').get_attribute("class"))
+
+        # the pad produces signal ...
+        page.keyboard.press("KeyZ")
+        peak = page.evaluate("""async () => {
+            const a = window.choppad.audio.analyser, buf = new Float32Array(a.fftSize);
+            let peak = 0;
+            for (let i = 0; i < 20; i++) { a.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => setTimeout(r, 15)); }
+            return peak;
+        }""")
+        self.assertGreater(peak, 0.001, "the kit pad made no sound")
+
+        # ... and it is song A's audio, not song B's: compare the offline render with both sources
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.toggleStep', pad: 0, step: 0, bank: 0 }})")
+        r = self.render_pad0(page)
+        self.assertGreater(r["peak"], 0.01)
+        both = page.evaluate("""async ([head, sidA, sidB, a, b]) => {
+            const ctx = window.choppad.audio.ctx;
+            const take = async (sid, start) => {
+                const buf = await fetch(`/media/${sid}/audio.wav`).then((r) => r.arrayBuffer()).then((x) => ctx.decodeAudioData(x));
+                return Array.from(buf.getChannelData(0).slice(Math.round(start * buf.sampleRate), Math.round(start * buf.sampleRate) + 20000));
+            };
+            const corr = (alt) => {
+                const n = 8000, from = 600; let best = -1;
+                for (let lag = 0; lag < 700; lag++) {
+                    let dot = 0, na = 0, nb = 0;
+                    for (let i = from; i < from + n; i++) { const x = head[i + lag] ?? 0, y = alt[i]; dot += x * y; na += x * x; nb += y * y; }
+                    best = Math.max(best, dot / Math.sqrt(na * nb + 1e-12));
+                }
+                return best;
+            };
+            return { fromA: corr(await take(sidA, a)), fromB: corr(await take(sidB, b)) };
+        }""", [r["head"], self.sid, self.sid2, a_slice["start"], b_slice["start"]])
+        self.assertGreater(both["fromA"], 0.95, both)
+        self.assertLess(both["fromB"], 0.8, both)
+
+        # exports work for the mixed bank (SFZ here; the Hydrogen writer is covered by the API tests)
+        code, out = api(self.base, f"/api/songs/{self.sid2}/export", {"kind": "sfz", "bank": 0, "overrides": {"0:0": ov}})
+        self.assertEqual(code, 200, out)
+        sfz = open(out["path"]).read()
+        self.assertIn(f"sample=../{self.sid}/audio.wav", sfz)
+        code, out = api(self.base, "/api/kits/e2e-kit/export", {"kind": "sfz"})
+        self.assertEqual(code, 200, out)
+
+        # saved with the song, rebound after a reload (the other song's audio is fetched again, once)
+        page.wait_for_timeout(700)
+        saved = json.load(open(os.path.join(self.tmp, "media", self.sid2, "project.json")))
+        self.assertEqual(saved["overrides"]["0:0"]["song"], self.sid)
+        page.close()
+        page, errors3 = self.open_song(self.sid2)
+        self.assertAlmostEqual(page.evaluate(f"{S}.engine.getPadBuffer(0, 0).duration"), a_audio_dur, delta=0.01)
+        n_audio_fetches = page.evaluate(f"performance.getEntriesByType('resource').filter((e) => e.name.endsWith('/media/{self.sid}/audio.wav')).length")
+        self.assertEqual(n_audio_fetches, 1)
+        self.assertEqual(errors + errors2 + errors3, [])
+        page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

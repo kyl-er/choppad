@@ -365,6 +365,37 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const seen = new Set(store.get().project.pattern.events.map((e) => `${e.bank}:${e.pad}`));
     return Promise.all([...seen].map((k) => { const [b, p] = k.split(":").map(Number); return stretchPad(b, p, how).then((r) => ({ bank: b, pad: p, ...r })); }));
   }
+  // ---- kits: 16 pads from any songs (saved on the server in media/_kits/<id>/kit.json) ----
+  /** Save what the current bank holds (slices, pad sounds, master fx) as a kit. Resolves { ok, kit, error }. */
+  async function saveBankAsKit(name) {
+    const { bank, project } = store.get();
+    const pads = Array.from({ length: PADS }, (_, p) => {
+      const sl = engine.getSlice(bank, p);
+      if (!sl) return null;
+      const k = { song_id: sl.song ?? id, start: sl.start, end: sl.end, params: { ...project.pads[p] } };
+      if (sl.stretch) k.stretch = { ...sl.stretch };
+      return k;
+    });
+    const r = await postJson("/api/kits", { name: name || `${meta.title ?? id} bank ${bank + 1}`, pads, fx: project.fx });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
+    window.dispatchEvent(new CustomEvent("choppad:kits"));
+    return { ok: true, kit: body };
+  }
+  /** Put a kit (object, or id to fetch) on the current bank. Pads from other songs load their audio once (cached).
+   *  Resolves { ok, loaded, name, error }. */
+  async function loadKit(kitOrId) {
+    let kit = kitOrId;
+    if (typeof kitOrId === "string") {
+      const r = await fetch(`/api/kits/${kitOrId}`);
+      if (!r.ok) return { ok: false, error: `kit ${kitOrId}: HTTP ${r.status}` };
+      kit = await r.json();
+    }
+    store.dispatch({ type: "kit.load", bank: store.get().bank, song: id, pads: kit.pads });
+    if (kit.fx && Object.keys(kit.fx).length) store.dispatch({ type: "fx.set", params: kit.fx });
+    await Promise.all([...pending]);
+    return { ok: true, loaded: kit.pads.filter(Boolean).length, name: kit.name };
+  }
   function clearStretch(bank, pad) { store.dispatch({ type: "slice.stretch", bank, pad, stretch: null }); }
 
   function panic() {
@@ -387,7 +418,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     regrid, reanalyze,
     toggleRecord, togglePattern, patternMidi, renderPatternWav,
     loadSections, advise, loadAiBank, exportBank,
-    stretchPad, stretchBank, stretchPattern, clearStretch,
+    stretchPad, stretchBank, stretchPattern, clearStretch, saveBankAsKit, loadKit,
     panic,
     destroy() {
       unsubscribe();

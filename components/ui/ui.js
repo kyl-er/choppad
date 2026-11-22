@@ -235,6 +235,12 @@ export async function mountSong(root, { id, audio, input }) {
   btn(".tempo-btns", "beat +1", () => regrid({ shift: 1 }));
   btn(".tempo-btns", "set bar 1 = last pad", () => regrid({ bar1: true }));
 
+  // ---- kits ----
+  $(".kit-save").addEventListener("click", async () => {
+    const r = await session.saveBankAsKit($(".kit-name").value.trim());
+    $(".kit-out").innerHTML = r.ok ? `✓ saved kit “${esc(r.kit.name)}” (${r.kit.pads.filter(Boolean).length} pads)` : `<span class="error">${esc(r.error)}</span>`;
+  });
+
   // ---- time-stretch ----
   const stBpm = $(".st-bpm");
   stBpm.value = st().chops.bpm.toFixed(1);

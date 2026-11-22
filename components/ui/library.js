@@ -13,12 +13,44 @@ export function mountLibrary(root, { onOpen }) {
       <input type="file" accept="audio/*,video/*,.mp3,.wav,.flac,.ogg,.m4a,.aiff" multiple hidden></label>
     <div class="jobs"></div>
     <div class="section-h">Library</div>
-    <ul class="songs"></ul>`;
+    <ul class="songs"></ul>
+    <div class="section-h">Kits</div>
+    <ul class="kits" style="list-style:none;padding:0;margin:0"></ul>`;
   const form = root.querySelector(".import");
   const jobsEl = root.querySelector(".jobs");
   const list = root.querySelector(".songs");
+  const kitList = root.querySelector(".kits");
   let active = null;
   let songs = [];
+
+  // Kits: 16 pads from any songs. Click one to put it on the open song's current bank.
+  async function refreshKits() {
+    let kits = [];
+    try { kits = await fetch("/api/kits").then((r) => r.json()); } catch { kits = []; }
+    if (!Array.isArray(kits)) kits = [];
+    kitList.innerHTML = kits.length ? "" : `<li class="empty">No kits yet — “save bank as kit” on a song.</li>`;
+    for (const k of kits) {
+      const li = document.createElement("li");
+      li.className = "kit";
+      li.dataset.id = k.id;
+      li.innerHTML = `<div class="title">${esc(k.name)}</div>
+        <div class="meta">${k.pads} pads · ${k.songs.length} song${k.songs.length === 1 ? "" : "s"} <button class="kit-del" title="delete kit" type="button">×</button></div>`;
+      li.addEventListener("click", async (e) => {
+        if (e.target.closest(".kit-del")) return;
+        const session = window.choppad?.song?.session;
+        const meta = li.querySelector(".meta");
+        if (!session) { meta.textContent = "open a song first"; return; }
+        const r = await session.loadKit(k.id);
+        meta.textContent = r.ok ? `loaded on bank ${session.store.get().bank + 1}` : r.error;
+      });
+      li.querySelector(".kit-del").addEventListener("click", async () => {
+        await fetch(`/api/kits/${k.id}`, { method: "DELETE" });
+        refreshKits();
+      });
+      kitList.append(li);
+    }
+  }
+  window.addEventListener("choppad:kits", refreshKits);
 
   async function refresh() {
     try {
@@ -122,8 +154,9 @@ export function mountLibrary(root, { onOpen }) {
   });
 
   refresh();
+  refreshKits();
   return {
-    refresh,
+    refresh, refreshKits,
     setActive(id) {
       active = id;
       for (const li of list.querySelectorAll(".song")) li.classList.toggle("active", li.dataset.id === id);
