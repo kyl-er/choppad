@@ -29,6 +29,8 @@ import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import kits  # W3: /api/kits (kits.py next to this file)
+
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "components", "control"))
 import choppad_actions as A  # noqa: E402  (server-side twin of components/ui/actions.js)
@@ -38,7 +40,7 @@ CHUNK = 256 * 1024
 MAX_RANGE = 8 * 2**20  # answer open-ended ranges with at most 8 MiB; browsers ask again for more
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
-        ".jpg": "image/jpeg", ".webp": "image/webp", ".mp4": "video/mp4", ".wav": "audio/wav", ".sfz": "text/plain",
+        ".jpg": "image/jpeg", ".webp": "image/webp", ".mp4": "video/mp4", ".wav": "audio/wav", ".sfz": "text/plain", ".zip": "application/zip",
         ".xml": "application/xml", ".ico": "image/x-icon"}
 MAX_UPLOAD = 300 * 2**20
 AUDIO_EXT = {".mp3", ".wav", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".aif", ".aiff", ".mp4", ".mov", ".webm", ".mkv"}
@@ -381,8 +383,24 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             except (BrokenPipeError, ConnectionResetError):
                 pass  # browser cancelled (normal for <video> seeking)
 
+        # ---- W3: kits (all logic in kits.py) ----
+        def _kits(self, method):
+            body = self._body() if method in ("POST", "PUT") else {}
+            code, obj = kits.handle(media_root, method, self.path.split("?", 1)[0], body)
+            self._json(obj, code)
+
+        def do_DELETE(self):
+            try:
+                if self.path.split("?", 1)[0].startswith("/api/kits/"):
+                    return self._kits("DELETE")
+                self._err(404, "not found")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def do_PUT(self):
             try:
+                if self.path.split("?", 1)[0].startswith("/api/kits/"):
+                    return self._kits("PUT")
                 m = re.match(r"^/api/songs/([^/]+)/project$", self.path.split("?", 1)[0])
                 d = self._song_dir(m.group(1)) if m else None
                 if not d:
@@ -424,9 +442,15 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._static(MIDI_JS)
             if p.startswith("/media/"):
                 parts = p[len("/media/"):].split("/")
+                if len(parts) == 3 and parts[1] == "stretch":  # W3: rendered time-stretched slices
+                    if not ID_RE.match(parts[0]) or not re.match(r"^[0-9a-f]{16}\.wav$", parts[2]):
+                        return self._err(404, "not found")
+                    return self._media(os.path.join(media_root, parts[0], "stretch", parts[2]))
                 if len(parts) != 2 or not ID_RE.match(parts[0]) or not re.match(r"^[\w.-]+$", parts[1]):
                     return self._err(404, "not found")
                 return self._media(os.path.join(media_root, parts[0], parts[1]))
+            if p == "/api/kits" or p.startswith("/api/kits/"):
+                return self._kits("GET")
             if p == "/api/songs":
                 return self._json(self._library())
             m = re.match(r"^/api/songs/([^/]+)/events$", p)
@@ -464,6 +488,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if not url:
                     return self._err(400, "url required")
                 return self._json({"job": jobs.start(media_root, url, pipeline)}, 202)
+            if p == "/api/kits" or p.startswith("/api/kits/"):
+                return self._kits("POST")
             if p == "/api/upload":
                 return self._upload()
             m = re.match(r"^/api/songs/([^/]+)/(actions|transport)$", p)
@@ -482,7 +508,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._err(404, "unknown song")
                 try:
                     chops = regrid(d, grid=body.get("grid") or "1/4", meter=body.get("meter"),
-                                   beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1)
+                                   beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1,
+                                   **({"mode": body["mode"], "sensitivity": body.get("sensitivity")} if body.get("mode") else {}))
                 except (ValueError, KeyError) as e:
                     return self._err(400, str(e))
                 hub.publish(sid, "chops", {"origin": self._origin(), "chops": chops})
@@ -494,6 +521,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._err(404, "unknown song")
                 try:
                     return self._json(actions[m.group(2)](d, self._body()))
+                except ValueError as e:  # bad input for the action (W3: stretch, export of a mixed kit, ...)
+                    return self._err(400, str(e))
                 except Exception as e:  # noqa: BLE001 - shown in the UI
                     return self._err(502 if m.group(2) == "advise" else 500, f"{type(e).__name__}: {e}")
             m = re.match(r"^/api/songs/([^/]+)/reanalyze$", p)
@@ -550,7 +579,11 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     continue
                 meta = read_json(os.path.join(d, "meta.json"))
                 ch = read_json(os.path.join(d, "chops.json"))
-                out.append({"id": sid, "title": meta.get("title"), "duration_s": meta.get("duration_s"),
+                try:  # W3: key, when the song has been analysed for it
+                    key = json.load(open(os.path.join(d, "analysis.json"))).get("key")
+                except (OSError, ValueError):
+                    key = None
+                out.append({"key": key, "id": sid, "title": meta.get("title"), "duration_s": meta.get("duration_s"),
                             "bpm": ch.get("bpm"), "meter": f"{ch.get('beats_per_bar')}/4", "chops": len(ch["chops"]),
                             "banks": len(ch["banks"]), "added": os.path.getmtime(os.path.join(d, "meta.json"))})
             return sorted(out, key=lambda s: -s["added"])

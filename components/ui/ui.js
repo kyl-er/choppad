@@ -24,7 +24,7 @@ export async function mountSong(root, { id, audio, input }) {
   <section class="song-view">
     <header class="lcd">
       <div class="lcd-main"><div class="lcd-title">${esc(meta.title)}</div>
-        <div class="lcd-row"><b class="bpm"></b> BPM · <b class="meter"></b> · <span class="pos">bar 1.1</span> · <span class="clock">0:00.0</span> / ${fmt(meta.duration_s)}
+        <div class="lcd-row"><b class="bpm"></b> BPM · <b class="meter"></b> · <b class="key" title="musical key"></b> · <span class="pos">bar 1.1</span> · <span class="clock">0:00.0</span> / ${fmt(meta.duration_s)}
         · confidence <span class="conf">${Math.round((analysis.confidence ?? 0) * 100)}%</span></div></div>
       <div class="master"><label>Volume <input class="vol" type="range" min="0" max="1.5" step="0.01"></label>
         <div class="vu"><i></i></div></div>
@@ -73,9 +73,20 @@ export async function mountSong(root, { id, audio, input }) {
       <div class="stepgrid" title="Click a cell to add/remove a hit on the current bank · Shift-click = soft hit · click a row name to hear the pad"></div>
     </div>
     <div class="panels">
-      <div class="panel"><h3>Grid</h3><div class="row grid-btns"></div><div class="row meter-btns"></div>
+      <div class="panel"><h3>Grid</h3>
+        <div class="row chop-mode"><span class="muted small">chop by:</span>
+          <button class="mode-grid" type="button">grid</button><button class="mode-transient" type="button">transients</button>
+          <input class="sens" type="range" min="0" max="1" step="0.05" value="0.5" title="transient sensitivity"><span class="sens-out muted small"></span></div>
+        <div class="row grid-btns"></div><div class="row meter-btns"></div>
         <div class="row tempo-btns"></div>
         <div class="row"><button class="tap" title="T">tap tempo (T)</button><span class="tap-bpm muted">tap 4×…</span><button class="tap-apply" disabled>apply</button></div></div>
+      <div class="panel stretch"><h3>Time-stretch</h3>
+        <div class="row"><label>fit to <input class="st-bpm" type="number" min="30" max="300" step="0.1" style="width:5em"> BPM</label></div>
+        <div class="row"><button class="st-pad">pad</button><button class="st-bank">bank</button><button class="st-pattern">pattern pads</button><button class="st-clear">reset pad</button></div>
+        <div class="st-out muted small">Same pitch, new length (rubberband). A stretched pad plays its rendering instead of the song region; pitch still works on top.</div></div>
+      <div class="panel kit"><h3>Kit</h3>
+        <div class="row"><input class="kit-name" placeholder="kit name" style="width:9em"><button class="kit-save">save bank as kit</button></div>
+        <div class="kit-out muted small">Kits (16 pads, any songs) are listed in the library on the left; click one to put it on this bank.</div></div>
       <div class="panel"><h3>Pads</h3>
         <label>mode <select class="mode"><option value="oneshot">one-shot</option><option value="gate">gate (hold)</option><option value="playthrough">play-through</option></select></label>
         <label><input type="checkbox" class="choke" checked> choke</label>
@@ -94,7 +105,7 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="row"><button class="ai-run">Analyze with AI</button><button class="ai-bank" disabled>load AI bank on pads</button></div>
         <div class="ai-out muted small">Sends a 32 kbps mono copy to an OpenRouter audio model (≤ $0.05/song, cached). Sections above work offline.</div></div>
       <div class="panel export"><h3>Export</h3>
-        <div class="row"><button class="exp-h2">install bank → Hydrogen kit</button><button class="exp-sfz">write bank → SFZ</button></div>
+        <div class="row"><button class="exp-h2">install bank → Hydrogen kit</button><button class="exp-sfz">write bank → SFZ</button><button class="exp-zip">bank → zip of WAVs</button></div>
         <div class="exp-out muted small">Exports the current bank (16 pads). The Hydrogen kit gets your tone/reverb baked in; SFZ stays dry.</div></div>
       <div class="panel"><h3>MIDI</h3><ul class="devices"></ul>
         <div class="row"><button class="learn">Learn pads</button><button class="reset">Reset map</button></div>
@@ -162,9 +173,11 @@ export async function mountSong(root, { id, audio, input }) {
       const el = padEls[p];
       el.classList.toggle("empty", !c);
       el.classList.toggle("custom", !!c?.custom);
+      el.classList.toggle("stretched", !!c?.stretch);   // W3: plays a time-stretched rendering
+      el.classList.toggle("foreign", !!c?.song);         // W3: slice of another song (kit)
       el.classList.toggle("selected", p === selected);
       el.querySelector(".pad-label").textContent = c ? (c.custom ? "★ " + fmt(c.start) : padLabel(c)) : "";
-      el.querySelector(".pad-time").textContent = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) : "";
+      el.querySelector(".pad-time").textContent = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) + (c.stretch ? ` ×${c.stretch.ratio.toFixed(2)}` : "") + (c.song ? " ♪" : "") : "";
       el.style.setProperty("--hue", c ? (c.custom ? 48 : BAR_HUES[c.bar % 4]) : 0);
     }
   }
@@ -213,18 +226,45 @@ export async function mountSong(root, { id, audio, input }) {
   };
   for (const g of ["1/4", "1/8", "1/16"]) btn(".grid-btns", g, () => regrid({ grid: g }), "grid-" + g.replace("/", "-"));
   for (const m of ["2/4", "3/4", "4/4"]) btn(".meter-btns", m, () => regrid({ meter: m }), "meter-" + m.replace("/", "-"));
+  $(".mode-grid").addEventListener("click", () => regrid({ mode: "grid" }));
+  $(".mode-transient").addEventListener("click", () => regrid({ mode: "transient" }));
+  $(".sens").addEventListener("change", (e) => regrid({ mode: "transient", sensitivity: Number(e.target.value) }));
   btn(".tempo-btns", "÷2", () => regrid({ mult: 0.5 }));
   btn(".tempo-btns", "×2", () => regrid({ mult: 2 }));
   btn(".tempo-btns", "beat −1", () => regrid({ shift: -1 }));
   btn(".tempo-btns", "beat +1", () => regrid({ shift: 1 }));
   btn(".tempo-btns", "set bar 1 = last pad", () => regrid({ bar1: true }));
 
+  // ---- kits ----
+  $(".kit-save").addEventListener("click", async () => {
+    const r = await session.saveBankAsKit($(".kit-name").value.trim());
+    $(".kit-out").innerHTML = r.ok ? `✓ saved kit “${esc(r.kit.name)}” (${r.kit.pads.filter(Boolean).length} pads)` : `<span class="error">${esc(r.error)}</span>`;
+  });
+
+  // ---- time-stretch ----
+  const stBpm = $(".st-bpm");
+  stBpm.value = st().chops.bpm.toFixed(1);
+  const stretchTo = () => ({ target_bpm: Number(stBpm.value) });
+  const stretchDone = (r) => {
+    const list = [].concat(r), bad = list.filter((x) => !x.ok);
+    $(".st-out").innerHTML = bad.length ? `<span class="error">${esc(bad[0].error)}</span>` : `✓ ${list.length} pad${list.length === 1 ? "" : "s"} fitted to ${stBpm.value} BPM`;
+  };
+  $(".st-pad").addEventListener("click", async () => { $(".st-out").textContent = "stretching…"; stretchDone(await session.stretchPad(st().bank, st().selected, stretchTo())); });
+  $(".st-bank").addEventListener("click", async () => { $(".st-out").textContent = "stretching…"; stretchDone(await session.stretchBank(stretchTo())); });
+  $(".st-pattern").addEventListener("click", async () => { $(".st-out").textContent = "stretching…"; stretchDone(await session.stretchPattern(stretchTo())); });
+  $(".st-clear").addEventListener("click", () => session.clearStretch(st().bank, st().selected));
+
   // ---- LCD, volume, meter ----
   function renderLcd() {
     const { chops } = st();
     $(".bpm").textContent = chops.bpm.toFixed(1);
     $(".meter").textContent = `${chops.beats_per_bar}/4`;
-    root.querySelectorAll(".grid-btns button").forEach((b) => b.classList.toggle("on", b.textContent === chops.grid));
+    const transient = chops.mode === "transient";
+    $(".mode-grid").classList.toggle("on", !transient);
+    $(".mode-transient").classList.toggle("on", transient);
+    $(".sens-out").textContent = transient ? `${chops.chops.length} slices` : "";
+    if (transient && document.activeElement !== $(".sens")) $(".sens").value = chops.sensitivity ?? 0.5;
+    root.querySelectorAll(".grid-btns button").forEach((b) => b.classList.toggle("on", !transient && b.textContent === chops.grid));
     root.querySelectorAll(".meter-btns button").forEach((b) => b.classList.toggle("on", b.textContent === `${chops.beats_per_bar}/4`));
   }
   const vol = $(".vol");
@@ -496,10 +536,21 @@ export async function mountSong(root, { id, audio, input }) {
     const out = $(".exp-out");
     out.textContent = "exporting…";
     const r = await session.exportBank(kind);
-    out.innerHTML = r.ok ? `✓ ${esc(r.path)}${r.note ? "<br>" + esc(r.note) : ""}` : `<span class="error">${esc(r.error)}</span>`;
+    out.innerHTML = r.ok ? `✓ ${esc(r.path)}${r.url ? ` <a class="exp-download" href="${esc(r.url)}" download>download</a>` : ""}${r.note ? "<br>" + esc(r.note) : ""}` : `<span class="error">${esc(r.error)}</span>`;
   }
   $(".exp-h2").addEventListener("click", () => doExport("hydrogen"));
   $(".exp-sfz").addEventListener("click", () => doExport("sfz"));
+  $(".exp-zip").addEventListener("click", () => doExport("zip"));
+
+  // ---- key (shown in the LCD; detected once on the server for songs that have none) ----
+  const keyText = (k) => (k ? `${k.tonic} ${k.mode === "minor" ? "min" : "maj"}` : "");
+  const renderKey = () => {
+    const k = analysis.key;
+    $(".key").textContent = keyText(k);
+    $(".key").title = k ? `key ${k.tonic} ${k.mode} (confidence ${Math.round(k.confidence * 100)}%)` : "musical key";
+  };
+  renderKey();
+  if (!analysis.key) session.detectKey().then((k) => { if (k) { renderKey(); window.choppad?.library?.refresh?.(); } });
 
   // ---- modes ----
   $(".mode").addEventListener("change", (e) => setting({ mode: e.target.value }));

@@ -44,6 +44,7 @@ All times are seconds (float) from the start of `audio.wav`. Pipeline per source
 - `bpm` is **derived**: within 0.5% of `60 / median(diff(beats))`. `bpm_candidates` includes `bpm` (and should include ½× and 2×).
 - `downbeats ⊆ beats`, exactly `beats_per_bar` beats apart, last downbeat is not the final beat. Quiet/spoken intros are skipped.
 - `beats_per_bar ∈ {2,3,4}`, `beat_unit = 4` (6/8, 7/8 deferred). `method` is any non-empty string.
+- v4: optional `"key": {"tonic": "C".."B" (sharps), "mode": "major"|"minor", "confidence": 0..1}`. `POST /api/songs/<id>/key` detects it once and caches it in `analysis.json`.
 
 ## 3. `chops.json` — **chop**
 ```json
@@ -55,6 +56,7 @@ All times are seconds (float) from the start of `audio.wav`. Pipeline per source
 - Chops contiguous (`end[i] == start[i+1]`), `bar = i // steps_per_bar`, `beat = i % steps_per_bar`. Pickup before bar 1 and the trailing beat with no end are dropped.
 - `bank_size = (16 // steps_per_bar) × steps_per_bar` if `steps_per_bar ≤ 16` else 16. Every bank starts on `beat == 0`; only the last bank may be short.
 - `resolveChop(chops, bank, pad) = chops.chops[chops.banks[bank]?.[pad]] ?? null`.
+- v4: optional `"mode": "grid"|"transient"` (absent = grid) and, in transient mode, `"sensitivity": 0..1`. A transient table keeps `schema`, `bpm`, `beats_per_bar`, `bpm_mult`, `beat_offset`, `pads_per_bank`, `bank_size = 16`; `grid` is `"1/16"`; chops are contiguous and banks hold 16 chops, but `bar`/`beat` are the nearest 1/16 position of the analysis grid, so a bank need not start on `beat == 0` and `bar == index // steps_per_bar` need not hold. `POST …/regrid` accepts `{mode, sensitivity}`. Only the server tags `"mode"`; `chop()` stays pure and the golden sample is unchanged.
 
 ## 4. Pad events (JS, **midi** → **ui**/**integrate**)
 ```js
@@ -97,7 +99,9 @@ createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate"|"playthrough",
 State of one open song. Only `project` is saved (`media/<id>/project.json`, `PUT /api/songs/<id>/project`).
 ```js
 { project: { pads: [16 × { gainDb, pitch, attack, release, reverse, mode|null }],
-             overrides: { "<bank>:<pad>": { start, end } },          // custom slices; absent = grid chop
+             overrides: { "<bank>:<pad>": { start, end, song?, stretch? } },   // custom slices; absent = grid chop
+                                         // song: id of another song the slice comes from (absent = this song)
+                                         // stretch: { ratio, url }: a rendering the pad plays instead (ratio = new length / old)
              pattern: { bars, events: [{ beat, pad, bank, vel, pass }] },   // beat = quarter notes from loop start; pass -1 = drawn
              fx: { tone, low, mid, high, filter, reverb, size } },
   chops,                       // §3, replaced on regrid
@@ -116,6 +120,8 @@ Every change is an action `{ type, ... }` applied by a pure reducer. Invalid or 
 | `slice.set` | `bank, pad, start, end` | custom slice on a pad (`end > start`) |
 | `slice.clear` | `bank, pad` | back to the grid chop |
 | `slice.setMany` | `bank, slices: [{pad, start, end}]` | several custom slices at once |
+| `slice.stretch` | `bank, pad, stretch: {ratio, url} \| null` | attach or remove a stretch rendering; a grid pad first becomes an override with its chop's start/end |
+| `kit.load` | `bank, song?, pads: [kitPad \| null × 16]` | per non-null `{song_id, start, end, params?, stretch?}`: set the override (`song` omitted when equal to `action.song`) and merge `params`; null pads are left alone |
 | `fx.set` | `params` | merge master fx params |
 | `pattern.toggleStep` | `pad, step, bank?, vel?` | add or remove a drawn hit at 1/16 step `step` |
 | `pattern.addEvent` | `event` | append a recorded hit |
@@ -129,7 +135,8 @@ Every change is an action `{ type, ... }` applied by a pure reducer. Invalid or 
 | `settings.set` | `params` | merge player settings |
 
 - `fixtures/actions.json` holds the cases; `components/ui/test/actions.test.js` runs them. A second implementation passes the same file.
-- New state or actions (W3: filter, ADSR, mute groups, kits; W1: transport) are added here first, with fixture cases, by the orchestrator.
+- `slice.set` replaces the whole override, so re-slicing a pad drops its `song` and `stretch`.
+- New state or actions (W3 second slice: filter, ADSR, mute groups, 16 levels, song mode, project tempo) are added here first, with fixture cases, by the orchestrator.
 
 ## 9. Session (JS): the seam between sound and screen
 `openSong()` returns the only object a view needs. A view never creates an engine, sequencer or fetch call of its own.
@@ -187,3 +194,11 @@ def separate(media_dir: str, *, backend: str | None = None) -> dict[str, str]   
 ```
 - Backends: `none` (default; raises `StemsUnavailable`), `remote` (POSTs `audio.wav` to `CHOPPAD_STEMS_URL`, expects a zip of the four WAVs; same length and sample rate as `audio.wav`). No local model in v4.
 - Results cached in `media/<id>/stems/`. `meta.json` gains optional `"stems": ["drums", …]`. A chop may name its source: `overrides["b:p"] = { start, end, stem? }`.
+
+## 13. Sampler core (W3 first slice, built)
+- Kit: `media/_kits/<kit-id>/kit.json` = `{schema: "choppad.kit/1", name, pads: [{song_id, start, end, params, stretch?} | null × 16], fx}`; `params` use the §8 pad keys; `stretch.url` is `/media/<song_id>/stretch/<16 hex>.wav`. Folders under `media/` whose name starts with `_` are never evicted by the cache cap.
+- HTTP: `GET/POST /api/kits`, `GET/PUT/DELETE /api/kits/<id>`, `POST /api/kits/<id>/export {kind: "hydrogen"|"sfz"|"zip"}`, `POST /api/songs/<id>/savekit {bank, name}`, `POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]} -> {url, duration, ratio, hash, start, end}` (rubberband, cached in `media/<id>/stretch/`), `POST /api/songs/<id>/export {kind: "zip"} -> {path, url}`, `GET /media/<id>/stretch/<hash>.wav`.
+- Exports (Hydrogen, SFZ, zip) follow the pads as played: custom slices, other-song sources and stretch renderings, read from the request body or the saved `project.json`.
+- Session: `stretchPad(bank, pad, {ratio|target_bpm})`, `stretchBank`, `stretchPattern`, `clearStretch`, `saveBankAsKit(name)`, `loadKit(kitOrId)`, `detectKey()`; regrid change `{mode: "grid"|"transient", sensitivity?}`; event `key`.
+- Engine: `setPadBuffer(bank, pad, buffer|null, {whole, gain})`, `getPadBuffer(bank, pad)`; nothing asynchronous on the trigger path.
+- Open: there is no project tempo yet (the sequencer runs at `chops.bpm`), so a stretched pattern cannot play at a new tempo.

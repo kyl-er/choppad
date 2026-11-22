@@ -46,8 +46,15 @@ def analyze(audio_path: str, meter: str | None = None, bpm: float | None = None)
 
     bpb, downbeats, meter_conf = _detect_meter(beats, accent_env, active_start_s, meter)
 
+    try:  # optional: musical key (contracts: analysis["key"]); never blocks the tempo analysis
+        from choppad_key import detect_key
+        key = detect_key(mono, SR)
+    except Exception:  # noqa: BLE001
+        key = None
+
     return {
         "schema": "choppad.analysis/2",
+        **({"key": key} if key else {}),
         "duration_s": duration_s,
         "bpm": derived_bpm,
         "bpm_candidates": candidates,

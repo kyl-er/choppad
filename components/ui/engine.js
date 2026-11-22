@@ -89,11 +89,31 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     }
     return revBuffer;
   }
+  // Per-pad alternate sound source (W3): a time-stretched rendering of the slice ({whole: false}: the buffer IS the slice)
+  // or another song's audio ({whole: true}: play from the slice start like the main buffer). key -> {buffer, whole, gain}
+  const padBuffers = new Map();
+  const reversedCache = new WeakMap();
+  const reversedOf = (buf) => {
+    if (buf === buffer) return reversedBuffer();
+    let r = reversedCache.get(buf);
+    if (!r) {
+      r = ctx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
+      for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+        const src = buf.getChannelData(ch), dst = r.getChannelData(ch), n = src.length;
+        for (let i = 0; i < n; i++) dst[i] = src[n - 1 - i];
+      }
+      reversedCache.set(buf, r);
+    }
+    return r;
+  };
   function sliceFor(bank, pad) {
     const base = resolveChop(_chops, bank, pad);
     const o = overrides.get(`${bank}:${pad}`);
     if (!o) return base;
-    return { ...(base ?? { index: -1, bar: 0, beat: 0 }), start: o.start, end: o.end, custom: true };
+    const out = { ...(base ?? { index: -1, bar: 0, beat: 0 }), start: o.start, end: o.end, custom: true };
+    if (o.song) out.song = o.song;
+    if (o.stretch) out.stretch = o.stretch;
+    return out;
   }
 
   function chokeAll(now) {
@@ -115,18 +135,22 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     const now = when ?? ctx.currentTime;
     if (_choke) chokeAll(now);
 
+    const alt = padBuffers.get(`${bank}:${pad}`);   // stretched slice or another song's audio, else the main song
+    const srcBuf = alt ? alt.buffer : buffer;
+    const sliceBuf = alt && !alt.whole;             // the buffer is exactly the slice: play it from 0
     const rate = Math.pow(2, P.pitch / 12);
-    const level = normGain * Math.pow(10, P.gainDb / 20) * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
+    const level = (alt ? alt.gain : normGain) * Math.pow(10, P.gainDb / 20) * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
     const source = ctx.createBufferSource();
-    source.buffer = P.reverse ? reversedBuffer() : buffer;
+    source.buffer = P.reverse ? reversedOf(srcBuf) : srcBuf;
     source.playbackRate.value = rate;
     const gainNode = ctx.createGain();
     source.connect(gainNode);
     gainNode.connect(output ?? ctx.destination);
 
-    const dur = chop.end - chop.start;       // in song time
+    const dur = sliceBuf ? srcBuf.duration : chop.end - chop.start;   // in source time
     const realDur = dur / rate;              // in wall-clock time
-    const offset = P.reverse ? buffer.duration - chop.end : chop.start;
+    const offset = sliceBuf ? 0 : (P.reverse ? srcBuf.duration - chop.end : chop.start);
+    const follow = !(alt && alt.whole);      // the video is the open song's: it does not follow another song's pad
     const attack = Math.min(P.attack, realDur / 2);
     gainNode.gain.setValueAtTime(0, now);
     gainNode.gain.linearRampToValueAtTime(level, now + attack);
@@ -135,10 +159,10 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
       gainNode.gain.setValueAtTime(level, now + Math.max(attack, realDur - P.release));
       gainNode.gain.linearRampToValueAtTime(1e-6, now + realDur);
       source.start(now, offset, dur);
-      followAt(now, chop.start, realDur);
+      if (follow) followAt(now, chop.start, realDur);
     } else {
       source.start(now, offset); // gate: until release; playthrough: until choked
-      followAt(now, chop.start, null);
+      if (follow) followAt(now, chop.start, null);
     }
 
     const voice = { source, gain: gainNode, pad, mode, release: P.release };
@@ -194,8 +218,28 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     /** Merge sound params into a pad: {gainDb, pitch, attack, release, reverse, mode|null}. */
     setPadParams(pad, partial) { Object.assign(padParams[pad], partial); },
     getPadParams(pad) { return { ...padParams[pad] }; },
-    /** Put a custom slice {start, end} on (bank, pad); null restores the grid chop. */
-    setOverride(bank, pad, slice) { if (slice) overrides.set(`${bank}:${pad}`, { start: slice.start, end: slice.end }); else overrides.delete(`${bank}:${pad}`); },
+    /** Put a custom slice {start, end, song?, stretch?} on (bank, pad); null restores the grid chop.
+     *  A slice without `stretch` / `song` drops that pad's alternate buffer. */
+    setOverride(bank, pad, slice) {
+      const key = `${bank}:${pad}`;
+      if (slice) {
+        const o = { start: slice.start, end: slice.end };
+        if (slice.song) o.song = slice.song;
+        if (slice.stretch) o.stretch = slice.stretch;
+        overrides.set(key, o);
+        const alt = padBuffers.get(key);
+        if (alt && ((alt.whole && !slice.song) || (!alt.whole && !slice.stretch))) padBuffers.delete(key);
+      } else { overrides.delete(key); padBuffers.delete(key); }
+    },
+    /** Play (bank, pad) from `buf` instead of the song: `whole: false` = the buffer is the slice itself (a stretched
+     *  render), `whole: true` = another song's full audio (played from the slice start). null goes back to the song.
+     *  `gain` = level normalisation for it (default: the song's for a slice, its own peak for a whole song). */
+    setPadBuffer(bank, pad, buf, { whole = false, gain } = {}) {
+      const key = `${bank}:${pad}`;
+      if (!buf) { padBuffers.delete(key); return; }
+      padBuffers.set(key, { buffer: buf, whole, gain: gain ?? (whole ? normalizationGain(buf) : normGain) });
+    },
+    getPadBuffer(bank, pad) { return padBuffers.get(`${bank}:${pad}`)?.buffer ?? null; },
     getOverrides() { return Object.fromEntries(overrides); },
     getSlice(bank, pad) { return sliceFor(bank, pad); },
     _ctx: ctx,

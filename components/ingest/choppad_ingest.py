@@ -138,7 +138,7 @@ def enforce_cap(media_root: str, cap_bytes: int, keep: str | None = None) -> lis
 
     dirs = []
     for entry in os.scandir(media_root):
-        if entry.is_dir():
+        if entry.is_dir() and not entry.name.startswith("_"):  # "_kits" and other "_" dirs are user data, never evicted
             st = entry.stat()
             dirs.append((st.st_mtime, entry.name, entry.path))
 

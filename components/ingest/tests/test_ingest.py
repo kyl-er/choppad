@@ -76,6 +76,16 @@ class Cap(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("CHOPPAD_NET") == "1", "network test: set CHOPPAD_NET=1")
 class YouTube(unittest.TestCase):
+    def test_eviction_never_removes_underscore_dirs(self):
+        root = tempfile.mkdtemp(prefix="choppad-cap-")
+        for i, name in enumerate(["_kits", "old", "new"]):
+            d = os.path.join(root, name); os.makedirs(d)
+            open(os.path.join(d, "blob"), "wb").write(b"x" * 1000)
+            t = time.time() - (3 - i) * 100; os.utime(d, (t, t))
+        removed = enforce_cap(root, 1100, keep="new")
+        self.assertEqual(removed, ["old"])
+        self.assertEqual(sorted(os.listdir(root)), ["_kits", "new"])
+
     def test_youtube_id_is_media_id(self):
         tmp = tempfile.mkdtemp()
         out = ingest("https://www.youtube.com/watch?v=jNQXAC9IVRw", tmp)  # "Me at the zoo", 19 s

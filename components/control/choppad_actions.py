@@ -20,7 +20,7 @@ DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant"
 
 # Actions that change the saved project. The rest only change what the player looks at (not written to project.json).
 PROJECT_ACTIONS = frozenset({
-    "pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "fx.set",
+    "pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set",
     "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load"})
 VIEW_ACTIONS = frozenset({"pad.select", "bank.set", "chops.replace", "sections.set", "settings.set"})
 ACTION_TYPES = PROJECT_ACTIONS | VIEW_ACTIONS
@@ -148,6 +148,52 @@ def reduce(state, action):
             if pad is not None and _is_num(s.get("start")) and _is_num(s.get("end")) and s["end"] > s["start"]:
                 overrides[f"{bank}:{pad}"] = {"start": s["start"], "end": s["end"]}
         return _with_project(state, overrides=overrides)
+    if t == "slice.stretch":  # attach (or, with stretch null, remove) a time-stretched rendering of the pad's slice
+        pad, bank = _pad(a.get("pad")), _bank_key(a.get("bank"))
+        if pad is None or bank is None:
+            return state
+        key = f"{bank}:{pad}"
+        cur = proj["overrides"].get(key)
+        st = a.get("stretch")
+        if not st:
+            if not cur or not cur.get("stretch"):
+                return state
+            return _with_project(state, overrides={**proj["overrides"], key: {k: v for k, v in cur.items() if k != "stretch"}})
+        ratio, url = (st.get("ratio"), st.get("url")) if isinstance(st, dict) else (None, None)
+        if not (_is_num(ratio) and ratio > 0) or not isinstance(url, str) or not url:
+            return state
+        base = cur
+        if not base:
+            chops = state.get("chops") or {}
+            try:
+                ch = chops["chops"][chops["banks"][bank][pad]]
+            except (KeyError, IndexError, TypeError):
+                return state
+            base = {"start": ch["start"], "end": ch["end"]}
+        return _with_project(state, overrides={**proj["overrides"], key: {**base, "stretch": {"ratio": ratio, "url": url}}})
+    if t == "kit.load":  # put a kit's pads (16 entries or null) on a bank; null = leave the pad alone
+        bank = a.get("bank")
+        if not (isinstance(bank, int) and not isinstance(bank, bool) and bank >= 0) or not isinstance(a.get("pads"), list):
+            return state
+        overrides = dict(proj["overrides"])
+        pads = proj["pads"]
+        for pad, k in enumerate(a["pads"][:PADS]):
+            if not isinstance(k, dict) or not isinstance(k.get("song_id"), str):
+                continue
+            s_, e_ = k.get("start"), k.get("end")
+            if not (_is_num(s_) and _is_num(e_) and e_ > s_ and s_ >= 0):
+                continue
+            o = {"start": s_, "end": e_}
+            if k["song_id"] != a.get("song"):
+                o["song"] = k["song_id"]
+            ks = k.get("stretch")
+            if isinstance(ks, dict) and ks.get("url") and _is_num(ks.get("ratio")) and ks["ratio"] > 0:
+                o["stretch"] = {"ratio": ks["ratio"], "url": ks["url"]}
+            overrides[f"{bank}:{pad}"] = o
+            params = _pick(k.get("params"), DEFAULT_PAD)
+            if params:
+                pads = [{**P, **params} if i == pad else P for i, P in enumerate(pads)]
+        return _with_project(state, overrides=overrides, pads=pads)
 
     if t == "fx.set":
         params = _pick(a.get("params"), DEFAULT_FX)
@@ -239,8 +285,14 @@ def diff_project(old, new):
     by_bank = {}
     for k, v in new["overrides"].items():
         if old["overrides"].get(k) != v:
-            bank, pad = k.split(":")
-            by_bank.setdefault(int(bank), []).append({"pad": int(pad), "start": v["start"], "end": v["end"]})
+            bank, pad = (int(x) for x in k.split(":"))
+            if "song" in v or "stretch" in v:  # a slice with a source or a stretch travels as a one-pad kit.load
+                kit = [None] * PADS
+                kit[pad] = {"song_id": v.get("song", ""), "start": v["start"], "end": v["end"],
+                            **({"stretch": v["stretch"]} if "stretch" in v else {})}
+                out.append({"type": "kit.load", "bank": bank, "song": "", "pads": kit})
+            else:
+                by_bank.setdefault(bank, []).append({"pad": pad, "start": v["start"], "end": v["end"]})
     for bank, slices in by_bank.items():
         out.append({"type": "slice.setMany", "bank": bank, "slices": slices})
     fx = {k: v for k, v in new["fx"].items() if old["fx"].get(k) != v}

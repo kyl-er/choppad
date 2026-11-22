@@ -29,6 +29,8 @@ sys.path.insert(0, os.path.join(_COMPONENTS, "..", "contracts"))
 from choppad_ingest import ingest as _ingest
 from choppad_rhythm import analyze as _analyze
 from choppad_chop import chop as _chop
+from choppad_stretch import StretchError as _StretchError, ratio_for_tempo as _ratio_for_tempo, stretch_slice as _stretch_slice
+from choppad_transient import chop_transients as _chop_transients, detect_onsets as _detect_onsets
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 UI_DIR = os.path.join(REPO_DIR, "components", "ui")
@@ -62,7 +64,7 @@ def run_pipeline(source: str, media_root: str, grid: str = "1/4", meter: str | N
         json.dump(analysis, f, indent=2)
 
     stage("chopping", 0.85)
-    chops = _chop(analysis, grid=grid, meter=meter)
+    chops = {**_chop(analysis, grid=grid, meter=meter), "mode": "grid"}
     chops_path = os.path.join(media_dir, "chops.json")
     with open(chops_path, "w") as f:
         json.dump(chops, f, indent=2)
@@ -70,10 +72,29 @@ def run_pipeline(source: str, media_root: str, grid: str = "1/4", meter: str | N
     return media_dir
 
 
-def regrid(media_dir: str, *, grid="1/4", meter=None, beat_offset=0, bpm_mult=1) -> dict:
-    """Re-run chop on media_dir/analysis.json, write chops.json, return it."""
+def _onsets(media_dir: str) -> dict:
+    """Onset candidates of audio.wav, cached as onsets.json (the sensitivity slider only re-filters them)."""
+    audio = os.path.join(media_dir, "audio.wav")
+    path = os.path.join(media_dir, "onsets.json")
+    if os.path.isfile(path) and os.path.getmtime(path) >= os.path.getmtime(audio):
+        return json.load(open(path))
+    table = _detect_onsets(audio)
+    with open(path, "w") as f:
+        json.dump(table, f)
+    return table
+
+
+def regrid(media_dir: str, *, grid="1/4", meter=None, beat_offset=0, bpm_mult=1, mode="grid", sensitivity=0.5) -> dict:
+    """Re-run chop on media_dir/analysis.json, write chops.json, return it.
+    mode="transient": slices start at detected onsets (sensitivity 0..1) instead of on the tempo grid."""
     analysis = json.load(open(os.path.join(media_dir, "analysis.json")))
-    chops = _chop(analysis, grid=grid, meter=meter, beat_offset=beat_offset, bpm_mult=bpm_mult)
+    if mode == "transient":
+        sens = float(0.5 if sensitivity is None else sensitivity)
+        chops = _chop_transients(_onsets(media_dir), analysis, sensitivity=sens, meter=meter, beat_offset=beat_offset)
+    elif mode in (None, "grid"):
+        chops = {**_chop(analysis, grid=grid, meter=meter, beat_offset=beat_offset, bpm_mult=bpm_mult), "mode": "grid"}
+    else:
+        raise ValueError("mode must be grid or transient")
     with open(os.path.join(media_dir, "chops.json"), "w") as f:
         json.dump(chops, f, indent=2)
     return chops
@@ -107,7 +128,7 @@ def _export(media_dir, body):
     if body.get("kind") == "hydrogen":
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        export_hydrogen(media_dir, out, bank=bank, kit_name=name)
+        export_hydrogen(media_dir, out, bank=bank, kit_name=name, overrides=body.get("overrides"))
         note = "Restart Hydrogen or use Drumkits > Rescan to see it."
         fx = body.get("fx")
         if fx:
@@ -118,8 +139,78 @@ def _export(media_dir, body):
                         apply_to_file(os.path.join(out, wav), fx)
                 note = "Tone/reverb baked into the samples. " + note
         return {"path": out, "kit": name, "note": note}
-    path = export_sfz(media_dir, bank=bank)
+    if body.get("kind") == "zip":
+        from choppad_export import export_zip
+        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"))
+        return {"path": os.path.abspath(path), "url": f"/media/{sid}/{os.path.basename(path)}",
+                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out), no pad sound settings or fx baked in."}
+    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"))
     return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
+
+
+# ---- W3: key detection ----
+def _key(media_dir, body):
+    """POST /api/songs/<id>/key -> {tonic, mode, confidence}; detected once and cached in analysis.json["key"]."""
+    path = os.path.join(media_dir, "analysis.json")
+    analysis = json.load(open(path))
+    if analysis.get("key") and not body.get("force"):
+        return analysis["key"]
+    from choppad_key import detect_key_file
+    analysis["key"] = detect_key_file(os.path.join(media_dir, "audio.wav"))
+    with open(path, "w") as f:
+        json.dump(analysis, f, indent=2)
+    return analysis["key"]
+
+
+# ---- W3: time-stretch ----
+def _pad_slice(media_dir, bank, pad, project=None):
+    """(start, end) of the slice on (bank, pad): the custom slice if the project has one, else the grid/transient chop."""
+    chops = json.load(open(os.path.join(media_dir, "chops.json")))
+    from server import load_project
+    ov = ((project or load_project(media_dir)).get("overrides") or {}).get(f"{bank}:{pad}")
+    if ov and ov.get("end", 0) > ov.get("start", 0) and not ov.get("song"):
+        return float(ov["start"]), float(ov["end"])
+    try:
+        ch = chops["chops"][chops["banks"][bank][pad]]
+    except (IndexError, TypeError):
+        raise ValueError(f"pad {pad} on bank {bank} is empty")
+    return ch["start"], ch["end"]
+
+
+def _stretch(media_dir, body):
+    """POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]}
+    Renders the pad's slice at `ratio` x its length (same pitch) into media/<id>/stretch/<hash>.wav (cached).
+    target_bpm: the slice is fitted so the song's tempo (or source_bpm) becomes target_bpm.
+    Returns {url, duration, ratio, hash, start, end}."""
+    sid = os.path.basename(media_dir)
+    try:
+        if body.get("start") is not None and body.get("end") is not None:
+            start, end = float(body["start"]), float(body["end"])
+        else:
+            start, end = _pad_slice(media_dir, int(body.get("bank") or 0), int(body.get("pad") or 0))
+        if body.get("ratio") is not None:
+            ratio = float(body["ratio"])
+        elif body.get("target_bpm") is not None:
+            src = float(body.get("source_bpm") or json.load(open(os.path.join(media_dir, "chops.json")))["bpm"])
+            ratio = _ratio_for_tempo(src, float(body["target_bpm"]))
+        else:
+            raise _StretchError("ratio or target_bpm required")
+        r = _stretch_slice(media_dir, start, end, ratio)
+    except (_StretchError, ValueError) as e:
+        raise ValueError(str(e))
+    return {"url": f"/media/{sid}/stretch/{r['file']}", "duration": r["duration"], "ratio": r["ratio"], "hash": r["hash"],
+            "start": start, "end": end}
+
+
+# ---- W3: kits ----
+def _savekit(media_dir, body):
+    """POST /api/songs/<id>/savekit {bank, name [, overrides, pads, fx]} -> the new kit (what the bank holds now)."""
+    from kits import create_kit, kit_from_bank
+    media_root = os.path.dirname(os.path.abspath(media_dir))
+    name = str(body.get("name") or "").strip() or f"{os.path.basename(media_dir)} bank {int(body.get('bank') or 0) + 1}"
+    doc = kit_from_bank(media_root, os.path.basename(media_dir), int(body.get("bank") or 0), name,
+                        overrides=body.get("overrides"), pads=body.get("pads"), fx=body.get("fx"))
+    return create_kit(media_root, doc)
 
 
 def make_server(media_root: str, port: int = 8960):
@@ -127,7 +218,8 @@ def make_server(media_root: str, port: int = 8960):
     from server import make_server as _make
     os.makedirs(media_root, exist_ok=True)
     return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
-                 actions={"sections": _sections, "advise": _advise, "export": _export})
+                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
+                          "savekit": _savekit, "key": _key})
 
 
 # ---------------------------------------------------------------------------------------------------------------
