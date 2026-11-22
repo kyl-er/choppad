@@ -71,8 +71,12 @@ class DawManager:
 
     def _project(self, media_dir, body):
         out_root = os.path.join(self.state_dir, "kits")
+        # player settings that are not saved with the project: swing, quant, choke. The request wins; else what the
+        # server knows of the player's view (`view_settings`, filled in by the HTTP layer).
+        view = body.get("view_settings") if isinstance(body.get("view_settings"), dict) else {}
+        extra = {k: body.get(k, view.get(k)) for k in ("swing", "quant", "choke") if body.get(k, view.get(k)) is not None}
         try:
-            return self._build(media_dir, out_root, bank=body.get("bank"))
+            return self._build(media_dir, out_root, bank=body.get("bank"), **extra)
         except FileNotFoundError as e:
             raise DawError(f"song is missing {os.path.basename(str(e.filename))}; import it again", 409)
 

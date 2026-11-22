@@ -524,7 +524,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if not d:
                     return self._err(404, "unknown song")
                 try:
-                    return self._json(actions[m.group(2)](d, self._body()))
+                    abody = self._body()
+                    if m.group(2) == "daw" and isinstance(abody, dict):  # swing/quant/choke: what the player is set to
+                        abody = {**abody, "view_settings": (view_state.get(m.group(1)) or {}).get("settings") or {}}
+                    return self._json(actions[m.group(2)](d, abody))
                 except ValueError as e:  # bad input for the action (W3: stretch, export of a mixed kit, ...)
                     return self._err(400, str(e))
                 except Exception as e:  # noqa: BLE001 - shown in the UI

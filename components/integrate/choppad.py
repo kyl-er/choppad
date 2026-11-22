@@ -123,23 +123,19 @@ def _advise(media_dir, body):
 def _export(media_dir, body):
     """kind=hydrogen: install the bank as a Hydrogen drumkit (with body.fx baked in via pedalboard);
     kind=sfz: write <id>-bank<N>.sfz next to audio.wav (zero-copy, so no fx)."""
-    from choppad_export import export_hydrogen, export_sfz
+    from choppad_export import bank_pads, export_sfz, render_bank_kit
     bank = int(body.get("bank") or 0)
     sid = os.path.basename(media_dir)
     title = json.load(open(os.path.join(media_dir, "meta.json"))).get("title", sid)
     if body.get("kind") == "hydrogen":
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        export_hydrogen(media_dir, out, bank=bank, kit_name=name, overrides=body.get("overrides"))
+        # the same pad -> audio path the DAW bridge uses (custom slice, other song, stretch, fx bake; gain/pitch in the kit)
+        _, baked = render_bank_kit(bank_pads(media_dir, bank, body.get("overrides")), out, name, fx=body.get("fx"),
+                                   choke=body.get("choke", True) is not False)
         note = "Restart Hydrogen or use Drumkits > Rescan to see it."
-        fx = body.get("fx")
-        if fx:
-            from choppad_fx import apply_to_file, is_neutral
-            if not is_neutral(fx):
-                for wav in sorted(os.listdir(out)):
-                    if wav.endswith(".wav"):
-                        apply_to_file(os.path.join(out, wav), fx)
-                note = "Tone/reverb baked into the samples. " + note
+        if baked:
+            note = "Tone/reverb baked into the samples. " + note
         return {"path": out, "kit": name, "note": note}
     if body.get("kind") == "zip":
         from choppad_export import export_zip

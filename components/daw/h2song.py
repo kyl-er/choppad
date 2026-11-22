@@ -6,7 +6,14 @@ Facts proven against Hydrogen 1.2.7 (see docs/daw-bridge-spikes.md): a pattern o
 the whole sample; the `instrument` of a note is the index in `instrumentList`.
 """
 import os
+import sys
 import xml.etree.ElementTree as ET
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "..", "export"))
+from choppad_export import hydrogen_gain, hydrogen_pitch  # noqa: E402  (pad gain dB / pitch -> Hydrogen instrument units)
+from daw_project import QUANT_BEATS, swung_beat  # noqa: E402
 
 TICKS_PER_QUARTER = 48
 PADS = 16
@@ -28,7 +35,7 @@ def _txt(parent, tag, value):
     return el
 
 
-def _instrument(parent, pad, name, wav_path, *, choke, gain, kit="ChopPad", lookup=1):
+def _instrument(parent, pad, name, wav_path, *, choke, gain, pitch=0.0, kit="ChopPad", lookup=1):
     i = ET.SubElement(parent, "instrument")
     _txt(i, "id", pad)
     _txt(i, "name", name)
@@ -49,7 +56,7 @@ def _instrument(parent, pad, name, wav_path, *, choke, gain, kit="ChopPad", look
     _txt(i, "Decay", 0)
     _txt(i, "Sustain", 1.0)
     _txt(i, "Release", 1000)
-    _txt(i, "pitchOffset", 0.0)
+    _txt(i, "pitchOffset", float(pitch))
     _txt(i, "randomPitchFactor", 0.0)
     _txt(i, "muteGroup", 0 if choke else -1)
     _txt(i, "isStopNote", False)
@@ -76,7 +83,8 @@ def _instrument(parent, pad, name, wav_path, *, choke, gain, kit="ChopPad", look
 
 
 def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, choke=True, loop=True,
-               pattern_name="ChopPad", empty_wav=None, kit_name="ChopPad"):
+               pattern_name="ChopPad", empty_wav=None, kit_name="ChopPad", gains_db=None, pitches=None, swing=0.0,
+               quant="1/16"):
     """The song as an ElementTree root.
 
     wavs: 16 entries, WAV path or None (an empty pad plays `empty_wav` at gain 0 and its hits are not written).
@@ -121,7 +129,8 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
             raise ValueError(f"pad {pad} has no WAV and no empty_wav was given")
         # always 16 instruments, so NOTE_ON note 36+n (= list position n) and midiOutNote 36+n both mean pad n
         _instrument(inst_list, pad, f"Pad {pad + 1}" if wavs[pad] else f"Pad {pad + 1} (empty)", wav,
-                    choke=choke, gain=1.0 if wavs[pad] else 0.0, kit=kit_name)
+                    choke=choke, kit=kit_name, gain=hydrogen_gain((gains_db or [0.0] * PADS)[pad]) if wavs[pad] else 0.0,
+                    pitch=hydrogen_pitch((pitches or [0.0] * PADS)[pad]))
 
     pats = ET.SubElement(root, "patternList")
     pat = ET.SubElement(pats, "pattern")
@@ -132,10 +141,11 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
     _txt(pat, "info", "")
     notes = ET.SubElement(pat, "noteList")
     written = dropped_bank = dropped_other = 0
+    q = QUANT_BEATS.get(quant, 0.25)
     events = sorted((pattern or {}).get("events") or [], key=lambda e: (e.get("beat", 0), e.get("pad", 0)))
     for e in events:
         try:
-            pad, pos = int(e["pad"]), ticks(float(e["beat"]))
+            pad, pos = int(e["pad"]), ticks(swung_beat(float(e["beat"]), q, swing))
         except (KeyError, TypeError, ValueError):
             dropped_other += 1
             continue
