@@ -480,7 +480,7 @@ export async function mountSong(root, { id, audio, input }) {
       $(".ai-bank").disabled = false;
     } catch (err) {
       const msg = String(err.message || err);
-      out.innerHTML = `<span class="error">${esc(/401|User not found/.test(msg) ? "OpenRouter rejected the API key (401). Put a valid key in OPENROUTER_API_KEY and restart choppad." : msg)}</span>`;
+      out.innerHTML = `<span class="error">${esc(/401|User not found/.test(msg) ? "The audio model endpoint rejected the API key (401). Set CHOPPAD_LLM_KEY (or OPENROUTER_API_KEY) and restart choppad; CHOPPAD_LLM_URL / CHOPPAD_LLM_MODEL pick another endpoint, such as the local router." : msg)}</span>`;
     } finally {
       $(".ai-run").disabled = false;
     }
