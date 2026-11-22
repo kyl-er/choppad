@@ -113,8 +113,10 @@ class LocalTransport(unittest.TestCase):
         s = self.stream()
         self.open_bridge()
         self.post("/api/songs/song1/daw", {"daw": "hydrogen", "command": "sync", "bank": 2})
-        banks = [d["bank"] for n, d in s.events if n == "daw"]
-        self.assertEqual(banks[-1], 2)
+        end = time.time() + 2
+        while time.time() < end and [d["bank"] for n, d in s.events if n == "daw"][-1:] != [2]:
+            time.sleep(0.01)
+        self.assertEqual([d["bank"] for n, d in s.events if n == "daw"][-1], 2)
 
     # ---- delivery ----
     def test_local_hit_reaches_the_bridge_and_is_not_rebroadcast(self):
@@ -187,6 +189,51 @@ class LocalTransport(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertLess(took, 0.2)            # answered at once; the hit was dropped instead of queued behind the open
         self.assertEqual(self.h.calls, [])
+
+
+class DawSettings(unittest.TestCase):
+    """swing, quant and choke (player settings that are not saved with the project) reach the project builder."""
+
+    def setUp(self):
+        self.root = ctl.make_song_root()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.seen = []
+
+        def build(media_dir, out_root, bank=None, **kw):
+            self.seen.append(kw)
+            from support import fake_project
+            return fake_project()
+        import manager as M
+        self.m = M.DawManager("/tmp/unused", bridges={"hydrogen": lambda: FakeBridge()}, midi_factory=lambda: (_ for _ in ()).throw(OSError("x")),
+                              project_builder=build)
+        self.addCleanup(self.m.close)
+
+    def test_request_wins_then_the_servers_view_of_the_player(self):
+        self.m.command("song1", "/x/song1", {"daw": "hydrogen", "command": "open", "swing": 0.3, "quant": "1/8", "choke": False})
+        self.assertEqual(self.seen[-1], {"swing": 0.3, "quant": "1/8", "choke": False})
+        self.m.command("song1", "/x/song1", {"daw": "hydrogen", "command": "sync",
+                                              "view_settings": {"swing": 0.2, "quant": "1/16", "choke": True, "mode": "oneshot"}})
+        self.assertEqual(self.seen[-1], {"swing": 0.2, "quant": "1/16", "choke": True})
+        self.m.command("song1", "/x/song1", {"daw": "hydrogen", "command": "sync"})
+        self.assertEqual(self.seen[-1], {})
+
+    def test_cli_flags_and_the_server_view_reach_the_builder(self):
+        import choppad
+        srv, p = ctl.start_server(self.root, actions={"daw": lambda d, b: self.m.command(os.path.basename(d), d, b)})
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = f"http://127.0.0.1:{p}"
+        out, err = [], []
+        rc = choppad.run_verb(["daw", "open", "song1", "--swing", "0.25", "--quant", "1/8", "--no-choke", "--server", url],
+                              out=out.append, err=err.append)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.seen[-1], {"swing": 0.25, "quant": "1/8", "choke": False})
+        # an agent that set swing through the shared state (settings.set) is picked up when the request says nothing
+        req = urllib.request.Request(url + "/api/songs/song1/actions", data=json.dumps(
+            {"actions": [{"type": "settings.set", "params": {"swing": 0.4}}]}).encode(), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req).read()
+        choppad.run_verb(["daw", "sync", "song1", "--server", url], out=out.append, err=err.append)
+        self.assertEqual(self.seen[-1]["swing"], 0.4)
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ class Parsing(unittest.TestCase):
         self.assertNotIn("http://example.com/x", choppad.VERBS)
         self.assertNotIn("--serve", choppad.VERBS)  # `choppad <url> --serve` never reaches run_verb
 
-    def test_daw_is_a_stub(self):
+    def test_daw_verb_needs_an_explicit_song_id(self):
         out, err = [], []
         self.assertEqual(choppad.run_verb(["daw", "open"], out=out.append, err=err.append), 2)
         self.assertIn("W2", err[0])

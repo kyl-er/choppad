@@ -78,12 +78,16 @@ class Client:
         return self.post(f"/api/songs/{_sid(sid)}/transport", {"command": command, **kw})
 
     # --- W2 DAW bridge (contracts §11) ---
-    def daw(self, sid, daw, command, bank=None):
+    def daw(self, sid, daw, command, bank=None, swing=None, quant=None, choke=None):
         """open | sync | play | stop on a DAW bridge (hydrogen or ardour) held by the server. Opening can take a while
-        (Ardour builds a session), hence the long timeout."""
+        (Ardour builds a session), hence the long timeout. swing (0..0.5), quant ("off"|"1/8"|"1/16") and choke are the
+        player settings that are not saved with the project; give them to bake the browser's swing into the DAW pattern."""
         body = {"daw": daw, "command": command}
         if bank is not None:
             body["bank"] = bank
+        for k, v in (("swing", swing), ("quant", quant), ("choke", choke)):
+            if v is not None:
+                body[k] = v
         return self.post(f"/api/songs/{_sid(sid)}/daw", body, timeout=300)
 
     def regrid_to(self, sid, **change):

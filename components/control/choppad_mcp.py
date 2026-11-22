@@ -25,6 +25,15 @@ _I = lambda desc, **kw: {"type": "integer", "description": desc, **kw}  # noqa: 
 _ID = _S("song id from `library`")
 _PAD = _I("pad 0..15 (the 4x4 grid, row-major from the bottom-left)", minimum=0, maximum=15)
 _BANK = _I("bank number (0-based)", minimum=0)
+_DAW_SETTINGS = {  # player settings that are not saved with the project; the browser's swing/choke are not known to the server
+    "swing": _N("0..0.5: delay odd steps by this fraction of a step (baked into the DAW pattern)", minimum=0, maximum=0.5),
+    "quant": _S("the step swing refers to", enum=["off", "1/8", "1/16"]),
+    "choke": {"type": "boolean", "description": "true (default): pads cut each other off (one Hydrogen mute group); false: they overlap"}}
+
+
+def _extra(a):
+    """The DAW settings the caller gave (swing, quant, choke); nothing for the ones left out."""
+    return {k: a[k] for k in ("swing", "quant", "choke") if a.get(k) is not None}
 
 
 def _tool(name, description, props, required, fn):
@@ -111,11 +120,11 @@ def build_tools(client, progress=lambda: None):
         _tool("daw_open", "Open a song in a DAW wired to ChopPad: hydrogen (kit + pattern + tempo, its own instance, no window "
               "focus stolen if headless) or ardour (a session with the chops as audio regions). Also opens the virtual MIDI "
               "port 'ChopPad'. Returns what was started.",
-              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]), "bank": _BANK}, ["id", "daw"],
-              lambda a: c.daw(a["id"], a["daw"], "open", a.get("bank"))),
+              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]), "bank": _BANK, **_DAW_SETTINGS},
+              ["id", "daw"], lambda a: c.daw(a["id"], a["daw"], "open", a.get("bank"), **_extra(a))),
         _tool("daw_sync", "Push the song's current kit, pattern and tempo to the open DAW again after edits.",
-              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]), "bank": _BANK}, ["id", "daw"],
-              lambda a: c.daw(a["id"], a["daw"], "sync", a.get("bank"))),
+              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]), "bank": _BANK, **_DAW_SETTINGS},
+              ["id", "daw"], lambda a: c.daw(a["id"], a["daw"], "sync", a.get("bank"), **_extra(a))),
         _tool("daw_transport", "Start or stop the DAW transport (and MIDI start/clock/stop on the ChopPad MIDI port). "
               "Ardour reports 'not implemented' for its own transport until its control surface is enabled by hand.",
               {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]),

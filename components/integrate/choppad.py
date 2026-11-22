@@ -319,6 +319,9 @@ def build_verb_parser():
     s.add_argument("id", nargs="?", help="song id (required)")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
     s.add_argument("--bank", type=int, help="bank to export (default: the bank the pattern plays, else 0)")
+    s.add_argument("--swing", type=float, help="0..0.5, bake this swing into the DAW pattern (the browser's swing is not saved)")
+    s.add_argument("--quant", choices=["off", "1/8", "1/16"], help="the step swing refers to (default 1/16)")
+    s.add_argument("--choke", action=argparse.BooleanOptionalAction, default=None, help="pads cut each other off (default on)")
     s = add("station", "start ChopPad (if it is not running), open a song in the DAW wired to it, print the URL")
     s.add_argument("id", nargs="?", help="song id (default: the newest song in the library)")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
@@ -449,7 +452,7 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
         elif a.verb == "daw":
-            r = c.daw(a.id, a.daw, a.op, a.bank)
+            r = c.daw(a.id, a.daw, a.op, a.bank, **{k: getattr(a, k) for k in ("swing", "quant", "choke") if getattr(a, k) is not None})
             j(r)
             if r.get("not_implemented"):
                 err("note: " + r["not_implemented"])
