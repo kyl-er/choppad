@@ -98,15 +98,16 @@ class LocalTransport(unittest.TestCase):
     def test_daw_state_on_the_song_and_on_the_stream_and_on_open_and_close(self):
         self.assertEqual(self.get("/api/songs/song1")["daw"], {"open": False, "daw": None, "bank": None})
         s = self.stream()
-        self.assertEqual(s.wait_for("daw")[0][1], {"open": False, "daw": None, "bank": None})   # first message of every stream
+        time.sleep(0.2)
+        self.assertEqual(s.events, [])        # nothing to say while no bridge is open (existing streams see no new messages)
         self.open_bridge()
-        got = s.wait_for("daw", after=1)
+        got = s.wait_for("daw")
         self.assertEqual(got[0][1], {"open": True, "daw": "hydrogen", "bank": 0})
         self.assertEqual(self.get("/api/songs/song1")["daw"], {"open": True, "daw": "hydrogen", "bank": 0})
         late = self.stream("late")
         self.assertEqual(late.wait_for("daw")[0][1]["open"], True)    # a tab that connects later learns it at once
         self.m.close()
-        self.assertEqual(s.wait_for("daw", after=2)[0][1], {"open": False, "daw": None, "bank": None})
+        self.assertEqual(s.wait_for("daw", after=1)[0][1], {"open": False, "daw": None, "bank": None})
 
     def test_sync_to_another_bank_updates_the_state(self):
         s = self.stream()
@@ -118,8 +119,8 @@ class LocalTransport(unittest.TestCase):
     # ---- delivery ----
     def test_local_hit_reaches_the_bridge_and_is_not_rebroadcast(self):
         a, b = self.stream("tab1"), self.stream("tab2")
-        a.wait_for("daw"), b.wait_for("daw")
         self.open_bridge()
+        a.wait_for("daw"), b.wait_for("daw")
         code, r = self.local({"command": "hit", "pad": 3, "velocity": 0.5, "bank": 0})
         self.assertEqual((code, r["delivered"]), (200, True))
         self.assertEqual(self.h.calls, [("note", 3, 0.5)])
@@ -129,8 +130,8 @@ class LocalTransport(unittest.TestCase):
 
     def test_agent_driven_hit_is_still_broadcast_and_mirrored(self):
         b = self.stream("tab2")
-        b.wait_for("daw")
         self.open_bridge()
+        b.wait_for("daw")
         code, r = self.post("/api/songs/song1/transport", {"command": "hit", "pad": 2, "velocity": 1})
         self.assertEqual(code, 200)
         self.assertEqual(b.wait_for("transport")[0][1]["pad"], 2)

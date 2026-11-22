@@ -504,6 +504,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const r = await fetch(`/api/songs/${id}`);
     if (!r.ok) return;
     const d = await r.json();
+    if (d.daw) { daw.open = !!d.daw.open; daw.bank = Number.isInteger(d.daw.bank) ? d.daw.bank : null; } // CHOP-11
     const want = initialState({ project: d.project, chops: d.chops }).project;
     const have = store.get().project;
     const apply = (a) => store.dispatch(a, remoteMeta);

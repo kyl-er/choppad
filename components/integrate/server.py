@@ -18,7 +18,8 @@ Routes
   POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
                                  with `local: true` (a tab reporting its own hit/play/stop): not rebroadcast, only handed to
                                  an open DAW bridge (rate limited; 429 when too fast, delivered:false when no bridge)
-  `daw` event {open, daw, bank} on the song stream (first message of every stream, and on open/close of a bridge)
+  `daw` event {open, daw, bank} on the song stream (on open/close of a bridge; also first on a stream that connects while one
+                                 is open; GET /api/songs/<id> has the same state as `daw`)
   POST /api/songs/<id>/daw       {daw: hydrogen|ardour, command: open|sync|play|stop, bank?} -> DAW bridge (contracts §11)
 Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
@@ -368,7 +369,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if sid == LIBRARY:  # CHOP-11: told about every recent job first, so a job that moved on cannot be missed
                     for j in jobs.snapshot():
                         self.wfile.write(f"event: job\ndata: {json.dumps(job_event(j), separators=(',', ':'))}\n\n".encode())
-                else:  # CHOP-11: a new stream starts knowing whether a DAW bridge is open for this song
+                elif daw_of(sid).get("open"):  # CHOP-11: a tab that connects while a bridge is open is told at once
                     self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(sid), separators=(',', ':'))}\n\n".encode())
                 self.wfile.flush()
                 while True:

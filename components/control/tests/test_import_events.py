@@ -102,10 +102,15 @@ class LibraryStream(Base):
         self.assertEqual((err["job"], err["step"]), (job, "error"))
         self.assertIn("video unavailable", err["error"])
 
-    def test_song_stream_is_unaffected(self):
-        c = self.serve(delay=0.01)
-        got = read_events(self.port, "/api/songs/song1/events", lambda ev: len(ev) >= 1, timeout=3)
-        self.assertEqual(got[0][0], "daw")        # not job events
+    def test_song_stream_gets_no_job_events(self):
+        c = self.serve(delay=0.02)
+        got = []
+        t = threading.Thread(target=lambda: got.extend(read_events(self.port, "/api/songs/song1/events", lambda ev: False, timeout=1.5)))
+        t.start()
+        time.sleep(0.2)
+        c.import_source("https://example.com/x", wait_s=20)
+        t.join(5)
+        self.assertEqual([n for n, _ in got], [])
 
 
 class WaitingClients(Base):
