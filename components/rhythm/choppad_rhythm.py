@@ -36,6 +36,8 @@ def analyze(audio_path: str, meter: str | None = None, bpm: float | None = None)
 
     beat_frames = _ellis_dp_beats(onset_env, active_start, est_bpm)
     beats = _regularize([f * _ONSET_HOP_SEC for f in beat_frames])
+    # regularization can extrapolate a beat a few ms past the end of a short loop
+    beats = [b for b in beats if 0 <= b <= duration_s]
 
     ibi = statistics.median(b2 - b1 for b1, b2 in zip(beats, beats[1:]))
     derived_bpm = round(60.0 / ibi, 4)

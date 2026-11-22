@@ -4,6 +4,7 @@ import { DEFAULT_PAD, createEngine } from "/engine.js";
 import { cellToPad } from "/layout.js";
 import { createWaveform } from "/waveform.js";
 import { createSequencer, encodeWav, patternToMidi } from "/sequencer.js";
+import { DEFAULT_FX, PRESETS, createFx } from "/fx.js";
 
 const STEPS = { "1/4": 1, "1/8": 2, "1/16": 4 };
 const MULTS = [0.5, 1, 2];
@@ -13,7 +14,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 
 /** Returns { destroy() }. Throws if the song can't be loaded. */
 export async function mountSong(root, { id, audio, input }) {
-  const { ctx, master, analyser } = audio;
+  const { ctx, master, analyser, fx } = audio;
   root.innerHTML = `<p class="loading">Loading song…</p>`;
   const res = await fetch(`/api/songs/${id}`);
   if (!res.ok) throw new Error(`song ${id}: HTTP ${res.status}`);
@@ -39,6 +40,21 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="bank-nav"><button class="bank-prev" title="[">◂</button><span class="bank-label"></span><button class="bank-next" title="]">▸</button></div>
       </div>
     </div>
+    <div class="fx">
+      <div class="fx-main">
+        <label class="fx-knob"><span>Tone</span><input name="tone" type="range" min="-1" max="1" step="0.01"><output data-fx="tone"></output></label>
+        <label class="fx-knob"><span>Reverb</span><input name="reverb" type="range" min="0" max="1" step="0.01"><output data-fx="reverb"></output></label>
+        <div class="fx-presets"></div>
+      </div>
+      <details class="fx-more"><summary>more sound: room size · filter · EQ</summary>
+        <label class="slider">room size <input name="size" type="range" min="0" max="1" step="0.01"><output data-fx="size"></output></label>
+        <label class="slider">filter <input name="filter" type="range" min="-1" max="1" step="0.01"><output data-fx="filter"></output></label>
+        <label class="slider">low <input name="low" type="range" min="-12" max="12" step="0.5"><output data-fx="low"></output></label>
+        <label class="slider">mid <input name="mid" type="range" min="-12" max="12" step="0.5"><output data-fx="mid"></output></label>
+        <label class="slider">high <input name="high" type="range" min="-12" max="12" step="0.5"><output data-fx="high"></output></label>
+        <p class="muted small">Effects shape everything you hear: pads, song, pattern, and the .wav export. Double-click a slider to reset it.</p>
+      </details>
+    </div>
     <div class="sections" title="Song sections (click to jump)"></div>
     <div class="banks" title="Click a bank to jump there"><div class="banks-track"></div><i class="banks-head"></i></div>
     <div class="wave"></div>
@@ -57,7 +73,8 @@ export async function mountSong(root, { id, audio, input }) {
       <label><input type="checkbox" class="repeat"> note repeat <select class="repeat-rate"><option value="0.5">1/8</option><option value="0.25" selected>1/16</option></select></label>
       <button class="seq-undo">undo</button><button class="seq-clear">clear</button>
       <button class="seq-midi">⇩ .mid</button><button class="seq-wav">⇩ .wav</button>
-      <div class="steps"></div><span class="seq-info muted"></span>
+      <span class="seq-info muted"></span>
+      <div class="stepgrid" title="Click a cell to add/remove a hit on the current bank · Shift-click = soft hit · click a row name to hear the pad"></div>
     </div>
     <div class="panels">
       <div class="panel"><h3>Grid</h3><div class="row grid-btns"></div><div class="row meter-btns"></div>
@@ -82,7 +99,7 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="ai-out muted small">Sends a 32 kbps mono copy to an OpenRouter audio model (≤ $0.05/song, cached). Sections above work offline.</div></div>
       <div class="panel export"><h3>Export</h3>
         <div class="row"><button class="exp-h2">install bank → Hydrogen kit</button><button class="exp-sfz">write bank → SFZ</button></div>
-        <div class="exp-out muted small">Exports the current bank (16 pads).</div></div>
+        <div class="exp-out muted small">Exports the current bank (16 pads). The Hydrogen kit gets your tone/reverb baked in; SFZ stays dry.</div></div>
       <div class="panel"><h3>MIDI</h3><ul class="devices"></ul>
         <div class="row"><button class="learn">Learn pads</button><button class="reset">Reset map</button></div>
         <div class="learn-state muted"></div></div>
@@ -205,6 +222,7 @@ export async function mountSong(root, { id, audio, input }) {
     wave.showSlices(slices);
     fitZoom(first.start, last.end);
     renderInspector();
+    renderSteps();
   }
   function setBank(n, seekVideo) {
     bank = Math.max(0, Math.min(chops.banks.length - 1, n));
@@ -319,7 +337,11 @@ export async function mountSong(root, { id, audio, input }) {
     markSection(t);
     if (seq.state.playing) {
       const cell = Math.floor(seq.position() * 4);
-      [...stepsEl.children].forEach((c, i) => c.classList.toggle("now", i === cell));
+      if (cell !== nowCell) {
+        stepsEl.querySelectorAll(".now").forEach((c) => c.classList.remove("now"));
+        stepsEl.querySelectorAll(`[data-step="${cell}"]`).forEach((c) => c.classList.add("now"));
+        nowCell = cell;
+      }
     }
     raf = requestAnimationFrame(tick);
   }
@@ -330,6 +352,7 @@ export async function mountSong(root, { id, audio, input }) {
     selected = p;
     renderPads();
     renderInspector();
+    renderSteps();
   }
   const insp = $(".inspector");
   function renderInspector() {
@@ -386,7 +409,7 @@ export async function mountSong(root, { id, audio, input }) {
     saveTimer = setTimeout(() => {
       const pads = Array.from({ length: 16 }, (_, p) => engine.getPadParams(p));
       fetch(`/api/songs/${id}/project`, { method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pads, overrides: engine.getOverrides(), pattern: seq.state.pattern }) }).catch(() => {});
+        body: JSON.stringify({ pads, overrides: engine.getOverrides(), pattern: seq.state.pattern, fx: fx.get() }) }).catch(() => {});
     }, 300);
   }
 
@@ -425,6 +448,39 @@ export async function mountSong(root, { id, audio, input }) {
     $(".tap-bpm").textContent = `now ${chops.bpm.toFixed(1)} BPM`;
   });
 
+  // ---- sound: tone / reverb up front, size / filter / EQ under "more" ----
+  const fxEl = $(".fx");
+  const fxInputs = Object.fromEntries([...fxEl.querySelectorAll("input[name]")].map((el) => [el.name, el]));
+  const fxText = {
+    tone: (v) => (Math.abs(v) < 0.02 ? "neutral" : v < 0 ? `darker ${Math.round(-v * 100)}%` : `brighter ${Math.round(v * 100)}%`),
+    reverb: (v) => (v < 0.01 ? "off" : `${Math.round(v * 100)}%`),
+    size: (v) => (v < 0.33 ? "room" : v < 0.66 ? "studio" : "hall") + ` · ${(0.4 + v * 5.6).toFixed(1)}s`,
+    filter: (v) => (Math.abs(v) < 0.02 ? "off" : v < 0 ? `low-pass ${Math.round(-v * 100)}%` : `high-pass ${Math.round(v * 100)}%`),
+    low: (v) => `${v > 0 ? "+" : ""}${v} dB`, mid: (v) => `${v > 0 ? "+" : ""}${v} dB`, high: (v) => `${v > 0 ? "+" : ""}${v} dB`,
+  };
+  function renderFx() {
+    const P = fx.get();
+    for (const [k, el] of Object.entries(fxInputs)) {
+      el.value = P[k];
+      fxEl.querySelector(`[data-fx="${k}"]`).textContent = fxText[k](P[k]);
+    }
+    const match = Object.entries(PRESETS).find(([, pr]) => Object.keys(DEFAULT_FX).every((k) => Math.abs(pr[k] - P[k]) < 1e-6));
+    fxEl.querySelectorAll(".fx-presets button").forEach((b) => b.classList.toggle("on", b.dataset.preset === match?.[0]));
+  }
+  for (const [k, el] of Object.entries(fxInputs)) {
+    el.addEventListener("input", () => { fx.set({ [k]: Number(el.value) }); renderFx(); saveProject(); });
+    el.addEventListener("dblclick", () => { fx.set({ [k]: DEFAULT_FX[k] }); renderFx(); saveProject(); });
+  }
+  for (const name of Object.keys(PRESETS)) {
+    const b = document.createElement("button");
+    b.textContent = name;
+    b.dataset.preset = name;
+    b.addEventListener("click", () => { fx.set(PRESETS[name]); renderFx(); saveProject(); });
+    fxEl.querySelector(".fx-presets").append(b);
+  }
+  fx.set({ ...DEFAULT_FX, ...(data.project?.fx ?? {}) });
+  renderFx();
+
   // ---- sequencer (record / loop / quantize / swing / note repeat / export) ----
   function clickAt(when, accent) {
     const o = ctx.createOscillator(), g = ctx.createGain();
@@ -450,14 +506,56 @@ export async function mountSong(root, { id, audio, input }) {
   syncSeqTempo();
   if (data.project?.pattern) seq.load(data.project.pattern);
   $(".seq-bars").value = String(seq.state.bars);
-  const stepsEl = $(".steps");
+  // Step grid: 16 pad rows x 1/16 steps. Click toggles a hit for that pad on the current bank.
+  const stepsEl = $(".stepgrid");
+  let nowCell = -1;
+  const stepOf = (e) => Math.round(e.beat * 4);
+  function buildStepGrid() {
+    const n = seq.loopBeats() * 4;
+    stepsEl.style.setProperty("--steps", n);
+    let html = "";
+    for (let p = 15; p >= 0; p--) { // pad 16 on top, like the pad grid
+      html += `<button class="row-name" data-pad="${p}">${p + 1}</button>`;
+      for (let i = 0; i < n; i++) html += `<i data-pad="${p}" data-step="${i}" class="${i % 4 === 0 ? "beat" : ""}${i % (4 * chops.beats_per_bar) === 0 ? " bar" : ""}"></i>`;
+    }
+    stepsEl.innerHTML = html;
+    stepsEl.dataset.n = n;
+    nowCell = -1;
+  }
   function renderSteps() {
-    const L = seq.loopBeats(), n = L * 4; // 1/16 cells
-    if (stepsEl.childElementCount !== n) stepsEl.innerHTML = Array.from({ length: n }, (_, i) => `<i class="${i % 4 === 0 ? "beat" : ""}"></i>`).join("");
-    const filled = new Set(seq.state.pattern.events.map((e) => Math.floor(e.beat * 4 + 1e-6)));
-    [...stepsEl.children].forEach((c, i) => c.classList.toggle("on", filled.has(i)));
+    const n = seq.loopBeats() * 4;
+    if (Number(stepsEl.dataset.n) !== n) buildStepGrid();
+    const at = new Map(); // "pad:step" -> event
+    for (const e of seq.state.pattern.events) at.set(`${e.pad}:${stepOf(e)}`, e);
+    for (const c of stepsEl.querySelectorAll("i")) {
+      const e = at.get(`${c.dataset.pad}:${c.dataset.step}`);
+      c.classList.toggle("on", !!e);
+      c.classList.toggle("soft", !!e && e.vel < 0.8);
+      c.classList.toggle("other", !!e && e.bank !== bank);
+      c.title = e ? `pad ${Number(c.dataset.pad) + 1} · bank ${e.bank + 1}${e.vel < 0.8 ? " · soft" : ""}` : "";
+    }
+    for (const r of stepsEl.querySelectorAll(".row-name")) {
+      const p = Number(r.dataset.pad);
+      r.classList.toggle("empty", !engine.getSlice(bank, p));
+      r.classList.toggle("selected", p === selected);
+    }
     $(".seq-info").textContent = `${seq.state.pattern.events.length} hits · ${chops.bpm.toFixed(1)} BPM`;
   }
+  stepsEl.addEventListener("click", (e) => {
+    const t = e.target;
+    if (t.classList.contains("row-name")) { hit(Number(t.dataset.pad), 1); return; }
+    if (t.tagName !== "I") return;
+    const pad = Number(t.dataset.pad), step = Number(t.dataset.step);
+    const ev = seq.state.pattern.events;
+    const i = ev.findIndex((x) => x.pad === pad && stepOf(x) === step);
+    if (i >= 0) ev.splice(i, 1);
+    else {
+      ev.push({ beat: step / 4, pad, bank, vel: e.shiftKey ? 0.55 : 1, pass: -1 }); // pass -1: drawn, not recorded (undo skips it)
+      if (!seq.state.playing) engine.trigger(pad, 1); // audition the new hit
+    }
+    renderSteps();
+    saveProject();
+  });
   function seqButtons() {
     $(".rec").classList.toggle("on", seq.state.recording);
     $(".seq-play").textContent = seq.state.playing ? "■ pattern" : "▶ pattern";
@@ -469,7 +567,12 @@ export async function mountSong(root, { id, audio, input }) {
     saveProject();
   });
   $(".metro").addEventListener("change", (e) => { seq.state.metronome = e.target.checked; });
-  $(".seq-bars").addEventListener("change", (e) => { seq.state.bars = Number(e.target.value); seq.state.pattern.bars = seq.state.bars; renderSteps(); saveProject(); });
+  $(".seq-bars").addEventListener("change", (e) => {
+    seq.state.bars = Number(e.target.value);
+    seq.state.pattern.bars = seq.state.bars;
+    seq.state.pattern.events = seq.state.pattern.events.filter((x) => x.beat < seq.loopBeats());
+    renderSteps(); saveProject();
+  });
   $(".seq-q").addEventListener("change", (e) => { seq.state.quant = e.target.value; });
   $(".seq-swing").addEventListener("input", (e) => { seq.state.swing = Number(e.target.value); });
   $(".seq-undo").addEventListener("click", () => { seq.undo(); renderSteps(); saveProject(); });
@@ -486,9 +589,11 @@ export async function mountSong(root, { id, audio, input }) {
   $(".seq-wav").addEventListener("click", async () => {
     const pat = seq.state.pattern;
     if (!pat.events.length) return;
-    const seconds = (pat.bars * chops.beats_per_bar * 60) / chops.bpm + 2;
+    const seconds = (pat.bars * chops.beats_per_bar * 60) / chops.bpm + 2 + (fx.get().reverb > 0 ? 0.4 + fx.get().size * 5.6 : 0);
     const off = new OfflineAudioContext(2, Math.ceil(seconds * buffer.sampleRate), buffer.sampleRate);
-    const oe = createEngine({ ctx: off, buffer, chops, output: off.destination });
+    const ofx = createFx(off, fx.get());
+    ofx.output.connect(off.destination);
+    const oe = createEngine({ ctx: off, buffer, chops, output: ofx.input });
     for (let p = 0; p < 16; p++) oe.setPadParams(p, engine.getPadParams(p));
     for (const [k, sl] of Object.entries(engine.getOverrides())) { const [b, p] = k.split(":").map(Number); oe.setOverride(b, p, sl); }
     const q = { off: 0, "1/8": 0.5, "1/16": 0.25 }[seq.state.quant];
@@ -576,7 +681,7 @@ export async function mountSong(root, { id, audio, input }) {
   async function doExport(kind) {
     const out = $(".exp-out");
     out.textContent = "exporting…";
-    const r = await fetch(`/api/songs/${id}/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, bank }) });
+    const r = await fetch(`/api/songs/${id}/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, bank, fx: fx.get() }) });
     const body = await r.json().catch(() => ({}));
     out.innerHTML = r.ok ? `✓ ${esc(body.path)}${body.note ? "<br>" + esc(body.note) : ""}` : `<span class="error">${esc(body.error || r.status)}</span>`;
   }

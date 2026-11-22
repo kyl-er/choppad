@@ -27,6 +27,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .brand span { color: var(--accent); }
 .import { display: flex; gap: 6px; }
 .import input { flex: 1; min-width: 0; }
+.file-pick { display: block; margin: 4px 0 2px; cursor: pointer; }
+.file-pick u { color: var(--accent); }
 .import button { background: var(--accent); color: #062; border-color: var(--accent); font-weight: 600; }
 .jobs { margin: 10px 0; display: grid; gap: 8px; }
 .job { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 12px; }
@@ -118,11 +120,34 @@ input[type=checkbox] { accent-color: var(--accent); }
 .seq label { display: flex; gap: 6px; align-items: center; }
 .seq .rec.on { background: #5a0f0f; border-color: var(--danger); color: #fff; animation: blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity: .55; } }
-.steps { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(6px, 1fr); gap: 2px; flex: 1 1 100%; height: 14px; }
-.steps i { background: #23272b; border-radius: 2px; }
-.steps i.beat { background: #2e343a; }
-.steps i.on { background: var(--accent); }
-.steps i.now { outline: 2px solid var(--accent2); }
+.stepgrid { --steps: 32; display: grid; grid-template-columns: 30px repeat(var(--steps), minmax(7px, 1fr)); gap: 2px;
+  flex: 1 1 100%; min-width: 0; user-select: none; }
+.stepgrid .row-name { padding: 0; height: 15px; font: 600 10px var(--mono); border-radius: 3px; }
+.stepgrid .row-name.empty { opacity: .35; }
+.stepgrid .row-name.selected { border-color: var(--accent2); color: var(--accent2); }
+.stepgrid i { height: 15px; background: #202428; border-radius: 2px; cursor: pointer; }
+.stepgrid i.beat { background: #2a3035; }
+.stepgrid i.bar { box-shadow: inset 2px 0 0 #4a535b; }
+.stepgrid i:hover { background: #3a434b; }
+.stepgrid i.on { background: var(--accent); }
+.stepgrid i.on.soft { background: color-mix(in srgb, var(--accent) 50%, #202428); }
+.stepgrid i.on.other { background: transparent; box-shadow: inset 0 0 0 2px var(--accent); }
+.stepgrid i.now { outline: 1px solid var(--accent2); outline-offset: -1px; }
+.fx { display: flex; flex-direction: column; gap: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+.fx-main { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: center; }
+.fx-knob { display: grid; grid-template-columns: 64px minmax(140px, 260px) 110px; gap: 10px; align-items: center; font-weight: 600; }
+.fx-knob input { width: 100%; accent-color: var(--accent); height: 22px; }
+.fx-knob output, .fx-more output { font: 12px var(--mono); color: var(--accent); }
+.fx-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.fx-presets button { text-transform: capitalize; }
+.fx-presets button.on { border-color: var(--accent); color: var(--accent); }
+.fx-more summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.fx-more[open] { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 18px; }
+.fx-more[open] summary, .fx-more p { grid-column: 1 / -1; margin: 0; }
+.fx-more .slider { display: grid; grid-template-columns: 72px 1fr 110px; gap: 8px; align-items: center; }
+.drop-overlay[hidden] { display: none; }
+.drop-overlay { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; pointer-events: none;
+  background: color-mix(in srgb, var(--bg) 80%, transparent); border: 3px dashed var(--accent); font: 600 22px var(--mono); color: var(--accent); }
 
 /* ---------- M4: sections, AI, export ---------- */
 .sections { position: relative; height: 24px; }

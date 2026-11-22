@@ -54,11 +54,20 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
     audio_wav = os.path.join(media_dir, "audio.wav")
     video_mp4 = os.path.join(media_dir, "video.mp4")
 
+    # Audio-only sources (mp3, wav, … dropped in the app) get a plain dark video so the player still works.
+    has_video = bool(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type",
+         "-of", "csv=p=0", input_file], capture_output=True, text=True).stdout.strip())
+    src_dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=noprint_wrappers=1:nokey=1", input_file],
+                             capture_output=True, text=True).stdout.strip() or "0"
+    video_in = [] if has_video else ["-f", "lavfi", "-t", src_dur, "-i", "color=c=0x14181c:s=854x480:r=30"]
+    video_map = ["-map", "0:v:0"] if has_video else ["-map", "1:v:0"]
     subprocess.run([
-        "ffmpeg", "-y", "-i", input_file,
-        "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le",
+        "ffmpeg", "-y", "-i", input_file, *video_in,
+        "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le",
         audio_wav,
-        "-an", "-c:v", "libx264", "-profile:v", "baseline",
+        *video_map, "-an", "-c:v", "libx264", "-profile:v", "baseline",
         "-vf", "scale=-2:480,fps=30",
         "-g", "6", "-keyint_min", "1", "-sc_threshold", "0", "-bf", "0",
         "-preset", "veryfast", "-tune", "fastdecode", "-crf", "25",
@@ -79,7 +88,7 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
         title = info.get("title", "")
         meta_source = info.get("webpage_url") or source
     else:
-        title = os.path.basename(source)
+        title = os.path.splitext(os.path.basename(source))[0]  # "beat.mp3" -> "beat"
         meta_source = os.path.abspath(source)
 
     meta = {

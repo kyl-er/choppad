@@ -7,13 +7,18 @@ Routes
   GET  /api/songs                library: [{id, title, duration_s, bpm, meter, chops, banks}]
   GET  /api/songs/<id>           {meta, analysis, chops, peaks}
   POST /api/songs  {url}         start import job -> {job}
+  POST /api/upload               raw file body + X-Filename header (drag & drop) -> import job {job}
   GET  /api/jobs/<job>           {state: queued|running|done|error, stage, progress 0..1, id?, error?}
   POST /api/regrid {id, grid, meter, beat_offset, bpm_mult}   (also /api/songs/<id>/regrid)
 """
+import hashlib
 import json
 import os
 import re
+import shutil
+import tempfile
 import threading
+import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -26,6 +31,8 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
         ".jpg": "image/jpeg", ".webp": "image/webp", ".mp4": "video/mp4", ".wav": "audio/wav", ".sfz": "text/plain",
         ".xml": "application/xml", ".ico": "image/x-icon"}
+MAX_UPLOAD = 300 * 2**20
+AUDIO_EXT = {".mp3", ".wav", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".aif", ".aiff", ".mp4", ".mov", ".webm", ".mkv"}
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PEAK_POINTS = 6000
 
@@ -198,6 +205,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 doc = {"pads": proj["pads"][:16], "overrides": proj["overrides"]}
                 if isinstance(proj.get("pattern"), dict):
                     doc["pattern"] = proj["pattern"]
+                if isinstance(proj.get("fx"), dict):
+                    doc["fx"] = {k: float(v) for k, v in proj["fx"].items() if isinstance(v, (int, float))}
                 json.dump(doc, open(os.path.join(d, "project.json"), "w"))
                 return self._json({"ok": True})
             except (BrokenPipeError, ConnectionResetError):
@@ -253,6 +262,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if not url:
                     return self._err(400, "url required")
                 return self._json({"job": jobs.start(media_root, url, pipeline)}, 202)
+            if p == "/api/upload":
+                return self._upload()
             m = re.match(r"^/api/songs/([^/]+)/regrid$", p)
             if p == "/api/regrid" or m:
                 body = self._body()
@@ -285,6 +296,40 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 analysis, chops = reanalyze(d, bpm=float(bpm) if bpm else None, meter=body.get("meter"))
                 return self._json({"analysis": analysis, "chops": chops})
             return self._err(404, "not found")
+
+        def _upload(self):
+            if pipeline is None:
+                return self._err(501, "import disabled")
+            name = os.path.basename(urllib.parse.unquote(self.headers.get("X-Filename") or "")).strip()
+            ext = os.path.splitext(name)[1].lower()
+            if not name or ext not in AUDIO_EXT:
+                return self._err(400, f"unsupported file type {ext or '?'} (audio or video files only)")
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= MAX_UPLOAD:
+                return self._err(413, f"file must be under {MAX_UPLOAD // 2**20} MB")
+            # stable path per content+name, so dropping the same file again reopens the same song
+            h = hashlib.sha1()
+            tmp = tempfile.NamedTemporaryFile(delete=False, dir=tempfile.gettempdir(), prefix="choppad-up-")
+            with tmp:
+                left = n
+                while left:
+                    chunk = self.rfile.read(min(CHUNK, left))
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                    tmp.write(chunk)
+                    left -= len(chunk)
+            folder = os.path.join(tempfile.gettempdir(), "choppad-uploads", h.hexdigest()[:16])
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, name)
+            shutil.move(tmp.name, path)
+
+            def run(src, root, on_stage=None):
+                try:
+                    return pipeline(src, root, on_stage=on_stage)
+                finally:
+                    shutil.rmtree(folder, ignore_errors=True)  # media/<id>/ has its own copy now
+            return self._json({"job": jobs.start(media_root, path, run)}, 202)
 
         def _library(self):
             out = []

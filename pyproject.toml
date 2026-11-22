@@ -5,6 +5,7 @@ description = "YouTube/media -> tempo/beat/meter detection -> 4x4 MPC pad grid +
 requires-python = ">=3.12"
 dependencies = [
   "numpy>=2.0",
+  "pedalboard>=0.9.26",
   "scipy>=1.14",
   "soundfile>=0.12",
   "yt-dlp[default]>=2026.1.1",

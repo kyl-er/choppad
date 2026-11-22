@@ -1,4 +1,4 @@
-// Library sidebar: import a YouTube link (background job with progress) and pick songs.
+// Library sidebar: import a YouTube link or a dropped audio file (background job with progress) and pick songs.
 const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
@@ -9,6 +9,8 @@ export function mountLibrary(root, { onOpen }) {
       <input name="url" type="url" placeholder="Paste a YouTube link…" autocomplete="off" required>
       <button type="submit">Import</button>
     </form>
+    <label class="file-pick muted small">…or drop an mp3 / wav anywhere, or <u>choose a file</u>
+      <input type="file" accept="audio/*,video/*,.mp3,.wav,.flac,.ogg,.m4a,.aiff" multiple hidden></label>
     <div class="jobs"></div>
     <div class="section-h">Library</div>
     <ul class="songs"></ul>`;
@@ -83,6 +85,40 @@ export function mountLibrary(root, { onOpen }) {
     }
     form.reset();
     addJob(body.job, url);
+  });
+
+  // ---- drag & drop / file picker -> POST /api/upload (raw body) -> same import job flow ----
+  async function upload(file) {
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "X-Filename": encodeURIComponent(file.name), "Content-Type": "application/octet-stream" },
+      body: file,
+    }).catch((err) => ({ ok: false, json: async () => ({ error: String(err) }) }));
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      jobsEl.insertAdjacentHTML("afterbegin", `<div class="job error">${esc(file.name)}: ${esc(body.error || res.status)}</div>`);
+      return;
+    }
+    addJob(body.job, file.name);
+  }
+  const picker = root.querySelector(".file-pick input");
+  picker.addEventListener("change", () => { [...picker.files].forEach(upload); picker.value = ""; });
+  const overlay = document.createElement("div");
+  overlay.className = "drop-overlay";
+  overlay.textContent = "Drop audio to chop it";
+  overlay.hidden = true;
+  document.body.append(overlay);
+  let depth = 0;
+  const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+  document.addEventListener("dragenter", (e) => { if (hasFiles(e)) { depth++; overlay.hidden = false; } });
+  document.addEventListener("dragleave", (e) => { if (hasFiles(e) && --depth <= 0) { depth = 0; overlay.hidden = true; } });
+  document.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+  document.addEventListener("drop", (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    depth = 0;
+    overlay.hidden = true;
+    [...e.dataTransfer.files].forEach(upload);
   });
 
   refresh();

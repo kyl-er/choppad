@@ -2,15 +2,18 @@
 import { createInput } from "/midi.js";
 import { mountLibrary } from "/library.js";
 import { mountSong } from "/ui.js";
+import { createFx } from "/fx.js";
 
 const ctx = new AudioContext({ latencyHint: "interactive" });
 const master = ctx.createGain();
 const analyser = ctx.createAnalyser();
 analyser.fftSize = 2048;
-master.connect(analyser);
+const fx = createFx(ctx); // master sound shaping: tone, EQ, filter, reverb (per-song settings, set by ui.js)
+master.connect(fx.input);
+fx.output.connect(analyser);
 analyser.connect(ctx.destination);
 try { master.gain.value = Number(localStorage.getItem("choppad.volume") ?? 0.9); } catch { master.gain.value = 0.9; }
-const audio = { ctx, master, analyser };
+const audio = { ctx, master, analyser, fx };
 
 // Browsers keep audio suspended until a real gesture (Web MIDI does not count).
 const unlock = document.getElementById("unlock");

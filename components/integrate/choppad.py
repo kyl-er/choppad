@@ -94,7 +94,8 @@ def _advise(media_dir, body):
 
 
 def _export(media_dir, body):
-    """kind=hydrogen: install the bank as a Hydrogen drumkit; kind=sfz: write <id>-bank<N>.sfz next to audio.wav."""
+    """kind=hydrogen: install the bank as a Hydrogen drumkit (with body.fx baked in via pedalboard);
+    kind=sfz: write <id>-bank<N>.sfz next to audio.wav (zero-copy, so no fx)."""
     from choppad_export import export_hydrogen, export_sfz
     bank = int(body.get("bank") or 0)
     sid = os.path.basename(media_dir)
@@ -103,7 +104,16 @@ def _export(media_dir, body):
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
         export_hydrogen(media_dir, out, bank=bank, kit_name=name)
-        return {"path": out, "kit": name, "note": "Restart Hydrogen or use Drumkits > Rescan to see it."}
+        note = "Restart Hydrogen or use Drumkits > Rescan to see it."
+        fx = body.get("fx")
+        if fx:
+            from choppad_fx import apply_to_file, is_neutral
+            if not is_neutral(fx):
+                for wav in sorted(os.listdir(out)):
+                    if wav.endswith(".wav"):
+                        apply_to_file(os.path.join(out, wav), fx)
+                note = "Tone/reverb baked into the samples. " + note
+        return {"path": out, "kit": name, "note": note}
     path = export_sfz(media_dir, bank=bank)
     return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
 
