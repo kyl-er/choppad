@@ -184,6 +184,29 @@ class BrowserToBridge(unittest.TestCase):
         self.assertEqual(len(self.entries("transport")), before + 1)
         self.post("transport", {"command": "stop"})
 
+    def test_two_tabs_only_the_primary_executes_transport(self):
+        a, _ = self.open_page()
+        b, _ = self.open_page()
+        a.wait_for_function(f"{S}.remote.primary === true", timeout=10000)
+        b.wait_for_function(f"{S}.remote.primary === false", timeout=10000)
+        count = """() => { window.__hits = 0; window.choppad.song.session.on('hit', () => { window.__hits++; }); }"""
+        a.evaluate(count)
+        b.evaluate(count)
+        self.post("transport", {"command": "hit", "pad": 2, "velocity": 1})
+        a.wait_for_function("window.__hits === 1", timeout=5000)
+        b.wait_for_timeout(500)
+        self.assertEqual(b.evaluate("window.__hits"), 0, "a display tab must not play an agent's hit")
+        self.post("transport", {"command": "play-pattern"})
+        a.wait_for_function(f"{S}.seq.state.playing === true", timeout=5000)
+        b.wait_for_timeout(300)
+        self.assertFalse(b.evaluate(f"{S}.seq.state.playing"))
+        self.post("transport", {"command": "stop"})
+        # the primary goes away: the other tab is promoted and now executes
+        a.close()
+        b.wait_for_function(f"{S}.remote.primary === true", timeout=10000)
+        self.post("transport", {"command": "hit", "pad": 3, "velocity": 1})
+        b.wait_for_function("window.__hits === 1", timeout=5000)
+
     def test_daw_state_is_on_the_song_document_and_follows_the_bridge(self):
         get = lambda: json.loads(urllib.request.urlopen(f"{self.base}/api/songs/{self.sid}").read())["daw"]  # noqa: E731
         self.assertEqual(get(), {"open": False, "daw": None, "bank": None})

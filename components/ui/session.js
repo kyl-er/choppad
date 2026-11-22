@@ -470,6 +470,9 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   // kit holds. Reports are `local: true` transport posts: the server hands them to the bridge and does NOT rebroadcast
   // them, so other tabs do not play them too. Nothing here waits for the network or can fail the audio trigger.
   const daw = { open: false, bank: null, tokens: 40, t: 0 };
+  // Roles: with several tabs on one song only the primary one (the first to connect; the server says so with a `role` event)
+  // executes transport commands, so an agent's `hit` or `play` sounds once, not once per tab. Others only display.
+  let primary = true;
   let fromRemote = false; // true while executing a command that came from the stream: never reported back
   function dawSend(body) {
     send(`/api/songs/${id}/transport`, { method: "POST", body: JSON.stringify({ ...body, local: true }) }).catch(() => {});
@@ -487,6 +490,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     if (!fromRemote && daw.open) dawSend({ command });
   }
   function runTransport(msg) {
+    if (!primary) return;
     if (ctx.state !== "running") ctx.resume().catch(() => {});
     switch (msg.command) {
       case "play-pattern": if (!seq.state.playing) { fromRemote = true; try { togglePattern(); } finally { fromRemote = false; } } break;
@@ -528,11 +532,11 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   let stream = null;
   let streamDropped = false;
   if (typeof EventSource !== "undefined") {
-    stream = new EventSource(`/api/songs/${id}/events?origin=${ORIGIN}`);
+    stream = new EventSource(`/api/songs/${id}/events?origin=${ORIGIN}&role=1`);
     stream.addEventListener("open", () => {
       if (streamDropped) { streamDropped = false; resync().catch(() => {}); }
     });
-    stream.addEventListener("error", () => { streamDropped = true; }); // EventSource reconnects by itself
+    stream.addEventListener("error", () => { streamDropped = true; primary = false; }); // reconnects by itself and is told its role again
     const onMessage = (type, handle) => stream.addEventListener(type, (e) => {
       let data;
       try { data = JSON.parse(e.data); } catch { return; }
@@ -542,12 +546,13 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     onMessage("actions", (d) => { for (const a of d.actions ?? []) store.dispatch(a, remoteMeta); });
     onMessage("chops", (d) => adoptChops(d.chops));
     onMessage("transport", runTransport);
+    onMessage("role", (d) => { primary = !!d.primary; });
     onMessage("daw", (d) => { daw.open = !!d.open; daw.bank = Number.isInteger(d.bank) ? d.bank : null; });
   }
 
   return {
     id, meta, analysis, peaks, buffer, video, store, engine, seq,
-    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, flush },
+    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, get primary() { return primary; }, flush },
     on: (type, fn) => events.addEventListener(type, fn),
     off: (type, fn) => events.removeEventListener(type, fn),
     position, playSong, stopSong,

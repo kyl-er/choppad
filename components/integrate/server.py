@@ -18,17 +18,22 @@ Routes
   POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
                                  with `local: true` (a tab reporting its own hit/play/stop): not rebroadcast, only handed to
                                  an open DAW bridge (rate limited; 429 when too fast, delivered:false when no bridge)
+  `role` event {primary, tabs} on a song stream opened with `?role=1` (a browser tab): the first tab to connect is primary and
+                                 executes transport commands, later tabs only display; the next oldest is promoted when it leaves
   `daw` event {open, daw, bank} on the song stream (on open/close of a bridge; also first on a stream that connects while one
                                  is open; GET /api/songs/<id> has the same state as `daw`)
   POST /api/songs/<id>/daw       {daw: hydrogen|ardour, command: open|sync|play|stop, bank?} -> DAW bridge (contracts §11)
 Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
 import hashlib
+import itertools
 import json
 import os
 import queue
 import re
+import select
 import shutil
+import socket
 import sys
 import tempfile
 import threading
@@ -106,10 +111,15 @@ KEEPALIVE_S = 10.0
 
 
 class Client:
-    """One open event stream."""
-    def __init__(self, origin: str = ""):
+    """One open event stream. `roles`: a browser tab that asked for a role (`?role=1`): see Hub._assign_locked."""
+    _seq = itertools.count()
+
+    def __init__(self, origin: str = "", roles: bool = False):
         self.origin = origin
         self.q = queue.Queue(maxsize=1000)
+        self.roles = roles
+        self.seq = next(Client._seq)  # connection order
+        self.primary = None           # None until told
 
 
 class Hub:
@@ -119,17 +129,32 @@ class Hub:
         self.subs = {}  # song id -> set[Client]
         self.closed = False
 
-    def subscribe(self, sid, origin=""):
-        c = Client(origin)
+    def subscribe(self, sid, origin="", roles=False):
+        c = Client(origin, roles)
         with self.lock:
             if self.closed:
                 c.q.put(None)
             self.subs.setdefault(sid, set()).add(c)
+            self._assign_locked(sid)
         return c
 
     def unsubscribe(self, sid, c):
         with self.lock:
             self.subs.get(sid, set()).discard(c)
+            self._assign_locked(sid)
+
+    def _assign_locked(self, sid):
+        """CHOP-11: of the tabs that asked for a role the first to connect is `primary` (the only one that executes
+        transport commands: play, stop, hit), the others only display. Each tab is told its role (`role` event
+        {primary}) when it changes; when the primary goes away the next oldest tab is promoted. Caller holds the lock."""
+        tabs = sorted((c for c in self.subs.get(sid, ()) if c.roles), key=lambda c: c.seq)
+        for i, c in enumerate(tabs):
+            if c.primary != (i == 0):
+                c.primary = i == 0
+                try:
+                    c.q.put_nowait(f"event: role\ndata: {json.dumps({'primary': c.primary, 'tabs': len(tabs)}, separators=(',', ':'))}\n\n")
+                except queue.Full:
+                    pass
 
     def listeners(self, sid):
         with self.lock:
@@ -148,6 +173,7 @@ class Hub:
                     n += 1
                 except queue.Full:  # a stuck client must not stall the others
                     self.subs[sid].discard(c)
+                    self._assign_locked(sid)
         return n
 
     def close_all(self):
@@ -352,11 +378,19 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
         def _origin(self):
             return (self.headers.get("X-ChopPad-Origin") or "")[:64]
 
+        def _peer_gone(self):
+            """True when the client closed its end of this connection (readable with EOF)."""
+            try:
+                r, _, _ = select.select([self.connection], [], [], 0)
+                return bool(r) and self.connection.recv(1, socket.MSG_PEEK) == b""
+            except (OSError, ValueError):
+                return True
+
         def _events(self, sid):
             """Server-sent events: stays open until the client goes away or the server shuts down.
             sid is a song id, or LIBRARY for the library-level stream (`job` events of imports)."""
             origin = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("origin", [""])[0][:64]
-            client = hub.subscribe(sid, origin)
+            client = hub.subscribe(sid, origin, roles=urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("role") == ["1"])
             self.close_connection = True
             try:
                 self.send_response(200)
@@ -372,11 +406,19 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 elif daw_of(sid).get("open"):  # CHOP-11: a tab that connects while a bridge is open is told at once
                     self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(sid), separators=(',', ':'))}\n\n".encode())
                 self.wfile.flush()
+                last = time.monotonic()
                 while True:
                     try:
-                        msg = client.q.get(timeout=KEEPALIVE_S)
+                        msg = client.q.get(timeout=1.0)
                     except queue.Empty:
-                        msg = ": ping\n\n"  # also how a vanished client is noticed
+                        # a closed tab is noticed within a second (its socket reads EOF), so the next tab is promoted
+                        # quickly; the ping is only to keep proxies and idle timers awake
+                        if self._peer_gone():
+                            break
+                        if time.monotonic() - last < KEEPALIVE_S:
+                            continue
+                        msg = ": ping\n\n"
+                    last = time.monotonic()
                     if msg is None:
                         break
                     self.wfile.write(msg.encode())
