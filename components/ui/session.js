@@ -10,9 +10,15 @@ import { PADS, initialState, projectDoc, reduce } from "./actions.js";
 
 const STEPS = { "1/4": 1, "1/8": 2, "1/16": 4 };
 const MULTS = [0.5, 1, 2];
-const SAVE_DELAY_MS = 300;
+const SAVE_DELAY_MS = 80; // local edits are sent to the server in batches this often
+// One random id per page load; sent with every write so the server and the other tabs know who wrote it (contracts §10).
+const ORIGIN = globalThis.crypto?.randomUUID?.() ?? `tab-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+const ORIGIN_HEADER = "X-ChopPad-Origin";
+// Local actions that are saved on the server and shown by other tabs. Selection, settings and sections stay per tab.
+const FORWARDED = new Set(["pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "fx.set",
+  "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load", "bank.set"]);
 
-const postJson = (url, body = {}) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const postJson = (url, body = {}) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [ORIGIN_HEADER]: ORIGIN }, body: JSON.stringify(body) });
 
 /** Load a song and return its session. Throws if the song can't be loaded. `onProgress(text)` is optional. */
 export async function openSong({ id, audio, onProgress = () => {} }) {
@@ -85,7 +91,6 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     seq.state.swing = s.settings.swing;
     seq.state.metronome = s.settings.metronome;
   }
-  let saveTimer = 0;
   let chopToBank = [];
   const indexBanks = (chops) => {
     chopToBank = [];
@@ -114,13 +119,53 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     }
     if (P.fx !== Q.fx) fx.set(P.fx);
     if (P.pattern !== Q.pattern) givePattern(P.pattern);
-    if (meta.save === false) return; // for example a change that came from the server and is already on disk
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      fetch(`/api/songs/${id}/project`, { method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(projectDoc(store.get())) }).catch(() => {});
-    }, SAVE_DELAY_MS);
   });
+
+  // ---- local changes -> server (saved there, shown by every other tab), server changes -> store ----
+  // Local actions are queued and sent as one batch about every SAVE_DELAY_MS; the server applies them with its own copy
+  // of the reducer, writes project.json and tells the other tabs. If that fails the whole project is PUT instead.
+  const outbox = [];
+  let flushTimer = 0;
+  let inflight = Promise.resolve();
+  const send = (url, init) => fetch(url, { ...init, keepalive: true, headers: { "Content-Type": "application/json", [ORIGIN_HEADER]: ORIGIN } });
+  function queue(action, prev) {
+    const last = outbox[outbox.length - 1];
+    // runs of the same edit (a slider drag, a waveform drag) collapse into one
+    if (last && last.type === action.type) {
+      if ((action.type === "pad.set" && last.pad === action.pad) || action.type === "fx.set") {
+        last.params = { ...last.params, ...action.params };
+        return;
+      }
+      if (action.type === "bank.set" || (action.type === "slice.set" && last.bank === action.bank && last.pad === action.pad)) {
+        outbox[outbox.length - 1] = { ...action };
+        return;
+      }
+    }
+    // a toggle without a bank means "the bank on screen"; the server does not know which one that was for this tab
+    outbox.push(action.type === "pattern.toggleStep" && action.bank == null ? { ...action, bank: prev.bank } : { ...action });
+  }
+  function flush() {
+    clearTimeout(flushTimer);
+    flushTimer = 0;
+    const batch = outbox.splice(0);
+    if (!batch.length) return inflight;
+    inflight = inflight.then(async () => {
+      try {
+        const r = await send(`/api/songs/${id}/actions`, { method: "POST", body: JSON.stringify({ actions: batch }) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      } catch {
+        await send(`/api/songs/${id}/project`, { method: "PUT", body: JSON.stringify(projectDoc(store.get())) }).catch(() => {});
+      }
+    });
+    return inflight;
+  }
+  const unsubscribeOutbox = store.subscribe((s, prev, action, meta) => {
+    if (meta.remote || meta.save === false || !FORWARDED.has(action.type)) return;
+    queue(action, prev);
+    if (!flushTimer) flushTimer = setTimeout(flush, SAVE_DELAY_MS);
+  });
+  const onPageHide = () => { flush(); };
+  window.addEventListener("pagehide", onPageHide);
   applyAll(store.get());
   indexBanks(store.get().chops);
   seq.load(store.get().project.pattern);
@@ -305,8 +350,61 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     emit("seq", {});
   }
 
+  // ---- remote control: what an agent (or another tab) does arrives on /events and is played here ----
+  const remoteMeta = { remote: true, save: false }; // already on disk, and not ours to send back
+  function runTransport(msg) {
+    if (ctx.state !== "running") ctx.resume().catch(() => {});
+    switch (msg.command) {
+      case "play-pattern": if (!seq.state.playing) togglePattern(); break;
+      case "stop": panic(); break;
+      case "play-song": playSong(Number.isFinite(msg.from) ? msg.from : undefined); break;
+      case "hit":
+        if (Number.isInteger(msg.bank)) setBank(msg.bank);
+        if (Number.isInteger(msg.pad)) hit(msg.pad, Number.isFinite(msg.velocity) ? msg.velocity : 1);
+        break;
+    }
+  }
+  /** After a dropped connection: events were missed, so compare with what the server has and apply the difference. */
+  async function resync() {
+    const r = await fetch(`/api/songs/${id}`);
+    if (!r.ok) return;
+    const d = await r.json();
+    const want = initialState({ project: d.project, chops: d.chops }).project;
+    const have = store.get().project;
+    const apply = (a) => store.dispatch(a, remoteMeta);
+    want.pads.forEach((P, pad) => { if (JSON.stringify(P) !== JSON.stringify(have.pads[pad])) apply({ type: "pad.set", pad, params: P }); });
+    for (const k of Object.keys(have.overrides)) {
+      if (!(k in want.overrides)) { const [bank, pad] = k.split(":").map(Number); apply({ type: "slice.clear", bank, pad }); }
+    }
+    for (const [k, sl] of Object.entries(want.overrides)) {
+      if (JSON.stringify(sl) !== JSON.stringify(have.overrides[k])) { const [bank, pad] = k.split(":").map(Number); apply({ type: "slice.set", bank, pad, ...sl }); }
+    }
+    apply({ type: "fx.set", params: want.fx });
+    apply({ type: "pattern.load", pattern: want.pattern });
+    if (JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
+  }
+  let stream = null;
+  let streamDropped = false;
+  if (typeof EventSource !== "undefined") {
+    stream = new EventSource(`/api/songs/${id}/events?origin=${ORIGIN}`);
+    stream.addEventListener("open", () => {
+      if (streamDropped) { streamDropped = false; resync().catch(() => {}); }
+    });
+    stream.addEventListener("error", () => { streamDropped = true; }); // EventSource reconnects by itself
+    const onMessage = (type, handle) => stream.addEventListener(type, (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch { return; }
+      if (data.origin === ORIGIN) return; // our own write coming back
+      handle(data);
+    });
+    onMessage("actions", (d) => { for (const a of d.actions ?? []) store.dispatch(a, remoteMeta); });
+    onMessage("chops", (d) => adoptChops(d.chops));
+    onMessage("transport", runTransport);
+  }
+
   return {
     id, meta, analysis, peaks, buffer, video, store, engine, seq,
+    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, flush },
     on: (type, fn) => events.addEventListener(type, fn),
     off: (type, fn) => events.removeEventListener(type, fn),
     position, playSong, stopSong,
@@ -319,6 +417,10 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     loadSections, advise, loadAiBank, exportBank,
     panic,
     destroy() {
+      unsubscribeOutbox();
+      window.removeEventListener("pagehide", onPageHide);
+      flush(); // edits made in the last moments still reach the server
+      stream?.close();
       unsubscribe();
       for (const t of timers) clearTimeout(t);
       panic();

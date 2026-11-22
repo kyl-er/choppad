@@ -233,5 +233,71 @@ class SongScreenSmoke(unittest.TestCase):
         page.close()
 
 
+    def api(self, path, body, origin="agent"):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", "X-ChopPad-Origin": origin})
+        return json.loads(urllib.request.urlopen(req, timeout=5).read())
+
+    def test_agent_control_shows_live_without_reload(self):
+        page, errors = self.open_song()
+        sess = "window.choppad.song.session"
+        page.wait_for_function(f"{sess}.remote.connected === true", timeout=5000)
+        page.evaluate("window.__noReload = 'same page'")
+        other, errors2 = self.open_song()  # a second tab on the same song
+        other.wait_for_function(f"{sess}.remote.connected === true", timeout=5000)
+        page.evaluate(f"""() => {{
+            window.__peak = 0; window.__hits = 0;
+            {sess}.on('hit', () => window.__hits++);
+            const a = window.choppad.audio.analyser, buf = new Float32Array(a.fftSize);
+            setInterval(() => {{ a.getFloatTimeDomainData(buf); for (const v of buf) window.__peak = Math.max(window.__peak, Math.abs(v)); }}, 4);
+            window.__t = null;
+            {sess}.store.subscribe((s, p, action, meta) => {{ if (meta.remote && window.__t === null) window.__t = Date.now(); }});
+        }}""")
+
+        # an agent's batch of actions, sent from Python: the open page shows them, nothing reloads
+        t0 = time.time() * 1000
+        out = self.api(f"/api/songs/{self.sid}/actions", {"actions": [
+            {"type": "pad.set", "pad": 0, "params": {"pitch": 7, "gainDb": -4}},
+            {"type": "pattern.toggleStep", "pad": 0, "step": 4, "bank": 0},
+            {"type": "fx.set", "params": {"reverb": 0.33}},
+        ]})
+        self.assertEqual(out["applied"], 3)
+        self.assertGreaterEqual(out["listeners"], 2)
+        page.wait_for_function(f"{sess}.store.get().project.fx.reverb === 0.33", timeout=2000)
+        page.wait_for_function("document.querySelector('.stepgrid i[data-pad=\"0\"][data-step=\"4\"]')?.classList.contains('on')", timeout=2000)
+        page.wait_for_function("document.querySelector('.inspector input[name=\"pitch\"]')?.value === '7'", timeout=2000)
+        arrived = page.evaluate("window.__t")
+        delay_ms = arrived - t0
+        print(f"\n[agent-control] POST -> first remote action in the page: {delay_ms:.0f} ms", flush=True)
+        self.assertLess(delay_ms, 2000)
+        st = self.state(page)
+        self.assertEqual((st["pad0"]["pitch"], st["pad0"]["gainDb"], round(st["fx"]["reverb"], 2)), (7, -4, 0.33))
+        self.assertEqual([(e["pad"], e["beat"], e["pass"]) for e in st["events"]], [(0, 1, -1)])
+        self.assertEqual(page.evaluate("window.__noReload"), "same page")  # no reload happened
+        self.assertEqual(page.locator(".fx input[name=reverb]").input_value(), "0.33")
+        other.wait_for_function(f"{sess}.store.get().project.pattern.events.length === 1", timeout=2000)  # the second tab too
+        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        self.assertEqual(saved["pads"][0]["pitch"], 7)  # the server wrote it, not the page
+
+        # and the other way: a hand edit in one tab reaches the other tab and the disk, with no echo
+        page.locator('.stepgrid i[data-pad="3"][data-step="8"]').click()
+        other.wait_for_function(f"{sess}.store.get().project.pattern.events.length === 2", timeout=2000)
+        page.wait_for_timeout(400)
+        self.assertEqual(page.evaluate(f"{sess}.store.get().project.pattern.events.length"), 2)  # not doubled by its own echo
+        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        self.assertEqual(sorted(e["pad"] for e in saved["pattern"]["events"]), [0, 3])
+
+        # transport: an agent hit sounds in the page (signal on the master analyser)
+        page.wait_for_timeout(1200)  # the click above sounded; let it die away, then listen for the agent's hit only
+        page.evaluate("window.__peak = 0; window.__hits = 0")
+        out = self.api(f"/api/songs/{self.sid}/transport", {"command": "hit", "pad": 1, "velocity": 1})
+        self.assertGreaterEqual(out["listeners"], 2)
+        page.wait_for_function("window.__hits >= 1", timeout=2000)
+        page.wait_for_function("window.__peak > 0.001", timeout=2000)
+        self.assertEqual(errors + errors2, [])
+        other.close()
+        page.close()
+
+
 if __name__ == "__main__":
     unittest.main()
