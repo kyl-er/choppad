@@ -122,7 +122,19 @@ At most three builders at once (memory and CPU on this machine are tight).
 
 ## 6. DAW bridge decision
 
-Pending the research pass on Hydrogen and Ardour remote control. This section is replaced by the chosen mechanism per DAW before W2 starts.
+From `docs/daw-bridge-research.md` (desk research; five short spikes confirm it before W2 builds).
+
+| | Hydrogen 1.2.7 | Ardour 9.8.0 |
+|---|---|---|
+| Role | drum machine: kit + patterns, fastest path from pads to a beat | arrangement: chops and patterns on a timeline, mixing, final render |
+| Remote control | **OSC** (built in): transport, BPM, load kit, open/save song, trigger notes | **MCP HTTP surface** for tracks, MIDI regions and notes; OSC only for transport and markers |
+| Getting material in | write the kit (exists today) plus a generated `.h2song` holding the pattern and tempo, then `OPEN_SONG` | `ardour9-new_session`, then chops as WAV files and the pattern as MIDI through the MCP surface; audio import path to be settled by spike |
+| Tempo and transport | ChopPad sends BPM and play/stop over OSC (Hydrogen does not appear to follow MIDI clock) | Ardour follows ChopPad's MIDI clock as its transport master |
+| Launch | own instance with a copied config and its own OSC port, so the user's normal Hydrogen settings are untouched | `ardour9 <session>`; surfaces enabled once in Preferences |
+| Main risk | hand-written song file must load in 1.2.7 | MCP surface is experimental and binds to all interfaces; no SFZ plugin installed, so chops go in as audio or `sfizz` gets installed |
+
+Build order inside W2: virtual MIDI port and clock, then Hydrogen (lower risk, already half there), then Ardour.
+Ardour's own MCP surface also means an agent can work in ChopPad and Ardour in one session, which fits W1.
 
 ## 7. Non-goals for v4
 
