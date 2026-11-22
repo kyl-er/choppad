@@ -1,7 +1,6 @@
 // ChopPad app bootstrap: one AudioContext + master bus, one MIDI/keyboard input, hash router.
 import { createInput } from "/midi.js";
 import { mountLibrary } from "/library.js";
-import { mountSong } from "/ui.js";
 import { createFx } from "/fx.js";
 
 const ctx = new AudioContext({ latencyHint: "interactive" });
@@ -30,9 +29,15 @@ let storage = null;
 try { storage = window.localStorage; } catch { storage = null; }
 const input = createInput({ midiAccess, keyboardTarget: document, storage });
 
-const library = mountLibrary(document.getElementById("sidebar"), {
+// ?ui=classic keeps the previous screen; the default is the new station (ui.js + views/). ?mode=pad = phone pad screen.
+const classic = new URLSearchParams(location.search).get("ui") === "classic";
+const ui = await import(classic ? "/ui-classic.js" : "/ui.js");
+const sidebar = document.getElementById("sidebar");
+const library = mountLibrary(sidebar, {
   onOpen: (id) => { location.hash = `#/song/${id}`; },
 });
+// the new screen borrows the library element while it is open; between screens it is parked back in the page
+const libraryRef = { host: sidebar, park: () => document.body.append(sidebar) };
 
 // Old links used ?id=<id>
 const legacy = new URLSearchParams(location.search).get("id");
@@ -47,13 +52,14 @@ async function route() {
   current = null;
   const m = location.hash.match(/^#\/song\/([\w-]+)/);
   library.setActive(m ? m[1] : null);
+  if (!m && !classic) { current = ui.mountHome(mainEl, { audio, input, library: libraryRef }); return; }
   if (!m) {
     mainEl.innerHTML = `<div class="welcome"><h1>ChopPad</h1><p>Paste a YouTube link on the left, or pick a song from your library.</p>
       <p class="muted">Pads: Z X C V · A S D F · Q W E R · 1 2 3 4 — banks: [ ] — play/pause song: Enter — stop all: Space</p></div>`;
     return;
   }
   try {
-    const view = await mountSong(mainEl, { id: m[1], audio, input });
+    const view = await ui.mountSong(mainEl, { id: m[1], audio, input, library: classic ? null : libraryRef });
     if (seq !== routeSeq) view.destroy(); else current = view;
   } catch (err) {
     if (seq === routeSeq) mainEl.innerHTML = `<div class="welcome"><h2>Couldn't open this song</h2><p class="error">${err.message}</p></div>`;
