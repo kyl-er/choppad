@@ -1,5 +1,5 @@
 {
-  "vault": "~/01-System/MegaVault/Projects/ChopPad",
+  "vault": "docs",
   "components": {
     "contracts": { "owner": "orchestrator",     "deps": [],                                          "cmd": "python3 -m unittest contracts/test_contracts.py" },
     "ingest":    { "owner": "agent-ingest",     "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/ingest/tests" },

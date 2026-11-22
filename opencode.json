@@ -3,7 +3,6 @@
   "permission": {
     "*": "allow",
     "external_directory": {
-      "~/01-System/MegaVault/Projects/ChopPad/**": "allow",
       "~/.claude/skills/**": "allow",
       "/tmp/**": "allow"
     },
