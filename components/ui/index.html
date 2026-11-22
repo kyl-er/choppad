@@ -2,9 +2,24 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>ChopPad</title>
-  <link rel="stylesheet" href="/style.css">
+  <link id="css" rel="stylesheet" href="/style.css">
+  <script>
+    // runs before first paint: pick the screen (?ui=classic, ?mode=pad) and the theme (stored choice, else the OS preference)
+    (function () {
+      try {
+        var q = new URLSearchParams(location.search), root = document.documentElement;
+        var ui = q.get("ui") === "classic" ? "classic" : q.get("mode") === "pad" ? "pad" : "station";
+        root.dataset.ui = ui;
+        if (ui === "classic") document.getElementById("css").setAttribute("href", "/style-classic.css");
+        var t = null;
+        try { t = localStorage.getItem("choppad.theme"); } catch (e) { /* private mode */ }
+        if (t !== "light" && t !== "dark") t = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        root.dataset.theme = t;
+      } catch (e) { /* the app still works unthemed */ }
+    })();
+  </script>
 </head>
 <body>
   <div id="unlock" class="unlock" hidden>🔈 Click anywhere or press a key to enable audio (browsers block sound until you interact)</div>

@@ -44,6 +44,17 @@ def chrome_path():
     return None
 
 
+def lcd_page(page, name, sub=1):
+    """Press the page key (again, to cycle sub-pages) until the LCD shows page `name`, sub-page `sub` (1-based)."""
+    key = page.locator(f'.mode[data-mode="{name}"]')
+    for _ in range(8):
+        on = key.get_attribute("aria-pressed") == "true"
+        if on and page.locator(".lcd-sub").inner_text().startswith(f"{sub}/"):
+            return
+        key.click()
+    raise AssertionError(f"LCD page {name} {sub} not reachable")
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -102,8 +113,8 @@ class SongScreenSmoke(unittest.TestCase):
         page = self.browser.new_page(viewport={"width": 1500, "height": 1000})
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "404" not in m.text else None)
-        page.on("response", lambda r: errors.append(f"404 {r.url}") if r.status == 404 and not r.url.endswith(self.OPTIONAL_404) else None)
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
+        page.on("response", lambda r: errors.append(f"{r.status} {r.request.method} {r.url} {(r.request.post_data or \'\')[:400]}") if r.status >= 400 and not r.url.endswith(self.OPTIONAL_404) else None)  # every failed request, with its body, so a flake names itself
         page.goto(f"{self.base}/#/song/{self.sid}")
         page.wait_for_function("window.choppad?.song?.session", timeout=30000)
         page.wait_for_selector(".pad .pad-label:not(:empty)")
@@ -152,18 +163,22 @@ class SongScreenSmoke(unittest.TestCase):
         # pad sound, step grid and fx edits go through the store
         page.keyboard.press("KeyZ")
         page.wait_for_function("window.choppad.song.session.store.get().selected === 0")
+        lcd_page(page, "PAD")          # W4: the pad inspector is the PAD page of the LCD
         page.locator('.inspector input[name="pitch"]').fill("5")
         page.locator('.stepgrid i[data-pad="0"][data-step="4"]').click()
+        lcd_page(page, "FX")           # W4: presets are on the FX page
         page.locator('.fx-presets button[data-preset="warm"]').click()
         st = self.state(page)
         self.assertEqual(st["pad0"]["pitch"], 5)
         self.assertEqual([(e["pad"], e["beat"], e["pass"]) for e in st["events"]], [(0, 1, -1)])
         self.assertAlmostEqual(st["fx"]["reverb"], 0.18)
         self.assertIn("on", page.locator('.stepgrid i[data-pad="0"][data-step="4"]').get_attribute("class"))
+        lcd_page(page, "PAD")
         self.assertIn("+5 st", page.locator('.inspector [data-out="pitch"]').inner_text())
 
         # regrid replaces the chop table
         banks_before = st["banks"]
+        lcd_page(page, "GRID")         # W4: grid / meter are on the GRID page
         page.locator(".grid-btns button.grid-1-8").click()
         page.wait_for_function("window.choppad.song.session.store.get().chops.grid === '1/8'")
         self.assertGreater(self.state(page)["banks"], banks_before)
@@ -180,6 +195,7 @@ class SongScreenSmoke(unittest.TestCase):
         self.assertEqual(st["pad0"]["pitch"], 5)
         self.assertEqual(len(st["events"]), 1)
         self.assertAlmostEqual(st["fx"]["reverb"], 0.18)
+        lcd_page(page, "PAD")
         self.assertEqual(page.locator('.inspector input[name="pitch"]').input_value(), "5")
         self.assertEqual(errors + errors2, [])
         page.close()
@@ -265,6 +281,7 @@ class SongScreenSmoke(unittest.TestCase):
         self.assertGreaterEqual(out["listeners"], 2)
         page.wait_for_function(f"{sess}.store.get().project.fx.reverb === 0.33", timeout=2000)
         page.wait_for_function("document.querySelector('.stepgrid i[data-pad=\"0\"][data-step=\"4\"]')?.classList.contains('on')", timeout=2000)
+        lcd_page(page, "PAD")          # W4: the inspector is the PAD page of the LCD
         page.wait_for_function("document.querySelector('.inspector input[name=\"pitch\"]')?.value === '7'", timeout=2000)
         arrived = page.evaluate("window.__t")
         delay_ms = arrived - t0
@@ -274,6 +291,7 @@ class SongScreenSmoke(unittest.TestCase):
         self.assertEqual((st["pad0"]["pitch"], st["pad0"]["gainDb"], round(st["fx"]["reverb"], 2)), (7, -4, 0.33))
         self.assertEqual([(e["pad"], e["beat"], e["pass"]) for e in st["events"]], [(0, 1, -1)])
         self.assertEqual(page.evaluate("window.__noReload"), "same page")  # no reload happened
+        lcd_page(page, "FX")           # W4: the fx sliders are the FX page
         self.assertEqual(page.locator(".fx input[name=reverb]").input_value(), "0.33")
         other.wait_for_function(f"{sess}.store.get().project.pattern.events.length === 1", timeout=2000)  # the second tab too
         saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))

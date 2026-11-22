@@ -101,8 +101,8 @@ class CoreScreen(unittest.TestCase):
         page = self.browser.new_page(viewport={"width": 1500, "height": 1000})
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "404" not in m.text else None)
-        page.on("response", lambda r: errors.append(f"404 {r.url}") if r.status == 404 and not r.url.endswith("/favicon.ico") else None)
+        page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
+        page.on("response", lambda r: errors.append(f"{r.status} {r.request.method} {r.url} {(r.request.post_data or \'\')[:400]}") if r.status >= 400 and not r.url.endswith("/favicon.ico") else None)  # every failed request, with its body, so a flake names itself
         page.goto(f"{self.base}/#/song/{sid or self.sid}")
         page.wait_for_function("window.choppad?.song?.session", timeout=30000)
         page.wait_for_selector(".pad .pad-label:not(:empty)")
@@ -117,6 +117,7 @@ class CoreScreen(unittest.TestCase):
         before = page.evaluate(f"{S}.store.get().chops")
         self.assertNotEqual(before.get("mode"), "transient")
 
+        ts.lcd_page(page, "GRID", 3)   # W4: chop-by and sensitivity are on GRID page 3
         page.locator(".mode-transient").click()
         page.wait_for_function(f"{S}.store.get().chops.mode === 'transient'", timeout=60000)
         ch = page.evaluate(f"{S}.store.get().chops")
@@ -162,6 +163,7 @@ class CoreScreen(unittest.TestCase):
         self.assertAlmostEqual(page.evaluate(f"{S}.store.get().chops.sensitivity"), 0.9, places=3)
 
         # back to the grid
+        ts.lcd_page(page, "GRID", 3)
         page.locator(".mode-grid").click()
         page.wait_for_function(f"{S}.store.get().chops.mode === 'grid'", timeout=30000)
         self.assertEqual(page.evaluate(f"{S}.store.get().chops.grid"), before["grid"])
@@ -199,6 +201,7 @@ class CoreScreen(unittest.TestCase):
         bpm = page.evaluate(f"{S}.store.get().chops.bpm")
         target = bpm * 1.25
         ratio = bpm / target
+        ts.lcd_page(page, "PAD", 4)    # W4: the time-stretch panel is PAD page 4
         page.locator(".st-bpm").fill(str(target))
         page.locator(".st-pad").click()
         page.wait_for_function(f"{S}.store.get().project.overrides['0:0']?.stretch && {S}.engine.getPadBuffer(0, 0)", timeout=60000)
@@ -258,6 +261,7 @@ class CoreScreen(unittest.TestCase):
         self.assertAlmostEqual(self.render_pad0(page)["length"], dur * ratio, delta=0.012)
 
         # reset pad goes back to the song region
+        ts.lcd_page(page, "PAD", 4)
         page.locator(".st-clear").click()
         page.wait_for_function(f"!{S}.store.get().project.overrides['0:0']?.stretch && !{S}.engine.getPadBuffer(0, 0)")
         back = self.render_pad0(page)
@@ -273,6 +277,7 @@ class CoreScreen(unittest.TestCase):
         page, errors = self.open_song(self.sid)
         a_slice = page.evaluate(f"{S}.engine.getSlice(0, 0)")
         page.evaluate(f"{S}.store.dispatch({{ type: 'pad.set', pad: 0, params: {{ pitch: 0, gainDb: -2 }} }})")
+        ts.lcd_page(page, "EXPORT", 2)  # W4: the kit panel is EXPORT page 2
         page.locator(".kit-name").fill("e2e kit")
         page.locator(".kit-save").click()
         page.wait_for_function("document.querySelector('.kit-out').textContent.includes('saved kit')", timeout=20000)
@@ -369,6 +374,7 @@ class CoreScreen(unittest.TestCase):
         page.wait_for_function(f"document.querySelector('.songs li[data-id=\"{self.sid}\"] .key')?.textContent === '{want}'", timeout=10000)
 
         # the chops zip: 16 WAVs of the current bank, downloadable from the link
+        ts.lcd_page(page, "EXPORT", 1)  # W4: export buttons are the EXPORT page
         page.locator(".exp-zip").click()
         page.wait_for_selector(".exp-out a.exp-download", timeout=60000)
         href = page.locator(".exp-out a.exp-download").get_attribute("href")
