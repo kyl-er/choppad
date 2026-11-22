@@ -44,6 +44,39 @@ def _song_audio(media_root, song_id):
     return path
 
 
+_RESAMPLE_URL = re.compile(r"^/media/([A-Za-z0-9_-]{1,64})/resample/([0-9a-f]{16}\.wav)$")
+STEMS = ("drums", "bass", "vocals", "other")
+
+
+def _resample_path(media_root, url):
+    """File of a pad's resample (`src: /media/<id>/resample/<hash>.wav`)."""
+    m = _RESAMPLE_URL.match(url or "")
+    if not m:
+        raise ValueError(f"bad resample url {url!r}")
+    path = os.path.join(media_root, m.group(1), "resample", m.group(2))
+    if not os.path.isfile(path):
+        raise ValueError(f"resample {url} is missing; resample it again")
+    return path
+
+
+def _stem_path(media_root, song_id, stem):
+    """File of a pad's stem (`stem: "drums"`) of `song_id`."""
+    if stem not in STEMS or not _ID.match(str(song_id or "")):
+        raise ValueError(f"bad stem {stem!r}")
+    path = os.path.join(media_root, song_id, "stems", f"{stem}.wav")
+    if not os.path.isfile(path):
+        raise ValueError(f"the {stem} stem of {song_id!r} is missing; run the stems step for that song")
+    return path
+
+
+def _sample_rate(path):
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getframerate()
+    except (OSError, wave.Error, EOFError):
+        return 44100
+
+
 def _stretch_path(media_root, url):
     m = _STRETCH_URL.match(url or "")
     if not m:
@@ -89,14 +122,19 @@ def bank_pads(media_dir, bank=0, overrides=None, sounds=None):
         o = overrides.get(f"{bank}:{pad}")
         if o and o.get("end", 0) > o.get("start", 0):
             start, end = o["start"], o["end"]
-            audio = own if not o.get("song") or o["song"] == os.path.basename(os.path.abspath(media_dir)) else _song_audio(media_root, o["song"])
+            own_id = os.path.basename(os.path.abspath(media_dir))
+            audio = own if not o.get("song") or o["song"] == own_id else _song_audio(media_root, o["song"])
+            if o.get("src"):                      # W3b: a resample, or a stem of the song, instead of the song's own audio
+                audio = _resample_path(media_root, o["src"])
+            elif o.get("stem"):
+                audio = _stem_path(media_root, o.get("song") or own_id, o["stem"])
             stretch = _stretch_path(media_root, o["stretch"]["url"]) if o.get("stretch") else None
         elif pad < len(indices):
             ch = chops["chops"][indices[pad]]
             start, end, audio, stretch = ch["start"], ch["end"], own, None
         else:
             continue
-        pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch,
+        pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch, "sr": _sample_rate(audio),
                      "params": sounds[pad] if pad < len(sounds) and isinstance(sounds[pad], dict) else {}})
     return pads
 
@@ -108,7 +146,11 @@ def kit_pads(media_root, kit):
         if not p:
             continue
         audio = _song_audio(media_root, p["song_id"])
-        pads.append({"pad": pad, "start": p["start"], "end": p["end"], "audio": audio,
+        if p.get("src"):                          # W3b: a resample or a stem of that song
+            audio = _resample_path(media_root, p["src"])
+        elif p.get("stem"):
+            audio = _stem_path(media_root, p["song_id"], p["stem"])
+        pads.append({"pad": pad, "start": p["start"], "end": p["end"], "audio": audio, "sr": _sample_rate(audio),
                      "stretch": _stretch_path(media_root, p["stretch"]["url"]) if p.get("stretch") else None,
                      "params": p.get("params") or {}})
     return pads
@@ -138,7 +180,6 @@ def groups_in_use(pads):
 
 
 def write_sfz(pads, out_path, *, default_audio):
-    sr = 44100
     grouped = groups_in_use(pads)
     here = os.path.dirname(os.path.abspath(out_path))
     rel = lambda p: os.path.relpath(p, here).replace(os.sep, "/")  # noqa: E731
@@ -156,6 +197,7 @@ def write_sfz(pads, out_path, *, default_audio):
             lines.append(f"<region> sample={rel(p['stretch'])} key={36 + p['pad']}{ops}")
             continue
         extra = "" if os.path.abspath(p["audio"]) == os.path.abspath(default_audio) else f" sample={rel(p['audio'])}"
+        sr = p.get("sr") or 44100   # the sample rate of the file the region plays (a resample may not be 44.1 kHz)
         lines.append(f"<region>{extra} key={36 + p['pad']} offset={round(p['start'] * sr)} end={round(p['end'] * sr)}{ops}")
 
     with open(out_path, "w", encoding="utf-8") as f:

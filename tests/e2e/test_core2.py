@@ -18,6 +18,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import urllib.request
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 MEDIA = os.path.join(REPO, "media")
@@ -265,7 +266,7 @@ class Core2(unittest.TestCase):
         self.assertEqual(page2.evaluate(f"{S}.store.get().project.tempo.bpm"), 88)
         page.evaluate(f"{S}.store.dispatch({{ type: 'tempo.set', bpm: 70 }})")
         page2.wait_for_function(f"{S}.store.get().project.tempo.bpm === 70", timeout=10000)
-        self.assertEqual(errors + errors2, [])
+        self.assertEqual(errors + errors2, [], str(errors + errors2))
 
     # ------------------------------------------------------------------ 2. per-pad filter and ADSR
     RENDER_PAD = """async ([pad, params]) => {
@@ -318,7 +319,7 @@ class Core2(unittest.TestCase):
         sfz = open(out["path"]).read()
         self.assertIn("fil_type=bpf_2p", sfz)
         self.assertIn("ampeg_sustain=30.0", sfz)
-        self.assertEqual(errors, [])
+        self.assertEqual(errors, [], str(errors))
 
     # ------------------------------------------------------------------ 3. mute groups
     def test_mute_groups_in_the_real_engine_and_over_http(self):
@@ -353,7 +354,169 @@ class Core2(unittest.TestCase):
         self.assertEqual(off["after"][:3], [True, False, False], "pad 1 cuts pad 0 (same group), not pad 2 (other group) or pad 3 (none)")
         on = page.evaluate(js, True)
         self.assertEqual(on["after"][:3], [True, True, True], "global choke: everything is cut, as before")
-        self.assertEqual(errors, [])
+        self.assertEqual(errors, [], str(errors))
+
+    # ------------------------------------------------------------------ 4. 16 levels
+    def test_sixteen_levels_record_and_play_back(self):
+        page, errors = self.open_song()
+        S = self.S
+        spy = f"""() => {{ const s = {S}; window.__calls = []; const t = s.engine.trigger;
+            s.engine.trigger = (...a) => {{ window.__calls.push({{ pad: a[0], vel: a[1], extra: a[4] ?? null }}); return t(...a); }}; }}"""
+        page.evaluate(spy)
+        # pitch: the 16 pads are 16 semitone steps of pad 2
+        info = page.evaluate(f"{S}.setSixteenLevels({{ pad: 2, mode: 'pitch' }})")
+        self.assertTrue(info["ok"])
+        self.assertEqual([l["pitch"] for l in info["levels"]], list(range(-7, 9)))
+        self.assertEqual(page.evaluate(f"{S}.store.get().settings.sixteen"), {"pad": 2, "mode": "pitch"})
+        page.evaluate(f"() => {{ {S}.hit(0); {S}.hit(7); {S}.hit(15); }}")
+        calls = page.evaluate("window.__calls")
+        self.assertEqual([c["pad"] for c in calls], [2, 2, 2])
+        self.assertEqual([c["extra"]["pitch"] for c in calls], [-7, 0, 8])
+        self.assertEqual(page.evaluate(f"{S}.store.get().selected"), 2, "the inspector shows the source pad")
+        # recording writes the source pad with a per-event pitch; undo and step toggles still work
+        page.evaluate(f"{S}.panic()")
+        page.evaluate(f"{S}.toggleRecord()")
+        page.wait_for_timeout(300)
+        page.evaluate(f"() => {{ {S}.hit(3); {S}.hit(12); }}")
+        page.evaluate(f"{S}.toggleRecord()")
+        page.evaluate(f"{S}.panic()")
+        evs = page.evaluate(f"{S}.store.get().project.pattern.events")
+        self.assertEqual(sorted(e["pitch"] for e in evs), [-4, 5])
+        self.assertTrue(all(e["pad"] == 2 and "cutoff" not in e for e in evs))
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.toggleStep', pad: 6, step: 3 }})")
+        self.assertEqual(len(page.evaluate(f"{S}.store.get().project.pattern.events")), 3)
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.undo' }})")
+        left = page.evaluate(f"{S}.store.get().project.pattern.events")
+        self.assertEqual([e["pad"] for e in left], [6], "undo took the recorded take, the drawn step stays")
+        # saved with the events
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.addEvent', event: {{ beat: 1, pad: 2, bank: 0, vel: 1, pass: 9, pitch: 4, cutoff: 800 }} }})")
+        page.evaluate(f"{S}.remote.flush()")
+        saved = self.project_on_disk()["pattern"]["events"]
+        self.assertIn({"beat": 1, "pad": 2, "bank": 0, "vel": 1, "pass": 9, "pitch": 4, "cutoff": 800}, saved)
+
+        # velocity: Full level goes off so the velocities count, and comes back when the mode is left
+        self.assertTrue(page.evaluate(f"{S}.store.get().settings.fullLevel"))
+        page.evaluate(f"{S}.setSixteenLevels({{ pad: 1, mode: 'velocity' }})")
+        self.assertFalse(page.evaluate(f"{S}.store.get().settings.fullLevel"))
+        page.evaluate("window.__calls = []")
+        page.evaluate(f"() => {{ {S}.hit(0); {S}.hit(15); }}")
+        self.assertEqual([round(c["vel"], 4) for c in page.evaluate("window.__calls")], [0.0625, 1.0])
+        page.evaluate(f"{S}.setSixteenLevels({{ mode: 'off' }})")
+        self.assertTrue(page.evaluate(f"{S}.store.get().settings.fullLevel"))
+        self.assertIsNone(page.evaluate(f"{S}.store.get().settings.sixteen"))
+        page.evaluate("window.__calls = []")
+        page.evaluate(f"{S}.hit(4)")
+        self.assertEqual([c["pad"] for c in page.evaluate("window.__calls")], [4], "off: pads are pads again")
+
+        # the pitch and the cutoff of an event are in the offline render
+        res = page.evaluate(f"""async () => {{
+            const s = {S}, T = window.__t;
+            const render = async (ev) => {{
+                s.store.dispatch({{ type: 'pattern.load', pattern: {{ bars: 1, events: [{{ beat: 0, pad: 2, bank: 0, vel: 1, pass: -1, ...ev }}] }} }});
+                const b = await T.decode(Array.from(await s.renderPatternWav()));
+                const x = b.getChannelData(0), sr = b.sampleRate, n = Math.round(0.6 * sr);
+                let e = 0, d = 0; for (let i = 1; i < n; i++) {{ e += x[i] * x[i]; d += (x[i] - x[i - 1]) ** 2; }}
+                return {{ hf: d / (e + 1e-12), end: T.audibleEnd(x, sr, 0, 0.6, 0.01) }};
+            }};
+            return {{ plain: await render({{}}), low: await render({{ pitch: -7 }}), high: await render({{ pitch: 8 }}),
+                     dark: await render({{ cutoff: 150 }}), bright: await render({{ cutoff: 16000 }}) }};
+        }}""")
+        self.assertLess(res["dark"]["hf"], 0.2 * res["plain"]["hf"], res)       # a low cutoff takes the top off
+        self.assertAlmostEqual(res["bright"]["hf"], res["plain"]["hf"], delta=0.35 * res["plain"]["hf"], msg=res)
+        self.assertLess(res["high"]["end"], 0.6 * res["low"]["end"], res)         # +8 semitones is shorter than -7
+        self.assertEqual(errors, [], str(errors))
+
+    # ------------------------------------------------------------------ 5. resample
+    def test_resample_pattern_offline_and_master_capture(self):
+        page, errors = self.open_song()
+        S = self.S
+        evs = [{"beat": b, "pad": p, "bank": 0, "vel": 1, "pass": -1} for b, p in ((0, 0), (1, 1), (2, 2), (3, 3))]
+        page.evaluate("([evs]) => { const s = window.choppad.song.session; s.store.dispatch({ type: 'pattern.load', pattern: { bars: 1, events: evs } }); s.store.dispatch({ type: 'tempo.set', bpm: 120 }); }", [evs])
+        # 2 bars of a 1-bar pattern at 120 BPM = 4 s: it loops; offline, so no waiting
+        r = page.evaluate(f"{S}.resample({{ bars: 2, source: 'pattern', pad: 9 }})")
+        self.assertTrue(r["ok"], r)
+        self.assertAlmostEqual(r["duration"], 4.0, delta=0.001)
+        self.assertEqual((r["bank"], r["pad"]), (0, 9))
+        ov = page.evaluate(f"{S}.store.get().project.overrides['0:9']")
+        self.assertEqual((ov["src"], ov["start"]), (r["url"], 0))
+        self.assertAlmostEqual(ov["end"], 4.0, delta=0.001)
+        wav = urllib.request.urlopen(self.base + r["url"]).read()
+        self.assertEqual(wav[:4], b"RIFF")
+        # the same pattern gives the same file (deterministic), the pad plays that file
+        again = page.evaluate(f"{S}.resample({{ bars: 2, source: 'pattern', pad: 10 }})")
+        self.assertEqual(again["url"], r["url"])
+        res = page.evaluate(f"""async () => {{
+            const s = {S}, T = window.__t, buf = s.engine.getPadBuffer(0, 9), sr = buf.sampleRate, x = buf.getChannelData(0);
+            const half = Math.round(2 * sr);
+            const ref = x.slice(0, Math.round(0.4 * sr));
+            return {{ dur: buf.duration, second: T.lagOf(x, ref, half, Math.round(0.002 * sr), ref.length), peak: x.reduce((m, v) => Math.max(m, Math.abs(v)), 0) }};
+        }}""")
+        self.assertAlmostEqual(res["dur"], 4.0, delta=0.001)
+        self.assertGreater(res["second"]["corr"], 0.97, "bar 2 is bar 1 again")
+        self.assertEqual(res["second"]["lag"], 0)
+        self.assertGreater(res["peak"], 0.05)
+        # a resample plays at its own level (no re-normalisation) and the pad sounds when hit
+        page.evaluate(f"{S}.hit(9)")
+        # the resample is saved, shown by a second tab, and an agent can see it over HTTP
+        page.evaluate(f"{S}.remote.flush()")
+        saved = self.project_on_disk()["overrides"]["0:9"]
+        self.assertEqual(saved["src"], r["url"])
+        page2, errors2 = self.open_song()
+        self.assertEqual(page2.evaluate(f"{S}.store.get().project.overrides['0:9'].src"), r["url"])
+        self.assertEqual(page2.evaluate(f"{S}.engine.getPadBuffer(0, 9)?.duration > 3.9"), True)
+
+        # exports: the SFZ points at the resample, the zip carries it whole
+        st, out = api(self.base, f"/api/songs/{self.sid}/export", {"kind": "sfz", "bank": 0})
+        self.assertEqual(st, 200, out)
+        line = [l for l in open(out["path"]).read().splitlines() if "key=45 " in l][0]
+        self.assertIn(f"sample=resample/{r['url'].rsplit('/', 1)[1]}", line)
+        st, out = api(self.base, f"/api/songs/{self.sid}/export", {"kind": "zip", "bank": 0})
+        self.assertEqual(st, 200, out)
+        # a kit made from the bank keeps it; loading the kit on another bank puts the resample there
+        kit = page.evaluate(f"{S}.saveBankAsKit('resample kit')")
+        self.assertTrue(kit["ok"], kit)
+        self.assertEqual(kit["kit"]["pads"][9]["src"], r["url"])
+        page.evaluate(f"{S}.setBank(1)")
+        page.evaluate(f"{S}.loadKit({json.dumps(kit['kit']['id'])})")
+        self.assertEqual(page.evaluate(f"{S}.store.get().project.overrides['1:9'].src"), r["url"])
+        self.assertEqual(page.evaluate(f"{S}.engine.getPadBuffer(1, 9)?.duration > 3.9"), True)
+        # fitting to a tempo leaves a resample alone
+        page.evaluate(f"{S}.store.dispatch({{ type: 'tempo.set', bpm: 90 }})")
+        fit = page.evaluate(f"{S}.fitToTempo({{ scope: 'bank' }})")
+        self.assertTrue(any(s["pad"] == 9 and "resample" in s["reason"] for s in fit["skipped"]), fit)
+        self.assertEqual(page.evaluate(f"{S}.store.get().project.overrides['1:9'].stretch ?? null"), None)
+        # an empty pattern, bad arguments
+        bad = page.evaluate(f"{S}.resample({{ bars: 0, source: 'pattern', pad: 1 }})")
+        self.assertFalse(bad["ok"])
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.clear' }})")
+        self.assertIn("empty", page.evaluate(f"{S}.resample({{ bars: 1, source: 'pattern', pad: 1 }})")["error"])
+        self.assertEqual(errors + errors2, [], str(errors + errors2))
+
+    def test_resample_master_bus_with_the_audio_worklet(self):
+        page, errors = self.open_song()
+        S = self.S
+        evs = [{"beat": b, "pad": p, "bank": 0, "vel": 1, "pass": -1} for b, p in ((0, 0), (1, 1), (2, 2), (3, 3))]
+        page.evaluate("([evs]) => { const s = window.choppad.song.session; s.store.dispatch({ type: 'pattern.load', pattern: { bars: 1, events: evs } }); s.store.dispatch({ type: 'tempo.set', bpm: 150 }); }", [evs])
+        offline = page.evaluate(f"""async () => {{ const s = {S}; return Array.from(await s.renderPatternWav()); }}""")
+        r = page.evaluate(f"{S}.resample({{ bars: 1, source: 'master', pad: 12 }})")   # 1.6 s, in real time
+        self.assertTrue(r["ok"], r)
+        self.assertAlmostEqual(r["duration"], 1.6, delta=0.002)
+        cmp = page.evaluate("""async ([off]) => {
+            const s = window.choppad.song.session, T = window.__t;
+            const o = await T.decode(off), live = s.engine.getPadBuffer(0, 12);
+            const a = o.getChannelData(0), b = live.getChannelData(0), sr = live.sampleRate;
+            const n = Math.round(1.0 * sr);
+            // where the offline render appears in the live capture
+            const q = T.lagOf(b, a.slice(0, n), 0, Math.round(0.06 * sr), n);
+            let peak = 0; for (let i = 0; i < b.length; i++) peak = Math.max(peak, Math.abs(b[i]));
+            return { lagMs: q.lag / sr * 1000, corr: q.corr, peak, dur: live.duration };
+        }""", [offline])
+        self.assertGreater(cmp["peak"], 0.05, "something was recorded")
+        self.assertGreater(cmp["corr"], 0.8, cmp)
+        self.assertLess(abs(cmp["lagMs"]), 40, cmp)
+        self.assertFalse(page.evaluate(f"{S}.seq.state.playing"), "the pattern the capture started is stopped again")
+        self.assertTrue(page.evaluate(f"{S}.seq.state.metronome"))
+        self.assertEqual(errors, [], str(errors))
 
 
 if __name__ == "__main__":

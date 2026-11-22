@@ -17,10 +17,25 @@ export const DEFAULT_SETTINGS = Object.freeze({
   mode: "oneshot", choke: true, fullLevel: true,
   quant: "1/16", swing: 0, metronome: true,
   repeat: false, repeatRate: 0.25, follow: true,
+  sixteen: null,   // W3b: 16 levels, {pad, mode: "velocity" | "pitch" | "filter"} or null. A view setting, never saved.
 });
+/** W3b 16 levels: what pressed pad `i` (0..15) plays of the source pad, by mode. velocity = (i + 1) / 16, pitch = -7 .. +8
+ *  semitones around the pad's own, cutoff = 150 Hz .. 16 kHz in 16 equal ratios. Pure. */
+export const SIXTEEN_MODES = Object.freeze(["velocity", "pitch", "filter"]);
+export function sixteenLevel(mode, i) {
+  if (!Number.isInteger(i) || i < 0 || i > 15) return null;
+  if (mode === "velocity") return { vel: (i + 1) / 16 };
+  if (mode === "pitch") return { pitch: i - 7 };
+  if (mode === "filter") return { cutoff: Math.round(150 * Math.pow(16000 / 150, i / 15)) };
+  return null;
+}
 export const PADS = 16;
 export const DEFAULT_TEMPO = Object.freeze({ bpm: null, follow: true });
 export const TEMPO_MIN = 20, TEMPO_MAX = 400;
+/** Files of a song a pad can play instead of its audio (contracts §13): a resample url, or a stem by name. */
+export const STEMS = Object.freeze(["drums", "bass", "vocals", "other"]);
+export const RESAMPLE_URL = /^\/media\/[A-Za-z0-9_-]{1,64}\/resample\/[0-9a-f]{16}\.wav$/;
+export const stemUrl = (song, stem) => `/media/${song}/stems/${stem}.wav`;
 
 const PAD_KEYS = Object.keys(DEFAULT_PAD);
 const FX_KEYS = Object.keys(DEFAULT_FX);
@@ -149,6 +164,7 @@ export function reduce(state, action) {
       }
       const ratio = Number(a.stretch.ratio);
       if (!(ratio > 0) || typeof a.stretch.url !== "string" || !a.stretch.url) return state;
+      if (cur?.src) return state;   // a resample is already at the project tempo and has no slice of the song to stretch
       let base = cur;
       if (!base) {
         const ch = state.chops?.chops?.[state.chops?.banks?.[a.bank]?.[a.pad]];
@@ -156,6 +172,41 @@ export function reduce(state, action) {
         base = { start: ch.start, end: ch.end };
       }
       return withProject(state, { overrides: { ...state.project.overrides, [key]: { ...base, stretch: cleanStretch(a.stretch) } } });
+    }
+
+    case "slice.src": {   // W3b: put a rendered file of the song (a resample) on a pad; src null removes it again
+      const bank = a.bank;
+      if (!isPad(a.pad) || !Number.isInteger(bank) || bank < 0) return state;
+      const key = `${bank}:${a.pad}`;
+      const cur = state.project.overrides[key];
+      if (a.src === null) {
+        if (!cur?.src) return state;
+        const { [key]: _gone, ...overrides } = state.project.overrides;
+        return withProject(state, { overrides });
+      }
+      if (typeof a.src !== "string" || !RESAMPLE_URL.test(a.src) || !isNum(a.start) || !isNum(a.end) || !(a.start >= 0) || !(a.end > a.start)) return state;
+      return withProject(state, { overrides: { ...state.project.overrides, [key]: { start: a.start, end: a.end, src: a.src } } });
+    }
+    case "slice.stem": {   // W3b: the pad plays its slice from a stem of the song (drums, bass, vocals, other); null = the full mix again
+      const bank = a.bank;
+      if (!isPad(a.pad) || !Number.isInteger(bank) || bank < 0) return state;
+      const key = `${bank}:${a.pad}`;
+      const cur = state.project.overrides[key];
+      if (a.stem === null) {
+        if (!cur?.stem) return state;
+        const { stem: _s, stretch: _t, ...rest } = cur;   // a stretch was rendered from the stem: it goes with it
+        return withProject(state, { overrides: { ...state.project.overrides, [key]: rest } });
+      }
+      if (!STEMS.includes(a.stem) || cur?.src) return state;
+      if (cur?.stem === a.stem) return state;
+      let base = cur;
+      if (!base) {
+        const ch = state.chops?.chops?.[state.chops?.banks?.[bank]?.[a.pad]];
+        if (!ch) return state;
+        base = { start: ch.start, end: ch.end };
+      }
+      const { stretch: _x, ...rest } = base;
+      return withProject(state, { overrides: { ...state.project.overrides, [key]: { ...rest, stem: a.stem } } });
     }
 
     case "kit.load": {   // W3: put a kit's pads (kit.json `pads`, 16 entries or null) on a bank; null = leave the pad alone
@@ -168,6 +219,8 @@ export function reduce(state, action) {
         const o = { start: k.start, end: k.end };
         if (k.song_id !== a.song) o.song = k.song_id;   // `song` = the open song's id: its own slices need no source
         if (k.stretch && k.stretch.url && Number(k.stretch.ratio) > 0) o.stretch = cleanStretch(k.stretch);
+        if (typeof k.src === "string" && RESAMPLE_URL.test(k.src)) o.src = k.src;
+        else if (STEMS.includes(k.stem)) o.stem = k.stem;
         overrides[`${bank}:${pad}`] = o;
         const params = cleanPad(k.params, pads[pad]);
         if (Object.keys(params).length) pads = pads.map((P, i) => (i === pad ? { ...P, ...params } : P));
@@ -197,7 +250,9 @@ export function reduce(state, action) {
       const events = i >= 0
         ? pattern.events.filter((_, k) => k !== i)
         // pass -1: drawn by hand, not recorded, so "undo last take" leaves it alone
-        : [...pattern.events, { beat: a.step / 4, pad: a.pad, bank: a.bank ?? state.bank, vel: a.vel ?? 1, pass: -1 }];
+        : [...pattern.events, { beat: a.step / 4, pad: a.pad, bank: a.bank ?? state.bank, vel: a.vel ?? 1, pass: -1,
+          // W3b: a hit can carry its own pitch offset (semitones) and cutoff (Hz), as recorded in 16 levels
+          ...(isNum(a.pitch) ? { pitch: a.pitch } : {}), ...(isNum(a.cutoff) ? { cutoff: a.cutoff } : {}) }];
       return withProject(state, { pattern: { ...pattern, events } });
     }
     case "pattern.addEvent": {
@@ -239,6 +294,11 @@ export function reduce(state, action) {
 
     case "settings.set": {
       const params = pick(a.params, SETTING_KEYS);
+      if ("sixteen" in params) {   // null, or a source pad and a mode; anything else is ignored
+        const v = params.sixteen;
+        if (v === null) { /* off */ } else if (v && typeof v === "object" && isPad(v.pad) && SIXTEEN_MODES.includes(v.mode)) params.sixteen = { pad: v.pad, mode: v.mode };
+        else delete params.sixteen;
+      }
       if (same(state.settings, params)) return state;
       return { ...state, settings: { ...state.settings, ...params } };
     }

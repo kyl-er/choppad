@@ -11,22 +11,26 @@ unknown, invalid or changes nothing. contracts/fixtures/actions.json holds the c
 """
 import copy
 import math
+import re
 
 PADS = 16
 DEFAULT_TEMPO = {"bpm": None, "follow": True}
 TEMPO_MIN, TEMPO_MAX = 20, 400
+STEMS = ("drums", "bass", "vocals", "other")
+RESAMPLE_URL = re.compile(r"^/media/[A-Za-z0-9_-]{1,64}/resample/[0-9a-f]{16}\.wav$")
 FILTER_TYPES = ("off", "lp", "hp", "bp")
 DEFAULT_FILTER = {"type": "off", "cutoff": 8000, "q": 0.7}
 DEFAULT_PAD = {"gainDb": 0, "pitch": 0, "attack": 0.0025, "decay": 0, "sustain": 1, "release": 0.003, "reverse": False,
                "mode": None, "filter": DEFAULT_FILTER, "muteGroup": 0}
 DEFAULT_FX = {"tone": 0, "low": 0, "mid": 0, "high": 0, "filter": 0, "reverb": 0, "size": 0.5}
-DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant": "1/16", "swing": 0,
+SIXTEEN_MODES = ("velocity", "pitch", "filter")
+DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant": "1/16", "swing": 0, "sixteen": None,
                     "metronome": True, "repeat": False, "repeatRate": 0.25, "follow": True}
 
 # Actions that change the saved project. The rest only change what the player looks at (not written to project.json).
 PROJECT_ACTIONS = frozenset({
     "pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set",
-    "tempo.set",
+    "tempo.set", "slice.src", "slice.stem",
     "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load"})
 VIEW_ACTIONS = frozenset({"pad.select", "bank.set", "chops.replace", "sections.set", "settings.set"})
 ACTION_TYPES = PROJECT_ACTIONS | VIEW_ACTIONS
@@ -251,6 +255,8 @@ def reduce(state, action):
         ratio, url = (st.get("ratio"), st.get("url")) if isinstance(st, dict) else (None, None)
         if not (_is_num(ratio) and ratio > 0) or not isinstance(url, str) or not url:
             return state
+        if cur and cur.get("src"):  # a resample is already at the project tempo and has no slice of the song to stretch
+            return state
         base = cur
         if not base:
             chops = state.get("chops") or {}
@@ -260,6 +266,43 @@ def reduce(state, action):
                 return state
             base = {"start": ch["start"], "end": ch["end"]}
         return _with_project(state, overrides={**proj["overrides"], key: {**base, "stretch": _clean_stretch(st)}})
+    if t == "slice.src":  # W3b: put a rendered file of the song (a resample) on a pad; src null removes it again
+        pad, bank = _pad(a.get("pad")), _bank_key(a.get("bank"))
+        if pad is None or bank is None or bank < 0:
+            return state
+        key = f"{bank}:{pad}"
+        cur = proj["overrides"].get(key)
+        src = a.get("src")
+        if "src" in a and src is None:
+            if not cur or not cur.get("src"):
+                return state
+            return _with_project(state, overrides={k: v for k, v in proj["overrides"].items() if k != key})
+        s_, e_ = a.get("start"), a.get("end")
+        if not isinstance(src, str) or not RESAMPLE_URL.match(src) or not (_is_num(s_) and _is_num(e_) and s_ >= 0 and e_ > s_):
+            return state
+        return _with_project(state, overrides={**proj["overrides"], key: {"start": s_, "end": e_, "src": src}})
+    if t == "slice.stem":  # W3b: the pad plays its slice from a stem of the song; null = the full mix again
+        pad, bank = _pad(a.get("pad")), _bank_key(a.get("bank"))
+        if pad is None or bank is None or bank < 0:
+            return state
+        key = f"{bank}:{pad}"
+        cur = proj["overrides"].get(key)
+        stem = a.get("stem")
+        if "stem" in a and stem is None:
+            if not cur or not cur.get("stem"):
+                return state
+            return _with_project(state, overrides={**proj["overrides"], key: {k: v for k, v in cur.items() if k not in ("stem", "stretch")}})
+        if stem not in STEMS or (cur and cur.get("src")) or (cur and cur.get("stem") == stem):
+            return state
+        base = cur
+        if not base:
+            chops = state.get("chops") or {}
+            try:
+                ch = chops["chops"][chops["banks"][bank][pad]]
+            except (KeyError, IndexError, TypeError):
+                return state
+            base = {"start": ch["start"], "end": ch["end"]}
+        return _with_project(state, overrides={**proj["overrides"], key: {**{k: v for k, v in base.items() if k != "stretch"}, "stem": stem}})
     if t == "kit.load":  # put a kit's pads (16 entries or null) on a bank; null = leave the pad alone
         bank = a.get("bank")
         if not (isinstance(bank, int) and not isinstance(bank, bool) and bank >= 0) or not isinstance(a.get("pads"), list):
@@ -278,6 +321,10 @@ def reduce(state, action):
             ks = k.get("stretch")
             if isinstance(ks, dict) and ks.get("url") and _is_num(ks.get("ratio")) and ks["ratio"] > 0:
                 o["stretch"] = _clean_stretch(ks)
+            if isinstance(k.get("src"), str) and RESAMPLE_URL.match(k["src"]):
+                o["src"] = k["src"]
+            elif k.get("stem") in STEMS:
+                o["stem"] = k["stem"]
             overrides[f"{bank}:{pad}"] = o
             params = clean_pad(k.get("params"), pads[pad])
             if params:
@@ -312,7 +359,8 @@ def reduce(state, action):
             bank = a.get("bank") if a.get("bank") is not None else state["bank"]
             vel = a.get("vel") if a.get("vel") is not None else 1
             # pass -1: drawn by hand, not recorded, so "undo last take" leaves it alone
-            events = [*pattern["events"], {"beat": step / 4, "pad": pad, "bank": bank, "vel": vel, "pass": -1}]
+            extra = {k: a[k] for k in ("pitch", "cutoff") if _is_num(a.get(k))}  # W3b: a hit's own pitch offset and cutoff
+            events = [*pattern["events"], {"beat": step / 4, "pad": pad, "bank": bank, "vel": vel, "pass": -1, **extra}]
         return _with_project(state, pattern={**pattern, "events": events})
     if t == "pattern.addEvent":
         e = a.get("event")
@@ -363,6 +411,13 @@ def reduce(state, action):
         return {**state, "sections": list(a.get("sections") or [])}
     if t == "settings.set":
         params = _pick(a.get("params"), DEFAULT_SETTINGS)
+        if "sixteen" in params:  # W3b 16 levels: None, or a source pad and a mode; anything else is ignored
+            v = params["sixteen"]
+            if v is not None:
+                if isinstance(v, dict) and _pad(v.get("pad")) is not None and v.get("mode") in SIXTEEN_MODES:
+                    params["sixteen"] = {"pad": _pad(v["pad"]), "mode": v["mode"]}
+                else:
+                    del params["sixteen"]
         if _same(state["settings"], params):
             return state
         return {**state, "settings": {**state["settings"], **params}}
@@ -385,10 +440,11 @@ def diff_project(old, new):
     for k, v in new["overrides"].items():
         if old["overrides"].get(k) != v:
             bank, pad = (int(x) for x in k.split(":"))
-            if "song" in v or "stretch" in v:  # a slice with a source or a stretch travels as a one-pad kit.load
+            if "song" in v or "stretch" in v or "src" in v or "stem" in v:  # a slice with a source or a stretch travels as a one-pad kit.load
                 kit = [None] * PADS
                 kit[pad] = {"song_id": v.get("song", ""), "start": v["start"], "end": v["end"],
-                            **({"stretch": v["stretch"]} if "stretch" in v else {})}
+                            **({"stretch": v["stretch"]} if "stretch" in v else {}),
+                            **({"src": v["src"]} if "src" in v else {}), **({"stem": v["stem"]} if "stem" in v else {})}
                 out.append({"type": "kit.load", "bank": bank, "song": "", "pads": kit})
             else:
                 by_bank.setdefault(bank, []).append({"pad": pad, "start": v["start"], "end": v["end"]})

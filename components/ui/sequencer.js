@@ -68,11 +68,12 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
   return {
     state: s,
     loopBeats,
-    start() {
+    /** Start the loop; `at` = the context time of its first beat (default: right away, 50 ms ahead). */
+    start(at) {
       if (s.playing) return;
       s.playing = true;
       s.pattern.bars = s.bars;
-      startTime = ctx.currentTime + 0.05;
+      startTime = at ?? ctx.currentTime + 0.05;
       scheduledUntil = 0;
       tick();
       timer = setTimer(tick, interval);
@@ -95,13 +96,15 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
       const abs = Math.max(0, absBeatAt(ctx.currentTime));
       return abs % loopBeats();
     },
-    /** Record a live hit (call when a pad is played while recording). */
-    record(pad, bank, vel = 1) {
+    /** Record a live hit (call when a pad is played while recording). `extra` = {pitch?, cutoff?} (16 levels). */
+    record(pad, bank, vel = 1, extra = null) {
       if (!s.recording || !s.playing) return null;
       const L = loopBeats();
       const raw = ((absBeatAt(ctx.currentTime) % L) + L) % L;
       const beat = quantize(raw, QUANT[s.quant], L);
       const ev = { beat, pad, bank, vel, pass };
+      if (Number.isFinite(extra?.pitch)) ev.pitch = extra.pitch;
+      if (Number.isFinite(extra?.cutoff)) ev.cutoff = extra.cutoff;
       s.pattern.events.push(ev);
       // A quantized hit that lands just ahead of "now" would also be played by the scheduler: the live hit already sounded.
       return ev;

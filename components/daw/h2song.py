@@ -156,7 +156,7 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
         _txt(n, "leadlag", 0.0)
         _txt(n, "velocity", max(0.0, min(1.0, float(e.get("vel", 1.0)))))
         _txt(n, "pan", 0.0)
-        _txt(n, "pitch", 0.0)
+        _txt(n, "pitch", float(e["pitch"]) if isinstance(e.get("pitch"), (int, float)) and not isinstance(e.get("pitch"), bool) else 0.0)  # W3b: 16 levels
         _txt(n, "probability", 1.0)
         _txt(n, "key", "C0")
         _txt(n, "length", -1)

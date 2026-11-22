@@ -244,7 +244,7 @@ def make_server(media_root: str, port: int = 8960):
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
 VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
-         "tempo")
+         "tempo", "resample")
 
 
 def build_verb_parser():
@@ -300,6 +300,8 @@ def build_verb_parser():
     s.add_argument("--bars", type=float, help="loop length in bars")
     s.add_argument("--bank", type=int, help="bank the hits play (default: the bank on screen)")
     s.add_argument("--vel", type=float, default=1.0, help="velocity 0..1 (default 1)")
+    s.add_argument("--pitch", type=float, help="semitones added to the pad's pitch for these hits (like 16 levels pitch)")
+    s.add_argument("--cutoff", type=float, help="filter cutoff in Hz for these hits (like 16 levels filter; turns a low-pass on)")
     s = add("fx", "master effects: a preset and/or single knobs")
     s.add_argument("id")
     s.add_argument("--preset", choices=list(cc.PRESETS))
@@ -326,6 +328,15 @@ def build_verb_parser():
     s.add_argument("--follow", action=argparse.BooleanOptionalAction, default=None,
                    help="pads fitted earlier are re-fitted when the tempo changes (default on)")
     s.add_argument("--fit", choices=["pattern", "bank"], help="stretch the pads of the pattern, or of the bank on screen, to the tempo now")
+    s = add("resample", "render the pattern (or record the master bus) into a new sound on a pad; the open browser does the work")
+    s.add_argument("id")
+    s.add_argument("--pad", type=int, required=True, help="pad (0-15) that gets the new sound")
+    s.add_argument("--bars", type=float, help="length in bars at the project tempo")
+    s.add_argument("--seconds", type=float, help="length in seconds (instead of --bars)")
+    s.add_argument("--source", choices=["pattern", "master"], default="pattern",
+                   help="pattern = offline render of the step pattern (default); master = live recording of the master bus")
+    s.add_argument("--bank", type=int, help="bank of the pad (default: the bank on screen)")
+    s.add_argument("--wait", type=float, default=120, help="seconds to wait for the browser (default 120)")
     # --- W2 DAW bridge (components/daw) ---
     s = add("daw", "DAW bridge: open a song in Hydrogen or Ardour, re-sync it after edits, drive its transport")
     s.add_argument("op", choices=["open", "sync", "play", "stop"])
@@ -447,7 +458,7 @@ def run_verb(argv, client=None, out=None, err=None):
             elif a.op == "clear":
                 reply(c.pattern_clear(a.id))
             else:
-                reply(c.pattern_set(a.id, a.steps, a.bars, a.bank, a.vel, add=a.op == "add"))
+                reply(c.pattern_set(a.id, a.steps, a.bars, a.bank, a.vel, add=a.op == "add", pitch=a.pitch, cutoff=a.cutoff))
         elif a.verb == "fx":
             reply(c.fx(a.id, a.preset, **{k: getattr(a, k) for k in cc.FX_KEYS}))
         elif a.verb == "play":
@@ -462,6 +473,8 @@ def run_verb(argv, client=None, out=None, err=None):
                 err("note: no browser has this song open, so nothing is playing")
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
+        elif a.verb == "resample":
+            j(c.resample(a.id, a.pad, a.bars, a.seconds, a.source, a.bank, a.wait))
         elif a.verb == "tempo":
             j(c.tempo(a.id, a.bpm, a.song, a.follow, a.fit))
         elif a.verb == "daw":

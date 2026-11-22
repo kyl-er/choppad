@@ -137,6 +137,34 @@ class TempoVerbs(Rig):
         self.assertIn("tempo", {t["name"] for t in choppad_mcp.McpServer(self.c).tools_list()})
 
 
+class Resample(Rig):
+    URL = "/media/song1/resample/0123456789abcdef.wav"
+
+    def test_needs_a_browser_and_checks_its_arguments(self):
+        with self.assertRaisesRegex(cc.ControlError, "no browser"):
+            self.c.resample("song1", 3, bars=2)
+        for kw in ({"pad": 3}, {"pad": 3, "bars": 1, "seconds": 2}, {"pad": 16, "bars": 1}, {"pad": 3, "bars": 1, "source": "tape"}):
+            with self.subTest(kw), self.assertRaises(cc.ControlError):
+                self.c.resample("song1", **kw)
+
+    def test_waits_until_the_pad_plays_the_new_file(self):
+        sent = []
+
+        def fake_browser(sid, command, **kw):   # what the open tab does: render, upload, put it on the pad
+            sent.append((command, kw))
+            self.c.actions(sid, [{"type": "slice.src", "bank": kw["bank"], "pad": kw["pad"], "src": self.URL, "start": 0, "end": 2.0}])
+            return {"ok": True, "listeners": 1}
+        self.c.transport = fake_browser
+        r = self.c.resample("song1", 5, bars=2, bank=1)
+        self.assertEqual(sent, [("resample", {"source": "pattern", "pad": 5, "bank": 1, "bars": 2})])
+        self.assertEqual((r["src"], r["end"]), (self.URL, 2.0))
+
+    def test_cli_and_mcp_shapes(self):
+        a = choppad.build_verb_parser().parse_args(["resample", "s", "--pad", "3", "--seconds", "2.5", "--source", "master"])
+        self.assertEqual((a.pad, a.seconds, a.source, a.bars), (3, 2.5, "master", None))
+        self.assertIn("resample", {t["name"] for t in choppad_mcp.McpServer(self.c).tools_list()})
+
+
 class PadSound(Rig):
     def test_pad_filter_and_envelope_through_the_pad_verb(self):
         lines = []

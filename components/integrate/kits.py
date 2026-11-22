@@ -77,6 +77,17 @@ def normalize(doc, media_root, *, partial=None):
         params = p.get("params") or {}
         if not isinstance(params, dict):
             raise ValueError(f"pad {i + 1}: params must be an object")
+        src, stem = p.get("src"), p.get("stem")
+        if src is not None or stem is not None:   # W3b: a resample of that song, or one of its stems
+            if src is not None:
+                m = re.match(r"^/media/([A-Za-z0-9_-]{1,64})/resample/[0-9a-f]{16}\.wav$", str(src))
+                if not m or m.group(1) != sid:
+                    raise ValueError(f"pad {i + 1}: src needs a /media/{sid}/resample/<hash>.wav url")
+                out["src"] = src
+            elif stem in ("drums", "bass", "vocals", "other"):
+                out["stem"] = stem
+            else:
+                raise ValueError(f"pad {i + 1}: stem must be drums, bass, vocals or other")
         out["params"] = _clean_params({k: v for k, v in params.items() if k in PARAM_KEYS and isinstance(v, PARAM_KEYS[k])})
         st = p.get("stretch")
         if st:
@@ -176,6 +187,9 @@ def kit_from_bank(media_root, song_id, bank, name, *, overrides=None, pads=None,
                  "params": sounds[p["pad"]] if p["pad"] < len(sounds) and isinstance(sounds[p["pad"]], dict) else {}}
         if o.get("stretch"):
             entry["stretch"] = o["stretch"]
+        for k in ("src", "stem"):   # W3b
+            if o.get(k):
+                entry[k] = o[k]
         out[p["pad"]] = entry
     return {"name": name, "pads": out, "fx": (proj.get("fx") or {}) if fx is None else fx}
 

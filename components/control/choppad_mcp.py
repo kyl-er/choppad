@@ -100,9 +100,11 @@ def build_tools(client):
               "(0-based), e.g. '0:0,8 1:4,12' = kick on 1 and 3, snare on 2 and 4 in a bar of 4/4. Replaces the pattern "
               "(add=true merges). With only `bars` it just changes the loop length.",
               {"id": _ID, "steps": _S("e.g. '0:0,8 1:4,12'"), "bars": _N("loop length in bars"), "bank": _BANK,
-               "vel": _N("0..1", minimum=0, maximum=1), "add": {"type": "boolean"}}, ["id"],
+               "vel": _N("0..1", minimum=0, maximum=1), "add": {"type": "boolean"},
+               "pitch": _N("semitones added to the pad's pitch for these hits"),
+               "cutoff": _N("filter cutoff in Hz for these hits (turns a low-pass on)", minimum=20, maximum=20000)}, ["id"],
               lambda a: _watch(c.pattern_set(a["id"], a.get("steps"), a.get("bars"), a.get("bank"), a.get("vel", 1.0),
-                                             add=bool(a.get("add"))))),
+                                             add=bool(a.get("add")), pitch=a.get("pitch"), cutoff=a.get("cutoff")))),
         _tool("pattern_clear", "Empty the pattern.", {"id": _ID}, ["id"], lambda a: _watch(c.pattern_clear(a["id"]))),
         _tool("fx", "Master effects. A preset (dry, warm, room, hall, lofi, radio) and/or tone, low, mid, high, filter, "
               "reverb, size. Only the given fields change.",
@@ -115,6 +117,12 @@ def build_tools(client):
               {"id": _ID, "bpm": _N("20-400", minimum=20, maximum=400), "song": {"type": "boolean"},
                "follow": {"type": "boolean"}, "fit": _S("pattern or bank", enum=["pattern", "bank"])}, ["id"],
               lambda a: c.tempo(a["id"], a.get("bpm"), bool(a.get("song")), a.get("follow"), a.get("fit"))),
+        _tool("resample", "Make a new sound from what the pad machine plays and put it on a pad. source 'pattern' renders the step "
+              "pattern offline at the project tempo for N bars (a short pattern loops); source 'master' records the master bus live "
+              "(real time). The browser with the song open does the rendering, so one must be open.",
+              {"id": _ID, "pad": _PAD, "bars": _N("length in bars at the project tempo"), "seconds": _N("length in seconds, instead of bars"),
+               "source": _S("pattern or master", enum=["pattern", "master"]), "bank": _BANK}, ["id", "pad"],
+              lambda a: c.resample(a["id"], a["pad"], a.get("bars"), a.get("seconds"), a.get("source", "pattern"), a.get("bank"))),
         _tool("play", "Start or stop playback in the open browser: pattern, song or stop.",
               {"id": _ID, "what": _S("pattern, song or stop", enum=["pattern", "song", "stop"]), "from": _N("song start, seconds")},
               ["id", "what"], lambda a: hit_text(c.play(a["id"], a["what"], a.get("from")))),

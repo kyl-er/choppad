@@ -56,6 +56,18 @@ class ProjectTempo(unittest.TestCase):
         root, _ = h2song.build_song(title=plain.title, bpm=plain.bpm, beats_per_bar=4, wavs=plain.wavs(), pattern=plain.pattern, empty_wav="/x.wav")
         self.assertEqual({i.find("muteGroup").text for i in root.find("instrumentList")}, {"0"})
 
+    def test_h2song_writes_velocity_and_pitch_of_16_level_hits(self):
+        pattern = {"bars": 1, "events": [
+            {"beat": 0, "pad": 3, "bank": 0, "vel": 0.25, "pass": 1},
+            {"beat": 1, "pad": 3, "bank": 0, "vel": 1, "pass": 1, "pitch": -5},
+            {"beat": 2, "pad": 3, "bank": 0, "vel": 0.5, "pass": 1, "pitch": 8, "cutoff": 900}]}
+        root, info = h2song.build_song(title="t", bpm=100, beats_per_bar=4, wavs=[f"/w{i}.wav" for i in range(16)], pattern=pattern,
+                                       empty_wav="/x.wav")
+        notes = root.find("patternList")[0].find("noteList")
+        got = [(n.find("position").text, n.find("velocity").text, n.find("pitch").text, n.find("instrument").text) for n in notes]
+        self.assertEqual(got, [("0", "0.25", "0.0", "3"), ("48", "1.0", "-5.0", "3"), ("96", "0.5", "8.0", "3")])
+        self.assertEqual(info["notes"], 3)
+
     def test_h2song_carries_the_project_tempo(self):
         p = self.build(tempo={"bpm": 92.5, "follow": True})
         root, _ = h2song.build_song(title=p.title, bpm=p.bpm, beats_per_bar=p.beats_per_bar, wavs=p.wavs(), pattern=p.pattern,

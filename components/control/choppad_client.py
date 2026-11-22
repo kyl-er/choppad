@@ -141,7 +141,7 @@ class Client:
                                "--filter-type/--cutoff/--q or --reset")
         return self.actions(sid, acts)
 
-    def pattern_set(self, sid, steps=None, bars=None, bank=None, vel=1.0, add=False):
+    def pattern_set(self, sid, steps=None, bars=None, bank=None, vel=1.0, add=False, pitch=None, cutoff=None):
         """Replace the pattern with `steps` ("1:0,8 3:4,12"), or with add=True merge them in. Only `bars`: change loop length."""
         d = self.song(sid)
         cur = (d.get("project") or {}).get("pattern") or {"bars": 2, "events": []}
@@ -152,7 +152,7 @@ class Client:
             return self.actions(sid, [{"type": "pattern.setBars", "bars": bars, "beatsPerBar": bpb}])
         bank = bank if bank is not None else (d.get("view") or {}).get("bank") or 0
         use_bars = bars if bars is not None else cur.get("bars", 2)
-        events = pattern_events(parse_steps(steps, use_bars, bpb), bank, vel)
+        events = pattern_events(parse_steps(steps, use_bars, bpb), bank, vel, pitch, cutoff)
         if add:
             have = {(e["pad"], round(e["beat"] * 4)) for e in cur.get("events", [])}
             events = cur.get("events", []) + [e for e in events if (e["pad"], round(e["beat"] * 4)) not in have]
@@ -258,6 +258,32 @@ class Client:
         if fit:
             out["fit"] = self.fit_tempo(sid, fit)
         return out
+
+    # ---- W3b: resample ----
+    def resample(self, sid, pad, bars=None, seconds=None, source="pattern", bank=None, wait_s=120):
+        """Ask the browser that has the song open to resample into a new sound on `pad` (the browser renders or records, so
+        one must be open). source "pattern" = an offline render of the step pattern at the project tempo, "master" = a
+        live recording of the master bus (real time). Waits until the pad plays the new file; returns {bank, pad, src, start, end}."""
+        if source not in ("pattern", "master"):
+            raise ControlError("source must be pattern or master")
+        if (bars is None) == (seconds is None):
+            raise ControlError("give bars or seconds (one of them)")
+        if not (isinstance(pad, int) and 0 <= pad < PADS):
+            raise ControlError("pad must be 0..15")
+        bank = bank if bank is not None else self.current_bank(sid)
+        key = f"{bank}:{pad}"
+        old = (((self.song(sid).get("project") or {}).get("overrides") or {}).get(key) or {}).get("src")
+        body = {"source": source, "pad": pad, "bank": bank, **({"bars": bars} if bars is not None else {"seconds": seconds})}
+        r = self.transport(sid, "resample", **body)
+        if r.get("listeners") == 0:
+            raise ControlError("no browser has this song open; resampling is done by the browser (open the song, then retry)")
+        end = time.time() + wait_s
+        while time.time() < end:
+            o = (((self.song(sid).get("project") or {}).get("overrides") or {}).get(key) or {})
+            if o.get("src") and o["src"] != old:
+                return {"bank": bank, "pad": pad, "src": o["src"], "start": o["start"], "end": o["end"]}
+            time.sleep(0.5)
+        raise ControlError(f"the browser did not finish the resample within {wait_s}s (is audio enabled in that tab?)")
 
     def pattern_clear(self, sid):
         return self.actions(sid, [{"type": "pattern.clear"}])
@@ -413,8 +439,10 @@ def parse_steps(text, bars=None, beats_per_bar=4):
     return out
 
 
-def pattern_events(steps_by_pad, bank, vel=1.0):
-    return [{"beat": s / 4, "pad": pad, "bank": bank, "vel": vel, "pass": -1}
+def pattern_events(steps_by_pad, bank, vel=1.0, pitch=None, cutoff=None):
+    """Events for `pad:steps` groups. pitch (semitones) and cutoff (Hz) are optional per-hit offsets (W3b, as recorded in 16 levels)."""
+    extra = {**({"pitch": pitch} if pitch is not None else {}), **({"cutoff": cutoff} if cutoff is not None else {})}
+    return [{"beat": s / 4, "pad": pad, "bank": bank, "vel": vel, "pass": -1, **extra}
             for pad, steps in sorted(steps_by_pad.items()) for s in sorted(set(steps))]
 
 
