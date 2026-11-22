@@ -14,6 +14,7 @@ Routes
   POST /api/songs/<id>/actions   {actions:[...]} -> contracts §8 reducer -> project.json -> {project, applied, ...}
   GET  /api/songs/<id>/events    server-sent events: actions | chops | transport (contracts §10)
   POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
+  POST /api/songs/<id>/daw       {daw: hydrogen|ardour, command: open|sync|play|stop, bank?} -> DAW bridge (contracts §11)
 Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
 import hashlib
@@ -198,7 +199,7 @@ class Jobs:
 
 
 def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, actions=None,
-                host: str = "127.0.0.1"):
+                host: str = "127.0.0.1", on_transport=None):
     actions = actions or {}  # name -> fn(media_dir, body) -> json-able; POST /api/songs/<id>/<name>
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
@@ -365,7 +366,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     msg["bank"] = body["bank"]
             if cmd == "play-song" and isinstance(body.get("from"), (int, float)):
                 msg["from"] = body["from"]
-            return self._json({"ok": True, "listeners": hub.publish(sid, "transport", msg)})
+            listeners = hub.publish(sid, "transport", msg)
+            if on_transport:  # W2: mirror to open DAW bridges (never lets a DAW problem fail the request)
+                on_transport(sid, msg)
+            return self._json({"ok": True, "listeners": listeners})
 
         def _song_dir(self, sid):
             if not ID_RE.match(sid or ""):
@@ -524,7 +528,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 except ValueError as e:  # bad input for the action (W3: stretch, export of a mixed kit, ...)
                     return self._err(400, str(e))
                 except Exception as e:  # noqa: BLE001 - shown in the UI
-                    return self._err(502 if m.group(2) == "advise" else 500, f"{type(e).__name__}: {e}")
+                    return self._err(getattr(e, "http_status", None) or (502 if m.group(2) == "advise" else 500),
+                                     str(e) if hasattr(e, "http_status") else f"{type(e).__name__}: {e}")
             m = re.match(r"^/api/songs/([^/]+)/reanalyze$", p)
             if m and reanalyze:
                 d = self._song_dir(m.group(1))

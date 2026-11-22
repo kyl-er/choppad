@@ -168,25 +168,29 @@ session.on(type, fn) .off(type, fn) .destroy()
 - Advisor endpoint and model: `CHOPPAD_LLM_URL`, `CHOPPAD_LLM_MODEL`, `CHOPPAD_LLM_KEY` (fallback `OPENROUTER_API_KEY`); `advise(model=None)` reads them.
 - The server keeps binding to `127.0.0.1` only.
 
-## 11. DAW bridge (W2) — `components/daw/`
+## 11. DAW bridge (W2, built for Hydrogen; Ardour partial) — `components/daw/`
+Proof and measurements: `docs/daw-bridge-spikes.md`.
 ```python
-class Bridge(Protocol):                       # one per DAW: HydrogenBridge, ArdourBridge
+class Bridge(Protocol):                       # HydrogenBridge, ArdourBridge
     name: str
-    def available(self) -> bool               # binary present
-    def launch(self, project: DawProject) -> None      # start or attach, load kit/session
-    def push(self, project: DawProject) -> None        # send the current kit + pattern + tempo again
-    def transport(self, command: Literal["play", "stop"], *, bpm: float | None = None) -> None
+    def available(self) -> bool
+    def launch(self, project: DawProject) -> dict      # start or attach, load kit/session
+    def push(self, project: DawProject) -> dict        # send the current kit + pattern + tempo again
+    def transport(self, command: Literal["play", "stop"], *, bpm: float | None = None) -> None   # may raise NotImplementedError with the manual steps
     def close(self) -> None
 
 @dataclass
-class DawProject: song_id: str; title: str; bpm: float; beats_per_bar: int; bank: int
-                  chops: list[Chop]           # 16 slots, None = empty: path to a rendered WAV, pad, midi_note (36 + pad)
-                  pattern: dict               # §8 pattern
+class DawProject: song_id; title; bpm; beats_per_bar; bank; chops: list[Chop | None]   # Chop(pad, path, midi_note = 36 + pad)
+                  pattern                     # §8 pattern
+                  kit_name=None; kit_dir=None; key=None
 ```
-- `components/daw/midi_port.py`: `open_port(name="ChopPad") -> Port` with `note_on(note, vel)`, `note_off(note)`, `clock(bpm)` (24 pulses per quarter note, absolute-deadline scheduling), `start()`, `stop()`, `close()`.
-- Server: `POST /api/songs/<id>/daw` body `{ daw: "hydrogen"|"ardour", command: "open"|"sync"|"play"|"stop" }`. CLI: `choppad station [--daw hydrogen|ardour] [song]`.
-- A bridge never edits the user's own DAW config in place: Hydrogen runs with a copied config (`--config`) and its own OSC port.
-- Mechanism per DAW: PRD §6 and `docs/daw-bridge-research.md`. The five spikes listed there come first.
+- `midi_port.py`: `open_port(name="ChopPad")` (ALSA sequencer through ctypes, no dependency) with `note_on`, `note_off`, `clock(bpm | None)` (24 pulses per quarter, absolute deadlines plus a short spin: max error 0.5–1.8 ms), `start(bpm)`, `stop()`, `close()`.
+- `h2song.py`: writes a Hydrogen song from the §8 pattern; 48 ticks per quarter note, 192 per 4/4 bar.
+- **Hydrogen** (proven): the bridge runs its own instance with a copied config and its own OSC port (`QT_QPA_PLATFORM=offscreen` when `CHOPPAD_DAW_HEADLESS=1`), loads the kit and song (`/Hydrogen/OPEN_SONG`), and leads tempo and transport over OSC (`/Hydrogen/BPM`, `/PLAY`, `/STOP`). `/Hydrogen/NOTE_ON` = note 36 + instrument position, velocity 0–1. Hydrogen follows MIDI Start/Stop but not MIDI clock. `h2cli -s song -o out.wav` is the offline renderer. Every `hydrogen`/`h2cli` call MUST pass `--config <copy>`: without it Hydrogen rewrites the owner's `hydrogen.conf`.
+- **Ardour** (partial): the session is written directly (sources and regions at superclock positions) and renders correctly with `ardour9-export`; Ardour has no headless audio import. Transport and clock follow are NOT wired: OSC and the MCP surface can only be enabled in Ardour's Preferences. Headless Ardour tools MUST run with a private `XDG_CONFIG_HOME`.
+- Server: `POST /api/songs/<id>/daw {daw: "hydrogen"|"ardour", command: "open"|"sync"|"play"|"stop", bank?}` → `{ok, daw, command, song, detail, midi, bpm, bank, kit}`; `ok: false` with `not_implemented` where Ardour cannot do it. Status: 400 bad input, 409 not open, 501 not installed, 502 bridge failure. Agent-driven `transport` commands are mirrored to an open bridge; pad hits and play/stop made in the browser are not yet.
+- CLI: `choppad daw open|sync|play|stop`, `choppad station [--daw hydrogen|ardour] [song-id]`. MCP: `daw_open`, `daw_sync`, `daw_transport`.
+- Limits: one kit holds one bank (hits on other banks are dropped); per-pad gain, pitch, envelope and swing are not carried into the kit or song; the bridge builds its kit with its own slice logic and does not yet use §13 stretch renderings or other-song pads; Hydrogen's OSC server listens on all interfaces while the bridge runs.
 
 ## 12. Stems (W3) — `components/stems/`
 ```python

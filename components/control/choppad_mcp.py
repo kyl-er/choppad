@@ -106,6 +106,19 @@ def build_tools(client):
         _tool("hit", "Play one pad once in the open browser.",
               {"id": _ID, "pad": _PAD, "velocity": _N("0..1", minimum=0, maximum=1), "bank": _BANK}, ["id", "pad"],
               lambda a: hit_text(c.hit(a["id"], a["pad"], a.get("velocity", 1.0), a.get("bank")))),
+        _tool("daw_open", "Open a song in a DAW wired to ChopPad: hydrogen (kit + pattern + tempo, its own instance, no window "
+              "focus stolen if headless) or ardour (a session with the chops as audio regions). Also opens the virtual MIDI "
+              "port 'ChopPad'. Returns what was started.",
+              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]), "bank": _BANK}, ["id", "daw"],
+              lambda a: c.daw(a["id"], a["daw"], "open", a.get("bank"))),
+        _tool("daw_sync", "Push the song's current kit, pattern and tempo to the open DAW again after edits.",
+              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]), "bank": _BANK}, ["id", "daw"],
+              lambda a: c.daw(a["id"], a["daw"], "sync", a.get("bank"))),
+        _tool("daw_transport", "Start or stop the DAW transport (and MIDI start/clock/stop on the ChopPad MIDI port). "
+              "Ardour reports 'not implemented' for its own transport until its control surface is enabled by hand.",
+              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]),
+               "command": _S("play or stop", enum=["play", "stop"])}, ["id", "daw", "command"],
+              lambda a: c.daw(a["id"], a["daw"], a["command"])),
         _tool("export", "Export one bank as a Hydrogen drum kit or an SFZ file; returns where it was written.",
               {"id": _ID, "kind": _S("hydrogen or sfz", enum=["hydrogen", "sfz"]), "bank": _BANK}, ["id", "kind"],
               lambda a: c.export(a["id"], a["kind"], a.get("bank", 0))),
