@@ -3,7 +3,7 @@ title: choppad
 type: project
 status: production          # idea | active | production | paused | archived  (lifecycle is a field, never a move)
 goal: "Browser MPC sampler for YouTube songs, growing into an AI-controllable, DAW-connected workstation (v4: ChopPad Station)"
-next: "PRD v4 (docs/PRD-v4.md) awaiting neo sign-off; then spawn one builder per workstream in git worktrees"
+next: "Phase B running: W1 agent control, W3 sampler core, W4 design directions in worktrees; W2 DAW bridge next; stop for neo at the W4 design pick"
 kaneo: CHOP
 runs-as: "web :8960 (choppad --serve); launcher 04-Apps/media-tools/choppad"          # cli | daemon :port | web :port | mcp | none
 repo: ""
