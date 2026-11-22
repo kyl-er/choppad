@@ -117,6 +117,15 @@ def build_tools(client):
               {"id": _ID, "bpm": _N("20-400", minimum=20, maximum=400), "song": {"type": "boolean"},
                "follow": {"type": "boolean"}, "fit": _S("pattern or bank", enum=["pattern", "bank"])}, ["id"],
               lambda a: c.tempo(a["id"], a.get("bpm"), bool(a.get("song")), a.get("follow"), a.get("fit"))),
+        _tool("song", "Song mode: several step patterns and a chain that plays them (the arrangement). op 'show' reads it; 'add' makes a new "
+              "pattern (name, bars, copy=true starts from the edited one) and selects it for editing; 'select', 'rename', 'remove' work on "
+              "a pattern id; 'chain' sets the order as 'p1:2 p2:1' (pattern:repeats); 'mode' is 'pattern' (loop the edited pattern) or "
+              "'song' (play the chain). Use pattern_set after 'select' to fill a pattern.",
+              {"id": _ID, "op": _S("show, add, select, rename, remove, chain or mode", enum=["show", "add", "select", "rename", "remove", "chain", "mode"]),
+               "pattern": _S("pattern id like p1 (select, rename, remove)"), "name": _S("name (add, rename)"), "bars": _N("add: length in bars"),
+               "copy": {"type": "boolean"}, "chain": _S("e.g. 'p1:2 p2:1 p1'"), "mode": _S("pattern or song", enum=["pattern", "song"])}, ["id", "op"],
+              lambda a: c.song_show(a["id"]) if a["op"] == "show" else _watch(c.song_edit(
+                  a["id"], a["op"], a.get("pattern"), a.get("name"), a.get("bars"), bool(a.get("copy")), a.get("chain"), a.get("mode")))),
         _tool("resample", "Make a new sound from what the pad machine plays and put it on a pad. source 'pattern' renders the step "
               "pattern offline at the project tempo for N bars (a short pattern loops); source 'master' records the master bus live "
               "(real time). The browser with the song open does the rendering, so one must be open.",

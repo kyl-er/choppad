@@ -17,15 +17,18 @@ export function swungBeat(beat, q, swing) {
 }
 
 /**
- * createSequencer({ ctx, play(pad, vel, when, bank), click(when, accent), schedule? })
- *  state: bpm, beatsPerBar, bars, quant, swing, metronome, recording, playing, pattern
- *  start() stop() toggleRecord() record(pad, bank, vel) undo() clear() position() tick() load(pattern)
+ * createSequencer({ ctx, play(pad, vel, when, bank, event), click(when, accent), schedule? })
+ *  state: bpm, beatsPerBar, bars, quant, swing, metronome, recording, playing, pattern, song
+ *  start(at?) stop() toggleRecord() record(pad, bank, vel, extra?) undo() clear() position() tick() load(pattern)
+ *  setBpm(bpm) setSong(timeline | null) locate()
+ * `song` (W3b song mode) is a timeline { total, segments: [{start, len, id, events}] } in beats (actions.js songTimeline): when set,
+ * the loop is the whole chain and each pattern starts exactly on its bar (the schedule is one beat clock, so there is no gap).
  */
 export function createSequencer({ ctx, play, click, lookahead = 0.12, interval = 25,
   setTimer = (fn, ms) => setInterval(fn, ms), clearTimer = (h) => clearInterval(h) }) {
   const s = {
     bpm: 120, beatsPerBar: 4, bars: 2, quant: "1/16", swing: 0, metronome: true,
-    recording: false, playing: false, pattern: { bars: 2, events: [] },
+    recording: false, playing: false, pattern: { bars: 2, events: [] }, song: null,
   };
   let startTime = 0;      // ctx time of loop beat 0 (first pass)
   let scheduledUntil = 0; // absolute beats (since start) already scheduled
@@ -33,7 +36,8 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
   let pass = 0;
 
   const spb = () => 60 / s.bpm;
-  const loopBeats = () => s.bars * s.beatsPerBar;
+  const loopBeats = () => (s.song ? s.song.total : s.bars * s.beatsPerBar);
+  const segments = () => (s.song ? s.song.segments : [{ start: 0, len: s.bars * s.beatsPerBar, id: null, events: s.pattern.events }]);
   const absBeatAt = (t) => (t - startTime) / spb();
 
   function scheduleRange(fromAbs, toAbs) {
@@ -49,9 +53,11 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
     const firstLoop = Math.floor(fromAbs / L);
     const lastLoop = Math.floor(toAbs / L);
     for (let loop = firstLoop; loop <= lastLoop; loop++) {
-      for (const e of s.pattern.events) {
-        const abs = loop * L + swungBeat(e.beat, q, s.swing);
-        if (abs >= fromAbs && abs < toAbs) play(e.pad, e.vel, startTime + abs * spb(), e.bank, e);
+      for (const seg of segments()) {
+        for (const e of seg.events) {
+          const abs = loop * L + seg.start + swungBeat(e.beat, q, s.swing);
+          if (abs >= fromAbs && abs < toAbs) play(e.pad, e.vel, startTime + abs * spb(), e.bank, e);
+        }
       }
     }
   }
@@ -98,7 +104,7 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
     },
     /** Record a live hit (call when a pad is played while recording). `extra` = {pitch?, cutoff?} (16 levels). */
     record(pad, bank, vel = 1, extra = null) {
-      if (!s.recording || !s.playing) return null;
+      if (!s.recording || !s.playing || s.song) return null;   // (recording happens in pattern mode, not while a chain plays)
       const L = loopBeats();
       const raw = ((absBeatAt(ctx.currentTime) % L) + L) % L;
       const beat = quantize(raw, QUANT[s.quant], L);
@@ -120,6 +126,19 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
       pass = Math.max(0, ...s.pattern.events.map((e) => e.pass ?? 0));
     },
     tick,
+    /** Play a chain (a timeline from songTimeline) instead of the one pattern; null goes back to the pattern. While playing,
+     *  the position in beats is kept, so a pattern edit or a chain edit continues from where the clock is. */
+    setSong(timeline) {
+      s.song = timeline && timeline.chain ? timeline : null;
+    },
+    /** Where the loop is now: { beat (from the loop start), index (segment), id (pattern id or null), inPattern (beats) }. */
+    locate() {
+      const beat = this.position();
+      const segs = segments();
+      let i = segs.findIndex((g) => beat >= g.start && beat < g.start + g.len);
+      if (i < 0) i = 0;
+      return { beat, index: i, id: segs[i].id, inPattern: beat - segs[i].start };
+    },
     /** Change the tempo, also while playing: the loop keeps its place (beats are what is scheduled). */
     setBpm(bpm) {
       if (!(bpm > 0) || bpm === s.bpm) return;

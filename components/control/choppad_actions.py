@@ -17,6 +17,9 @@ PADS = 16
 DEFAULT_TEMPO = {"bpm": None, "follow": True}
 TEMPO_MIN, TEMPO_MAX = 20, 400
 STEMS = ("drums", "bass", "vocals", "other")
+DEFAULT_SONG = {"patterns": [], "chain": [], "mode": "pattern", "current": None}
+MAX_PATTERNS, MAX_CHAIN, MAX_REPEATS = 64, 256, 64
+_PATTERN_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 RESAMPLE_URL = re.compile(r"^/media/[A-Za-z0-9_-]{1,64}/resample/[0-9a-f]{16}\.wav$")
 FILTER_TYPES = ("off", "lp", "hp", "bp")
 DEFAULT_FILTER = {"type": "off", "cutoff": 8000, "q": 0.7}
@@ -31,6 +34,7 @@ DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant"
 PROJECT_ACTIONS = frozenset({
     "pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set",
     "tempo.set", "slice.src", "slice.stem",
+    "song.addPattern", "song.selectPattern", "song.renamePattern", "song.removePattern", "song.setChain", "song.setMode", "song.load",
     "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load"})
 VIEW_ACTIONS = frozenset({"pad.select", "bank.set", "chops.replace", "sections.set", "settings.set"})
 ACTION_TYPES = PROJECT_ACTIONS | VIEW_ACTIONS
@@ -150,21 +154,121 @@ def _step_of(event):
 step_of = _step_of
 
 
+# ---- W3b song mode: project.song = {patterns: [{id, name, bars, events}], chain: [{pattern, repeats}], mode, current} ----
+# `project.pattern` stays the pattern being edited; `current` names the entry of `patterns` it belongs to (None = none yet, an
+# old project). Every pattern.* action is mirrored into that entry. The key is absent until used.
+def _next_pattern_id(patterns):
+    n = max([0] + [int(m.group(1)) for p in patterns for m in [re.match(r"^p(\d+)$", p["id"])] if m])
+    return f"p{n + 1}"
+
+
+def _clean_name(n, fallback):
+    return n.strip() if isinstance(n, str) and n.strip() and len(n.strip()) <= 40 else fallback
+
+
+def _clean_events(events):
+    return [dict(e) for e in (events if isinstance(events, list) else [])
+            if isinstance(e, dict) and _pad(e.get("pad")) is not None and _is_num(e.get("beat"))]
+
+
+def _clean_chain(chain, patterns):
+    out = []
+    if not isinstance(chain, list):
+        return out
+    for c in chain[:MAX_CHAIN]:
+        if not isinstance(c, dict) or not isinstance(c.get("pattern"), str) or not any(p["id"] == c["pattern"] for p in patterns):
+            continue
+        if "repeats" in c and not _is_num(c["repeats"]):
+            continue
+        out.append({"pattern": c["pattern"], "repeats": int(_clamp(math.floor((c["repeats"] if "repeats" in c else 1) + 0.5), 1, MAX_REPEATS))})
+    return out
+
+
+def clean_song(raw, pattern=None):
+    """A clean song from a saved or sent one, or None when it is just the default (nothing to save). `pattern` = the edited
+    pattern, which wins over the copy in patterns[current]."""
+    if not isinstance(raw, dict):
+        return None
+    seen, patterns = set(), []
+    for p in (raw.get("patterns") if isinstance(raw.get("patterns"), list) else [])[:MAX_PATTERNS]:
+        if not isinstance(p, dict) or not isinstance(p.get("id"), str) or not _PATTERN_ID.match(p["id"]) or p["id"] in seen:
+            continue
+        seen.add(p["id"])
+        patterns.append({"id": p["id"], "name": _clean_name(p.get("name"), f"Pattern {len(patterns) + 1}"),
+                         "bars": p["bars"] if _is_num(p.get("bars")) and p["bars"] >= 1 else 2, "events": _clean_events(p.get("events"))})
+    chain = _clean_chain(raw.get("chain"), patterns)
+    mode = "song" if raw.get("mode") == "song" else "pattern"
+    current = raw.get("current") if any(p["id"] == raw.get("current") for p in patterns) else None
+    if current is not None and pattern:
+        patterns = [{**p, "bars": pattern["bars"], "events": pattern["events"]} if p["id"] == current else p for p in patterns]
+    if not patterns and not chain and mode == "pattern":
+        return None
+    return {"patterns": patterns, "chain": chain, "mode": mode, "current": current}
+
+
+def song_timeline(project, beats_per_bar=4, force=False):
+    """The playing order as {total, chain, segments: [{start, len, id, events}]} in beats from 0 (twin of songTimeline)."""
+    s = project.get("song")
+
+    def single():
+        ln = project["pattern"]["bars"] * beats_per_bar
+        return {"total": ln, "chain": False, "segments": [{"start": 0, "len": ln, "id": (s or {}).get("current"), "events": project["pattern"]["events"]}]}
+    if not s or not s["chain"] or not (s["mode"] == "song" or force):
+        return single()
+    segments, cursor = [], 0
+    for c in s["chain"]:
+        p = next((x for x in s["patterns"] if x["id"] == c["pattern"]), None)
+        if not p:
+            continue
+        ln = p["bars"] * beats_per_bar
+        events = [e for e in p["events"] if e["beat"] < ln]
+        for _ in range(c["repeats"]):
+            segments.append({"start": cursor, "len": ln, "id": p["id"], "events": events})
+            cursor += ln
+    return {"total": cursor, "chain": True, "segments": segments} if segments else single()
+
+
+def timeline_events(tl):
+    """The timeline's events with their beats made absolute."""
+    return [{**e, "beat": e["beat"] + seg["start"]} for seg in tl["segments"] for e in seg["events"]]
+
+
+def _with_song(state, song):
+    """A project with `song` set; a song that is just the default is not kept."""
+    if not song["patterns"] and not song["chain"] and song["mode"] == "pattern" and song["current"] is None:
+        return {**state, "project": {k: v for k, v in state["project"].items() if k != "song"}}
+    return _with_project(state, song=song)
+
+
+def _mirror_current(state):
+    song = state["project"].get("song")
+    if not song or song["current"] is None:
+        return state
+    pat = state["project"]["pattern"]
+    i = next((k for k, p in enumerate(song["patterns"]) if p["id"] == song["current"]), -1)
+    if i < 0 or (song["patterns"][i]["bars"] == pat["bars"] and song["patterns"][i]["events"] == pat["events"]):
+        return state
+    patterns = [{**p, "bars": pat["bars"], "events": pat["events"]} if k == i else p for k, p in enumerate(song["patterns"])]
+    return _with_project(state, song={**song, "patterns": patterns})
+
+
 def initial_state(project=None, chops=None, sections=None):
     """Starting state for a song. `project` is whatever is on disk (may be partial or None)."""
     project = project if isinstance(project, dict) else {}
     pattern = project.get("pattern") if isinstance(project.get("pattern"), dict) else {}
     pads = project.get("pads") if isinstance(project.get("pads"), list) else []
+    pat = {"bars": pattern.get("bars") if pattern.get("bars") is not None else 2, "events": copy.deepcopy(list(pattern.get("events") or []))}
+    song = clean_song(project.get("song"), pat)
     overrides = project.get("overrides") if isinstance(project.get("overrides"), dict) else {}
     return {
         "project": {
             "pads": [{**_default_pad(), **clean_pad(pads[p] if p < len(pads) else None)} for p in range(PADS)],
             "overrides": copy.deepcopy(overrides),
-            "pattern": {"bars": pattern.get("bars") if pattern.get("bars") is not None else 2,
-                        "events": copy.deepcopy(list(pattern.get("events") or []))},
+            "pattern": pat,
             "fx": {**DEFAULT_FX, **_pick(project.get("fx"), DEFAULT_FX)},
             # optional keys: absent in old projects (and until first used), which then mean the defaults
             **({"tempo": _clean_tempo(project.get("tempo"))} if _clean_tempo(project.get("tempo")) else {}),
+            **({"song": song} if song else {}),
         },
         "chops": chops,
         "sections": list(sections or []),
@@ -191,6 +295,14 @@ def _clamp_bank(state, n):
 
 def reduce(state, action):
     """Pure reducer. Unknown or invalid actions return `state` itself."""
+    nxt = _reduce_core(state, action)
+    t = action.get("type") if isinstance(action, dict) else None
+    if nxt is not state and isinstance(t, str) and t.startswith("pattern."):
+        return _mirror_current(nxt)  # W3b: the edited pattern is copied into its entry of project.song.patterns
+    return nxt
+
+
+def _reduce_core(state, action):
     a = action if isinstance(action, dict) else {}
     t = a.get("type")
     proj = state["project"]
@@ -396,6 +508,71 @@ def reduce(state, action):
         bars = p.get("bars") if p.get("bars") is not None else proj["pattern"]["bars"]
         return _with_project(state, pattern={"bars": bars, "events": copy.deepcopy(list(p.get("events") or []))})
 
+    if t == "song.addPattern":  # W3b: a new pattern, which becomes the one being edited ({name?, bars?, copy?: bool})
+        song = proj.get("song") or DEFAULT_SONG
+        pat = proj["pattern"]
+        patterns, current = song["patterns"], song["current"]
+        if len(patterns) >= MAX_PATTERNS - 1:
+            return state
+        if current is None:  # the pattern being edited so far becomes "Pattern 1"
+            current = _next_pattern_id(patterns)
+            patterns = [*patterns, {"id": current, "name": f"Pattern {len(patterns) + 1}", "bars": pat["bars"], "events": pat["events"]}]
+        pid = _next_pattern_id(patterns)
+        bars = a["bars"] if _is_num(a.get("bars")) and a["bars"] >= 1 else pat["bars"]
+        bpb = a.get("beatsPerBar") if a.get("beatsPerBar") is not None else (state.get("chops") or {}).get("beats_per_bar")
+        bpb = bpb if bpb is not None else 4
+        events = [dict(e) for e in pat["events"] if e["beat"] < bars * bpb] if a.get("copy") is True else []
+        patterns = [*patterns, {"id": pid, "name": _clean_name(a.get("name"), f"Pattern {len(patterns) + 1}"), "bars": bars, "events": events}]
+        st = {**state, "project": {**proj, "pattern": {"bars": bars, "events": events}}}
+        return _with_song(st, {**song, "patterns": patterns, "current": pid})
+    if t == "song.selectPattern":  # the pattern to edit
+        song = proj.get("song")
+        p = next((x for x in song["patterns"] if x["id"] == a.get("id")), None) if song else None
+        if not p or song["current"] == p["id"]:
+            return state
+        st = {**state, "project": {**proj, "pattern": {"bars": p["bars"], "events": [dict(e) for e in p["events"]]}}}
+        return _with_song(st, {**song, "current": p["id"]})
+    if t == "song.renamePattern":
+        song = proj.get("song")
+        i = next((k for k, x in enumerate(song["patterns"]) if x["id"] == a.get("id")), -1) if song else -1
+        name = _clean_name(a.get("name"), None)
+        if i < 0 or name is None or song["patterns"][i]["name"] == name:
+            return state
+        return _with_song(state, {**song, "patterns": [{**p, "name": name} if k == i else p for k, p in enumerate(song["patterns"])]})
+    if t == "song.removePattern":  # also leaves the chain; removing the edited pattern selects the first one left
+        song = proj.get("song")
+        if not song or not any(x["id"] == a.get("id") for x in song["patterns"]):
+            return state
+        patterns = [p for p in song["patterns"] if p["id"] != a["id"]]
+        chain = [c for c in song["chain"] if c["pattern"] != a["id"]]
+        nxt, st = {**song, "patterns": patterns, "chain": chain}, state
+        if song["current"] == a["id"]:
+            first = patterns[0] if patterns else None
+            nxt = {**nxt, "current": first["id"] if first else None}
+            if first:
+                st = {**state, "project": {**proj, "pattern": {"bars": first["bars"], "events": [dict(e) for e in first["events"]]}}}
+        return _with_song(st, nxt)
+    if t == "song.setChain":  # [{pattern: id, repeats: 1..64}]; entries naming a pattern that does not exist are dropped
+        song = proj.get("song") or DEFAULT_SONG
+        chain = _clean_chain(a.get("chain"), song["patterns"])
+        if chain == song["chain"]:
+            return state
+        return _with_song(state, {**song, "chain": chain})
+    if t == "song.setMode":  # "pattern" loops the edited pattern, "song" plays the chain
+        if a.get("mode") not in ("pattern", "song"):
+            return state
+        song = proj.get("song") or DEFAULT_SONG
+        if song["mode"] == a["mode"]:
+            return state
+        return _with_song(state, {**song, "mode": a["mode"]})
+    if t == "song.load":  # replace the whole song document (used to sync tabs and by agents); null clears it
+        if "song" not in a or (a["song"] is not None and not a["song"]):
+            return state
+        song = None if a["song"] is None else clean_song(a["song"], proj["pattern"])
+        if song == proj.get("song"):
+            return state
+        return _with_project(state, song=song) if song else _with_song(state, dict(DEFAULT_SONG))
+
     if t == "bank.set":
         try:
             n = float(a.get("bank"))
@@ -458,4 +635,6 @@ def diff_project(old, new):
         out.append({"type": "tempo.set", "bpm": t["bpm"], "follow": t["follow"]})
     if old["pattern"] != new["pattern"]:
         out.append({"type": "pattern.load", "pattern": new["pattern"]})
+    if old.get("song") != new.get("song"):  # W3b: song mode (patterns, chain, mode, which pattern is edited)
+        out.append({"type": "song.load", "song": new.get("song")})
     return out

@@ -129,43 +129,71 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
                     choke=choke, gain=1.0 if wavs[pad] else 0.0, kit=kit_name,
                     mute_group=int(mute_groups[pad]) if mute_groups else None)
 
+    # W3b song mode: with a song in "song" mode and a chain (DawProject carries it in pattern["song"]) every ChopPad pattern is
+    # one Hydrogen pattern and the chain is the pattern sequence; otherwise the one pattern, as before.
+    specs, sequence = [(pattern_name, bars, (pattern or {}).get("events") or [])], [pattern_name]
+    song = (pattern or {}).get("song")
+    if isinstance(song, dict) and song.get("mode") == "song" and isinstance(song.get("chain"), list) and isinstance(song.get("patterns"), list):
+        names, listed, used = {}, [], set()
+        for sp in song["patterns"]:
+            if not isinstance(sp, dict) or not isinstance(sp.get("id"), str):
+                continue
+            base = (str(sp.get("name") or sp["id"]).strip() or sp["id"])[:40]
+            name, k = base, 2
+            while name in used:  # Hydrogen finds a pattern by its name: names must be unique
+                name, k = f"{base} {k}", k + 1
+            used.add(name)
+            names[sp["id"]] = name
+            sbars = float(sp["bars"]) if isinstance(sp.get("bars"), (int, float)) and sp["bars"] >= 1 else 2.0
+            listed.append((name, sbars, sp.get("events") or []))
+        order = []
+        for c in song["chain"]:
+            if isinstance(c, dict) and c.get("pattern") in names:
+                reps = c.get("repeats") if isinstance(c.get("repeats"), int) and not isinstance(c.get("repeats"), bool) else 1
+                order += [names[c["pattern"]]] * max(1, min(64, reps))
+        if listed and order:
+            specs, sequence = listed, order
+
     pats = ET.SubElement(root, "patternList")
-    pat = ET.SubElement(pats, "pattern")
-    _txt(pat, "name", pattern_name)
-    _txt(pat, "category", "")
-    _txt(pat, "size", size)
-    _txt(pat, "denominator", 4)
-    _txt(pat, "info", "")
-    notes = ET.SubElement(pat, "noteList")
     written = dropped_bank = dropped_other = 0
-    events = sorted((pattern or {}).get("events") or [], key=lambda e: (e.get("beat", 0), e.get("pad", 0)))
-    for e in events:
-        try:
-            pad, pos = int(e["pad"]), ticks(float(e["beat"]))
-        except (KeyError, TypeError, ValueError):
-            dropped_other += 1
-            continue
-        if int(e.get("bank", bank)) != bank:
-            dropped_bank += 1
-            continue
-        if not 0 <= pad < PADS or wavs[pad] is None or not 0 <= pos < size:
-            dropped_other += 1
-            continue
-        n = ET.SubElement(notes, "note")
-        _txt(n, "position", pos)
-        _txt(n, "leadlag", 0.0)
-        _txt(n, "velocity", max(0.0, min(1.0, float(e.get("vel", 1.0)))))
-        _txt(n, "pan", 0.0)
-        _txt(n, "pitch", float(e["pitch"]) if isinstance(e.get("pitch"), (int, float)) and not isinstance(e.get("pitch"), bool) else 0.0)  # W3b: 16 levels
-        _txt(n, "probability", 1.0)
-        _txt(n, "key", "C0")
-        _txt(n, "length", -1)
-        _txt(n, "instrument", pad)
-        _txt(n, "note_off", False)
-        written += 1
+    for pname, pbars, pevents in specs:
+        psize = pattern_ticks(pbars, beats_per_bar)
+        pat = ET.SubElement(pats, "pattern")
+        _txt(pat, "name", pname)
+        _txt(pat, "category", "")
+        _txt(pat, "size", psize)
+        _txt(pat, "denominator", 4)
+        _txt(pat, "info", "")
+        notes = ET.SubElement(pat, "noteList")
+        events = sorted(pevents, key=lambda e: (e.get("beat", 0), e.get("pad", 0)))
+        for e in events:
+            try:
+                pad, pos = int(e["pad"]), ticks(float(e["beat"]))
+            except (KeyError, TypeError, ValueError):
+                dropped_other += 1
+                continue
+            if int(e.get("bank", bank)) != bank:
+                dropped_bank += 1
+                continue
+            if not 0 <= pad < PADS or wavs[pad] is None or not 0 <= pos < psize:
+                dropped_other += 1
+                continue
+            n = ET.SubElement(notes, "note")
+            _txt(n, "position", pos)
+            _txt(n, "leadlag", 0.0)
+            _txt(n, "velocity", max(0.0, min(1.0, float(e.get("vel", 1.0)))))
+            _txt(n, "pan", 0.0)
+            _txt(n, "pitch", float(e["pitch"]) if isinstance(e.get("pitch"), (int, float)) and not isinstance(e.get("pitch"), bool) else 0.0)  # W3b: 16 levels
+            _txt(n, "probability", 1.0)
+            _txt(n, "key", "C0")
+            _txt(n, "length", -1)
+            _txt(n, "instrument", pad)
+            _txt(n, "note_off", False)
+            written += 1
     ET.SubElement(root, "virtualPatternList")
     seq = ET.SubElement(root, "patternSequence")
-    _txt(ET.SubElement(seq, "group"), "patternID", pattern_name)
+    for pname in sequence:
+        _txt(ET.SubElement(seq, "group"), "patternID", pname)
     lad = ET.SubElement(root, "ladspa")
     for _ in range(4):
         fx = ET.SubElement(lad, "fx")
@@ -176,7 +204,10 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
     ET.SubElement(root, "BPMTimeLine")
     ET.SubElement(root, "timeLineTag")
     ET.SubElement(ET.SubElement(root, "automationPaths"), "path", adjust="velocity")
-    return root, {"ticks": size, "notes": written, "dropped_other_bank": dropped_bank, "dropped_invalid": dropped_other}
+    info = {"ticks": size, "notes": written, "dropped_other_bank": dropped_bank, "dropped_invalid": dropped_other}
+    if sequence != [pattern_name]:  # W3b song mode: how many patterns and how many columns in the sequence
+        info.update(patterns=len(specs), sequence=len(sequence))
+    return root, info
 
 
 def write_song(path, **kw):

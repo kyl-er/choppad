@@ -259,6 +259,47 @@ class Client:
             out["fit"] = self.fit_tempo(sid, fit)
         return out
 
+    # ---- W3b: song mode ----
+    def song_show(self, sid):
+        """The song-mode state: {mode, editing, patterns: [{id, name, bars, hits}], chain: [{pattern, repeats}], bars}."""
+        d = self.song(sid)
+        proj = d.get("project") or {}
+        s = proj.get("song") or {"patterns": [], "chain": [], "mode": "pattern", "current": None}
+        cur = proj.get("pattern") or {"bars": 2, "events": []}
+        pats = [{"id": p["id"], "name": p["name"], "bars": p["bars"], "hits": len(p["events"])} for p in s["patterns"]]
+        if not pats:  # an old project: the one pattern it has
+            pats = [{"id": None, "name": "(the pattern, not yet in a song)", "bars": cur.get("bars", 2), "hits": len(cur.get("events", []))}]
+        sizes = {p["id"]: p["bars"] for p in s["patterns"]}
+        return {"mode": s["mode"], "editing": s["current"], "patterns": pats, "chain": s["chain"],
+                "chain_bars": sum(sizes.get(c["pattern"], 0) * c["repeats"] for c in s["chain"])}
+
+    def song_edit(self, sid, op, pattern=None, name=None, bars=None, copy=False, chain=None, mode=None):
+        """Song-mode edits: op = add | select | rename | remove | chain | mode. `chain` is "p1:2 p2" (pattern:repeats) or a list
+        of {pattern, repeats}. Browsers show the change live."""
+        def need(v, what):
+            if v is None:
+                raise ControlError(f"{op} needs {what}")
+            return v
+        if op == "add":
+            bpb = self.song(sid)["chops"]["beats_per_bar"]
+            act = {"type": "song.addPattern", "beatsPerBar": bpb, **({"name": name} if name else {}),
+                   **({"bars": bars} if bars is not None else {}), **({"copy": True} if copy else {})}
+        elif op == "select":
+            act = {"type": "song.selectPattern", "id": need(pattern, "a pattern id")}
+        elif op == "rename":
+            act = {"type": "song.renamePattern", "id": need(pattern, "a pattern id"), "name": need(name, "a name")}
+        elif op == "remove":
+            act = {"type": "song.removePattern", "id": need(pattern, "a pattern id")}
+        elif op == "chain":
+            act = {"type": "song.setChain", "chain": parse_chain(chain) if isinstance(chain, str) else need(chain, "a chain like 'p1:2 p2'")}
+        elif op == "mode":
+            if mode not in ("pattern", "song"):
+                raise ControlError("mode must be pattern or song")
+            act = {"type": "song.setMode", "mode": mode}
+        else:
+            raise ControlError("song op must be add, select, rename, remove, chain or mode")
+        return self.actions(sid, [act])
+
     # ---- W3b: resample ----
     def resample(self, sid, pad, bars=None, seconds=None, source="pattern", bank=None, wait_s=120):
         """Ask the browser that has the song open to resample into a new sound on `pad` (the browser renders or records, so
@@ -344,6 +385,8 @@ def song_summary(d):
         out["key"] = key
     if (proj.get("tempo") or {}).get("bpm"):  # W3b: the project tempo, when one is set
         out["project_tempo"] = proj["tempo"]["bpm"]
+    if proj.get("song"):  # W3b: song mode, when the project has patterns or a chain
+        out["song"] = {"mode": proj["song"]["mode"], "patterns": len(proj["song"]["patterns"]), "chain_entries": len(proj["song"]["chain"])}
     bank = (d.get("view") or {}).get("bank")
     if bank is not None:
         out["current_bank"] = bank
@@ -436,6 +479,23 @@ def parse_steps(text, bars=None, beats_per_bar=4):
         out.setdefault(pad, []).extend(steps)
     if not out:
         raise ControlError("no steps given")
+    return out
+
+
+def parse_chain(text):
+    """`"p1:2 p2 p1:3"` -> [{pattern: "p1", repeats: 2}, {pattern: "p2", repeats: 1}, ...] (groups split on whitespace, `;` or `,`)."""
+    out = []
+    for group in str(text).replace(";", " ").replace(",", " ").split():
+        pid, sep, reps = group.partition(":")
+        try:
+            n = int(reps) if sep else 1
+        except ValueError:
+            raise ControlError(f"bad chain entry {group!r}; expected PATTERN or PATTERN:REPEATS like p1:2") from None
+        if not pid or not 1 <= n <= 64:
+            raise ControlError(f"bad chain entry {group!r}; repeats are 1-64")
+        out.append({"pattern": pid, "repeats": n})
+    if not out:
+        raise ControlError("the chain is empty; give entries like 'p1:2 p2'")
     return out
 
 

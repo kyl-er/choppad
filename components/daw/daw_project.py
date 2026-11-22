@@ -149,6 +149,9 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None)
     groups = [by_pad.get(i, 0) for i in range(PADS)]
     if any(groups):  # W3b: mute groups travel inside the pattern dict (see h2song.build_song)
         pattern = {**pattern, "mute_groups": groups}
+    song = proj.get("song")
+    if isinstance(song, dict) and song.get("mode") == "song" and song.get("chain") and song.get("patterns"):
+        pattern = {**pattern, "song": song}  # W3b: song mode: one Hydrogen pattern per ChopPad pattern, the chain as the sequence
     return DawProject(song_id=sid, title=title, bpm=bpm, beats_per_bar=int(chops.get("beats_per_bar") or 4), bank=bank,
                       chops=slots, pattern=pattern, kit_name=kit_name, kit_dir=kit_dir, key=key)
 

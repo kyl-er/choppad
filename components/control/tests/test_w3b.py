@@ -137,6 +137,56 @@ class TempoVerbs(Rig):
         self.assertIn("tempo", {t["name"] for t in choppad_mcp.McpServer(self.c).tools_list()})
 
 
+class SongMode(Rig):
+    def test_reducer_twins_and_diff(self):
+        s = A.initial_state(project={"pattern": {"bars": 2, "events": [{"beat": 0, "pad": 1, "bank": 0, "vel": 1, "pass": 1}]}}, chops=CHOPS)
+        self.assertNotIn("song", s["project"])
+        s2 = A.reduce(A.reduce(s, {"type": "song.addPattern", "name": "B"}), {"type": "song.setChain", "chain": [{"pattern": "p1", "repeats": 2}, {"pattern": "p2"}]})
+        self.assertEqual(s2["project"]["song"]["current"], "p2")
+        self.assertEqual(A.diff_project(s["project"], s2["project"])[-1]["type"], "song.load")
+        back = s
+        for act in A.diff_project(s["project"], s2["project"]):
+            back = A.reduce(back, act)
+        self.assertEqual(back["project"]["song"], s2["project"]["song"])
+        self.assertEqual(A.song_timeline(s2["project"], 4, force=True)["total"], 24)
+        self.assertEqual(A.song_timeline(s2["project"], 4)["total"], 8, "pattern mode: just the edited pattern")
+        self.assertEqual([e["beat"] for e in A.timeline_events(A.song_timeline(s2["project"], 4, force=True))], [0, 8])
+
+    def test_verbs_edit_the_song_and_show_it(self):
+        out = []
+        run = lambda *argv: choppad.run_verb(list(argv), client=self.c, out=out.append, err=lambda s: None)  # noqa: E731
+        self.c.actions("song1", [{"type": "pattern.load", "pattern": {"bars": 1, "events": [{"beat": 0, "pad": 0, "bank": 0, "vel": 1, "pass": -1}]}}])
+        self.assertEqual(run("song", "song1", "add", "--name", "Chorus", "--bars", "2", "--copy"), 0)
+        song = self.project()["song"]
+        self.assertEqual([(p["id"], p["name"], p["bars"], len(p["events"])) for p in song["patterns"]], [("p1", "Pattern 1", 1, 1), ("p2", "Chorus", 2, 1)])
+        self.assertEqual(run("song", "song1", "rename", "p1", "Verse", "one"), 0)
+        self.assertEqual(run("song", "song1", "chain", "p1:2", "p2"), 0)
+        self.assertEqual(run("song", "song1", "mode", "song"), 0)
+        song = self.project()["song"]
+        self.assertEqual((song["patterns"][0]["name"], song["chain"], song["mode"]),
+                         ("Verse one", [{"pattern": "p1", "repeats": 2}, {"pattern": "p2", "repeats": 1}], "song"))
+        self.assertEqual(run("song", "song1", "select", "p1"), 0)
+        self.assertEqual(self.project()["song"]["current"], "p1")
+        out.clear()
+        run("song", "song1", "show")
+        shown = json.loads(out[0])
+        self.assertEqual((shown["mode"], shown["chain_bars"], shown["editing"]), ("song", 4, "p1"))
+        self.assertEqual(run("song", "song1", "remove", "p2"), 0)
+        self.assertEqual(self.project()["song"]["chain"], [{"pattern": "p1", "repeats": 2}])
+        for bad in (("chain", "p1:0"), ("chain", "p1:x"), ("mode", "disco"), ("select",), ("rename", "p1")):
+            with self.subTest(bad):
+                self.assertEqual(run("song", "song1", *bad), 1)
+        tools = choppad_mcp.build_tools(self.c)
+        tools["song"]["_fn"]({"id": "song1", "op": "add", "name": "Bridge"})
+        self.assertEqual(tools["song"]["_fn"]({"id": "song1", "op": "show"})["patterns"][-1]["name"], "Bridge")
+
+    def test_old_project_show(self):
+        shown = self.c.song_show("song1")
+        self.assertEqual((shown["mode"], len(shown["patterns"]), shown["chain"]), ("pattern", 1, []))
+        self.assertEqual(cc.parse_chain("p1:2 p2;p3,p4:3"), [{"pattern": "p1", "repeats": 2}, {"pattern": "p2", "repeats": 1},
+                                                              {"pattern": "p3", "repeats": 1}, {"pattern": "p4", "repeats": 3}])
+
+
 class Resample(Rig):
     URL = "/media/song1/resample/0123456789abcdef.wav"
 

@@ -6,7 +6,7 @@ import { createEngine, normalizationGain } from "./engine.js";
 import { createSequencer, encodeWav, patternToMidi } from "./sequencer.js";
 import { createFx } from "./fx.js";
 import { createStore } from "./store.js";
-import { PADS, SIXTEEN_MODES, initialState, projectBpm, projectDoc, reduce, sixteenLevel, stemUrl } from "./actions.js";
+import { PADS, SIXTEEN_MODES, initialState, projectBpm, projectDoc, reduce, sixteenLevel, songTimeline, stemUrl, timelineEvents } from "./actions.js";
 
 const STEPS = { "1/4": 1, "1/8": 2, "1/16": 4 };
 const MULTS = [0.5, 1, 2];
@@ -16,6 +16,7 @@ const ORIGIN = globalThis.crypto?.randomUUID?.() ?? `tab-${Math.random().toStrin
 const ORIGIN_HEADER = "X-ChopPad-Origin";
 // Local actions that are saved on the server and shown by other tabs. Selection, settings and sections stay per tab.
 const FORWARDED = new Set(["pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "slice.src", "slice.stem", "kit.load", "fx.set", "tempo.set",
+  "song.addPattern", "song.selectPattern", "song.renamePattern", "song.removePattern", "song.setChain", "song.setMode", "song.load",
   "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load", "bank.set"]);
 
 const postJson = (url, body = {}) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [ORIGIN_HEADER]: ORIGIN }, body: JSON.stringify(body) });
@@ -82,7 +83,12 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const st = store.get();
     seq.setBpm(projectBpm(st));
     seq.state.beatsPerBar = st.chops.beats_per_bar;
+    giveSong(st);
   };
+  /** Song mode: the sequencer plays the chain (bar-accurate, one beat clock); otherwise it loops the edited pattern. */
+  function giveSong(st = store.get()) {
+    seq.setSong(st.project.song?.mode === "song" ? songTimeline(st.project, st.chops.beats_per_bar) : null);
+  }
 
   // ---- state -> engine, sequencer, fx, disk ----
   // The sequencer gets its own copy of the pattern because it appends to it while recording.
@@ -161,6 +167,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     }
     if (P.fx !== Q.fx) fx.set(P.fx);
     if (P.pattern !== Q.pattern) givePattern(P.pattern);
+    if (P.song !== Q.song || P.pattern !== Q.pattern) { giveSong(s); if (P.song?.mode !== Q.song?.mode) emit("seq", {}); }
   });
 
   // ---- local changes -> server (saved there, shown by every other tab), server changes -> store ----
@@ -209,6 +216,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   const onPageHide = () => { flush(); };
   window.addEventListener("pagehide", onPageHide);
   applyAll(store.get());
+  giveSong();
   if (pending.size) { onProgress("Loading stretched and kit sounds…"); await Promise.all([...pending]); }
   indexBanks(store.get().chops);
   seq.load(store.get().project.pattern);
@@ -361,11 +369,21 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   }
 
   // ---- pattern transport and renders ----
-  function toggleRecord() { stopSong(); syncSeqTempo(); seq.toggleRecord(); emit("seq", {}); }
+  function toggleRecord() {
+    if (seq.state.song) { emit("seq", {}); return; }   // a chain is playing, not one pattern: there is nothing to record into
+    stopSong(); syncSeqTempo(); seq.toggleRecord(); emit("seq", {});
+  }
   function togglePattern() {
     if (seq.state.playing) seq.stop(); else { stopSong(); syncSeqTempo(); seq.start(); }
     emit("seq", {});
   }
+  /** Standard MIDI File of the whole chain (song mode's playing order; just the edited pattern when there is no chain). */
+  const songMidi = () => {
+    const st = store.get();
+    const bpb = st.chops.beats_per_bar;
+    const tl = songTimeline(st.project, bpb, { force: true });
+    return patternToMidi({ bars: tl.total / bpb, events: timelineEvents(tl) }, { bpm: projectBpm(st), beatsPerBar: bpb });
+  };
   const patternMidi = () => {
     const st = store.get();
     return patternToMidi(st.project.pattern, { bpm: projectBpm(st), beatsPerBar: st.chops.beats_per_bar });
@@ -398,6 +416,14 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
       oe.trigger(e.pad, e.vel, (beat * 60) / bpm, e.bank, e);
     }
     return off.startRendering();
+  }
+  /** Offline render of the whole chain (every pattern as often as the chain says), WAV bytes, or null when there is nothing to play. */
+  async function renderSongWav() {
+    const st = store.get();
+    const tl = songTimeline(st.project, st.chops.beats_per_bar, { force: true });
+    const events = timelineEvents(tl);
+    if (!events.length) return null;
+    return encodeWav(await renderEvents(events, { beats: tl.total }));
   }
   /** The pattern repeated to fill `beats` beats (a pattern shorter than that loops). */
   function loopedEvents(pat, beats, bpb) {
@@ -704,6 +730,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
       } else apply({ type: "slice.set", bank, pad, start: sl.start, end: sl.end });
     }
     apply({ type: "fx.set", params: want.fx });
+    apply({ type: "song.load", song: want.song ?? null });
     apply({ type: "tempo.set", bpm: want.tempo?.bpm ?? null, follow: want.tempo?.follow ?? true });
     apply({ type: "pattern.load", pattern: want.pattern });
     if (JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
@@ -740,7 +767,9 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     release: (pad) => engine.release(store.get().settings.sixteen?.pad ?? pad),
     startRepeat, stopRepeat,
     regrid, reanalyze,
-    toggleRecord, togglePattern, patternMidi, renderPatternWav, resample,
+    toggleRecord, togglePattern, patternMidi, renderPatternWav, resample, songMidi, renderSongWav,
+    /** Where the play head is: { beat, index, id, inPattern } (beats in the whole loop / the chain entry / its pattern). */
+    songPosition: () => seq.locate(),
     loadSections, advise, loadAiBank, exportBank,
     stretchPad, stretchBank, stretchPattern, clearStretch, saveBankAsKit, loadKit, detectKey,
     setTempo, fitToTempo, refitAll, whenFitted, get tempoBpm() { return projectBpm(store.get()); },

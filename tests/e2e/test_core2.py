@@ -518,6 +518,88 @@ class Core2(unittest.TestCase):
         self.assertTrue(page.evaluate(f"{S}.seq.state.metronome"))
         self.assertEqual(errors, [], str(errors))
 
+    # ------------------------------------------------------------------ 6. song mode
+    def test_song_mode_chain_plays_renders_and_syncs(self):
+        page, errors = self.open_song()
+        S = self.S
+        # a project that is one pattern (an old project) becomes pattern 1; add pattern 2; chain p1 x2, p2 x1; 240 BPM = 1 s a bar
+        page.evaluate("""() => {
+            const d = (a) => window.choppad.song.session.store.dispatch(a), ev = (beat, pad) => ({ beat, pad, bank: 0, vel: 1, pass: -1 });
+            d({ type: 'pattern.load', pattern: { bars: 1, events: [ev(0, 0), ev(2, 1)] } });
+            d({ type: 'tempo.set', bpm: 240 });
+            d({ type: 'song.addPattern', name: 'Chorus', bars: 1 });
+            d({ type: 'pattern.addEvent', event: ev(1, 2) }); d({ type: 'pattern.addEvent', event: ev(3, 3) });
+            d({ type: 'song.setChain', chain: [{ pattern: 'p1', repeats: 2 }, { pattern: 'p2', repeats: 1 }] });
+            d({ type: 'settings.set', params: { metronome: false } });
+        }""")
+        song = page.evaluate(f"{S}.store.get().project.song")
+        self.assertEqual([(p["id"], p["name"], len(p["events"])) for p in song["patterns"]], [("p1", "Pattern 1", 2), ("p2", "Chorus", 2)])
+        self.assertEqual((song["current"], song["mode"]), ("p2", "pattern"))
+
+        # whole-chain renders: WAV hits at the right place in the arrangement, MIDI with all six hits
+        out = page.evaluate(f"""async () => {{
+            const s = {S}, T = window.__t, sr = s.buffer.sampleRate;
+            const buf = await T.decode(Array.from(await s.renderSongWav())); const sig = buf.getChannelData(0);
+            const ref = (pad) => {{ const c = s.engine.getSlice(0, pad), a = Math.round(c.start * sr); return s.buffer.getChannelData(0).slice(a, a + Math.round(0.15 * sr)); }};
+            const want = [[0, 0.0], [1, 0.5], [0, 1.0], [1, 1.5], [2, 2.25], [3, 2.75]];
+            const hits = want.map(([pad, t]) => {{ const r = T.lagOf(sig, ref(pad), Math.round(t * buf.sampleRate), Math.round(0.03 * buf.sampleRate), Math.round(0.15 * buf.sampleRate));
+                                                  return {{ pad, t, errMs: r.lag / buf.sampleRate * 1000, corr: r.corr }}; }});
+            const m = s.songMidi(); let on = 0; for (let i = 0; i < m.length - 2; i++) if (m[i] === 0x99) on++;
+            const single = s.patternMidi(); let on1 = 0; for (let i = 0; i < single.length - 2; i++) if (single[i] === 0x99) on1++;
+            return {{ hits, on, on1, seconds: buf.duration }};
+        }}""")
+        for h in out["hits"]:
+            self.assertLess(abs(h["errMs"]), 15, h)
+            self.assertGreater(h["corr"], 0.5, h)
+        self.assertEqual((out["on"], out["on1"]), (6, 2))
+        self.assertGreater(out["seconds"], 3.0)
+
+        # live: pattern mode loops the edited pattern, song mode plays the chain and loops it, switching exactly on the bar
+        spy = f"""() => {{ const s = {S}; window.__w = []; const t = s.engine.trigger;
+            s.engine.trigger = (p, v, when, ...r) => {{ window.__w.push([p, when]); return t(p, v, when, ...r); }}; }}"""
+        page.evaluate(spy)
+        page.evaluate(f"{S}.store.dispatch({{ type: 'song.setMode', mode: 'song' }})")
+        self.assertTrue(page.evaluate(f"{S}.seq.state.song !== null"))
+        page.evaluate(f"{S}.togglePattern()")
+        page.wait_for_timeout(1250)
+        where = page.evaluate(f"{S}.songPosition()")
+        self.assertEqual(where["id"], "p1", where)
+        page.wait_for_timeout(1500)
+        self.assertEqual(page.evaluate(f"{S}.songPosition().id"), "p2")
+        page.wait_for_timeout(1100)
+        page.evaluate(f"{S}.panic()")
+        w = page.evaluate("window.__w")
+        t0 = w[0][1]
+        rel = [(p, round(t - t0, 4)) for p, t in w]
+        self.assertEqual([p for p, _ in rel[:8]], [0, 1, 0, 1, 2, 3, 0, 1], "pattern 1 twice, pattern 2, then the chain starts over")
+        for (_, got), want in zip(rel[:8], [0, 0.5, 1.0, 1.5, 2.25, 2.75, 3.0, 3.5]):
+            self.assertAlmostEqual(got, want, delta=0.002, msg=str(rel))
+        # back to pattern mode: only the edited pattern (pattern 2) loops
+        page.evaluate(f"{S}.store.dispatch({{ type: 'song.setMode', mode: 'pattern' }})")
+        page.evaluate("window.__w = []")
+        page.evaluate(f"{S}.togglePattern()")
+        page.wait_for_timeout(1300)
+        page.evaluate(f"{S}.panic()")
+        self.assertEqual(sorted({p for p, _ in page.evaluate("window.__w")}), [2, 3])
+
+        # saved, shown by a second tab, changed by an agent over HTTP
+        page.evaluate(f"{S}.remote.flush()")
+        saved = self.project_on_disk()["song"]
+        self.assertEqual((saved["mode"], saved["current"], [c["repeats"] for c in saved["chain"]]), ("pattern", "p2", [2, 1]))
+        page2, errors2 = self.open_song()
+        self.assertEqual(page2.evaluate(f"{S}.store.get().project.song.chain.length"), 2)
+        st, res = api(self.base, f"/api/songs/{self.sid}/actions", {"actions": [
+            {"type": "song.setChain", "chain": [{"pattern": "p2", "repeats": 3}]}, {"type": "song.setMode", "mode": "song"}]})
+        self.assertEqual((st, res["applied"]), (200, 2))
+        page.wait_for_function(f"{S}.store.get().project.song.mode === 'song'", timeout=10000)
+        self.assertEqual(page.evaluate(f"{S}.seq.state.song.total"), 12, "the sequencer follows: 3 bars of 4 beats")
+        page2.wait_for_function(f"{S}.store.get().project.song.mode === 'song'", timeout=10000)
+        self.assertEqual(page2.evaluate(f"{S}.store.get().project.song.chain"), [{"pattern": "p2", "repeats": 3}])
+        # and a pattern edit in one tab shows in the other, inside the pattern the song holds
+        page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.addEvent', event: {{ beat: 0.5, pad: 9, bank: 0, vel: 1, pass: 5 }} }})")
+        page2.wait_for_function(f"{S}.store.get().project.song.patterns[1].events.some((e) => e.pad === 9)", timeout=10000)
+        self.assertEqual(errors + errors2, [], str(errors + errors2))
+
 
 if __name__ == "__main__":
     unittest.main()

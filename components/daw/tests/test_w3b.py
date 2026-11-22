@@ -56,6 +56,33 @@ class ProjectTempo(unittest.TestCase):
         root, _ = h2song.build_song(title=plain.title, bpm=plain.bpm, beats_per_bar=4, wavs=plain.wavs(), pattern=plain.pattern, empty_wav="/x.wav")
         self.assertEqual({i.find("muteGroup").text for i in root.find("instrumentList")}, {"0"})
 
+    SONG = {"mode": "song", "current": "p1", "patterns": [
+        {"id": "p1", "name": "Verse", "bars": 1, "events": [{"beat": 0, "pad": 0, "bank": 0, "vel": 1, "pass": 1}]},
+        {"id": "p2", "name": "Verse", "bars": 2, "events": [{"beat": 4, "pad": 2, "bank": 0, "vel": 0.5, "pass": 1}, {"beat": 1, "pad": 3, "bank": 5, "vel": 1, "pass": 1}]},
+        {"id": "p3", "name": "Unused", "bars": 1, "events": []}],
+        "chain": [{"pattern": "p1", "repeats": 2}, {"pattern": "p2", "repeats": 1}, {"pattern": "p1", "repeats": 1}, {"pattern": "gone", "repeats": 9}]}
+
+    def test_song_mode_is_one_hydrogen_pattern_per_pattern_and_the_chain_is_the_sequence(self):
+        p = self.build(song=self.SONG, pattern={"bars": 1, "events": []})
+        self.assertEqual(p.pattern["song"]["mode"], "song")
+        root, info = h2song.build_song(title=p.title, bpm=p.bpm, beats_per_bar=4, wavs=p.wavs(), pattern=p.pattern, empty_wav="/x.wav")
+        pats = root.find("patternList").findall("pattern")
+        self.assertEqual([x.find("name").text for x in pats], ["Verse", "Verse 2", "Unused"], "names are unique: Hydrogen finds patterns by name")
+        self.assertEqual([x.find("size").text for x in pats], ["192", "384", "192"])
+        counts = [len(x.find("noteList")) for x in pats]
+        self.assertEqual(counts, [1, 1, 0], "the hit on another bank is not in the kit")
+        seq = [g.find("patternID").text for g in root.find("patternSequence")]
+        self.assertEqual(seq, ["Verse", "Verse", "Verse 2", "Verse"], "repeats become columns, an unknown pattern is skipped")
+        self.assertEqual((info["patterns"], info["sequence"]), (3, 4))
+
+    def test_pattern_mode_keeps_the_single_pattern_even_with_a_chain_saved(self):
+        p = self.build(song={**self.SONG, "mode": "pattern"}, pattern={"bars": 2, "events": [{"beat": 0, "pad": 1, "bank": 0, "vel": 1, "pass": 1}]})
+        self.assertNotIn("song", p.pattern)
+        root, info = h2song.build_song(title=p.title, bpm=p.bpm, beats_per_bar=4, wavs=p.wavs(), pattern=p.pattern, empty_wav="/x.wav")
+        self.assertEqual(len(root.find("patternList")), 1)
+        self.assertEqual(len(root.find("patternSequence")), 1)
+        self.assertNotIn("patterns", info)
+
     def test_h2song_writes_velocity_and_pitch_of_16_level_hits(self):
         pattern = {"bars": 1, "events": [
             {"beat": 0, "pad": 3, "bank": 0, "vel": 0.25, "pass": 1},

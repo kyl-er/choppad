@@ -244,7 +244,7 @@ def make_server(media_root: str, port: int = 8960):
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
 VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
-         "tempo", "resample")
+         "tempo", "resample", "song")
 
 
 def build_verb_parser():
@@ -328,6 +328,13 @@ def build_verb_parser():
     s.add_argument("--follow", action=argparse.BooleanOptionalAction, default=None,
                    help="pads fitted earlier are re-fitted when the tempo changes (default on)")
     s.add_argument("--fit", choices=["pattern", "bank"], help="stretch the pads of the pattern, or of the bank on screen, to the tempo now")
+    s = add("song", "song mode: patterns and the chain that plays them. ops: show | add | select | rename | remove | chain | mode")
+    s.add_argument("id")
+    s.add_argument("op", choices=["show", "add", "select", "rename", "remove", "chain", "mode"])
+    s.add_argument("arg", nargs="*", help="select/remove PATTERN; rename PATTERN NAME; chain 'p1:2 p2'; mode pattern|song")
+    s.add_argument("--name", help="add: name of the new pattern")
+    s.add_argument("--bars", type=float, help="add: its length in bars (default: the edited pattern's)")
+    s.add_argument("--copy", action="store_true", help="add: start from a copy of the edited pattern")
     s = add("resample", "render the pattern (or record the master bus) into a new sound on a pad; the open browser does the work")
     s.add_argument("id")
     s.add_argument("--pad", type=int, required=True, help="pad (0-15) that gets the new sound")
@@ -473,6 +480,14 @@ def run_verb(argv, client=None, out=None, err=None):
                 err("note: no browser has this song open, so nothing is playing")
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
+        elif a.verb == "song":
+            if a.op == "show":
+                j(c.song_show(a.id))
+            else:
+                one = a.arg[0] if a.arg else None
+                reply(c.song_edit(a.id, a.op, pattern=one if a.op in ("select", "rename", "remove") else None,
+                                  name=(" ".join(a.arg[1:]) or None) if a.op == "rename" else a.name, bars=a.bars, copy=a.copy,
+                                  chain=" ".join(a.arg) if a.op == "chain" else None, mode=one if a.op == "mode" else None))
         elif a.verb == "resample":
             j(c.resample(a.id, a.pad, a.bars, a.seconds, a.source, a.bank, a.wait))
         elif a.verb == "tempo":
