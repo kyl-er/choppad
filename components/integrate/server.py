@@ -31,7 +31,7 @@ CHUNK = 256 * 1024
 MAX_RANGE = 8 * 2**20  # answer open-ended ranges with at most 8 MiB; browsers ask again for more
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png",
-        ".jpg": "image/jpeg", ".webp": "image/webp", ".mp4": "video/mp4", ".wav": "audio/wav", ".sfz": "text/plain",
+        ".jpg": "image/jpeg", ".webp": "image/webp", ".mp4": "video/mp4", ".wav": "audio/wav", ".sfz": "text/plain", ".zip": "application/zip",
         ".xml": "application/xml", ".ico": "image/x-icon"}
 MAX_UPLOAD = 300 * 2**20
 AUDIO_EXT = {".mp3", ".wav", ".flac", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".aif", ".aiff", ".mp4", ".mov", ".webm", ".mkv"}
@@ -368,7 +368,11 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     continue
                 meta = json.load(open(os.path.join(d, "meta.json")))
                 ch = json.load(open(os.path.join(d, "chops.json")))
-                out.append({"id": sid, "title": meta.get("title"), "duration_s": meta.get("duration_s"),
+                try:  # W3: key, when the song has been analysed for it
+                    key = json.load(open(os.path.join(d, "analysis.json"))).get("key")
+                except (OSError, ValueError):
+                    key = None
+                out.append({"key": key, "id": sid, "title": meta.get("title"), "duration_s": meta.get("duration_s"),
                             "bpm": ch.get("bpm"), "meter": f"{ch.get('beats_per_bar')}/4", "chops": len(ch["chops"]),
                             "banks": len(ch["banks"]), "added": os.path.getmtime(os.path.join(d, "meta.json"))})
             return sorted(out, key=lambda s: -s["added"])

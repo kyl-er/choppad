@@ -103,7 +103,11 @@ class KitsApi(unittest.TestCase):
         self.assertEqual(code, 200, out)
         with wave.open(os.path.join(out["path"], "chop_02.wav")) as w:
             self.assertAlmostEqual(w.getnframes() / w.getframerate(), 0.4, delta=0.001)
-        self.assertEqual(self.call(f"/api/kits/{kit2['id']}/export", {"kind": "zip"})[0], 400)
+        code, out = self.call(f"/api/kits/{kit2['id']}/export", {"kind": "zip"})
+        self.assertEqual(code, 200, out)
+        import zipfile
+        self.assertEqual(len(zipfile.ZipFile(out["path"]).namelist()), len([p for p in kit2["pads"] if p]))
+        self.assertEqual(self.call(f"/api/kits/{kit2['id']}/export", {"kind": "mp3"})[0], 400)
         # a kit whose song has disappeared fails with a clear message
         keep = os.path.join(self.tmp, "keep-b")
         shutil.move(os.path.join(self.media_root, b), keep)

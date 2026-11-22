@@ -352,6 +352,34 @@ class CoreScreen(unittest.TestCase):
         self.assertEqual(errors + errors2 + errors3, [])
         page.close()
 
+    # ------------------------------------------------------------------ 4. key detection and zip export
+    def test_key_in_lcd_and_library_and_zip_export(self):
+        import io
+        import zipfile
+        apath = os.path.join(self.tmp, "media", self.sid, "analysis.json")
+        doc = json.load(open(apath))
+        doc.pop("key", None)                       # a song analysed before key detection existed
+        json.dump(doc, open(apath, "w"))
+        page, errors = self.open_song()
+        page.wait_for_function("document.querySelector('.lcd .key')?.textContent.length > 2", timeout=30000)
+        key = json.load(open(apath))["key"]       # detected on the server, cached in analysis.json
+        want = f"{key['tonic']} {'min' if key['mode'] == 'minor' else 'maj'}"
+        self.assertEqual(page.locator(".lcd .key").inner_text(), want)
+        self.assertIn("confidence", page.locator(".lcd .key").get_attribute("title"))
+        page.wait_for_function(f"document.querySelector('.songs li[data-id=\"{self.sid}\"] .key')?.textContent === '{want}'", timeout=10000)
+
+        # the chops zip: 16 WAVs of the current bank, downloadable from the link
+        page.locator(".exp-zip").click()
+        page.wait_for_selector(".exp-out a.exp-download", timeout=60000)
+        href = page.locator(".exp-out a.exp-download").get_attribute("href")
+        resp = page.request.get(self.base + href)
+        self.assertEqual(resp.status, 200)
+        z = zipfile.ZipFile(io.BytesIO(resp.body()))
+        self.assertEqual(z.namelist(), [f"pad{i:02d}.wav" for i in range(1, 17)])
+        self.assertTrue(all(i.file_size > 1000 for i in z.infolist()))
+        self.assertEqual(errors, [])
+        page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

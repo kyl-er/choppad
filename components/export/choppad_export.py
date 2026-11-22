@@ -169,6 +169,42 @@ def _read_wav(path, cache):
     return cache[path]
 
 
+def pad_pcm(p, cache):
+    """(sr, channels, sampwidth, declicked PCM bytes) of one pad: its stretched rendering or its slice of the song."""
+    sr, nch, sampwidth, frames = _read_wav(p["stretch"] or p["audio"], cache)
+    if p["stretch"]:
+        start, end = 0, len(frames)
+    else:
+        start = round(p["start"] * sr) * nch * sampwidth
+        end = round(p["end"] * sr) * nch * sampwidth
+    return sr, nch, sampwidth, _slice_declicked(frames, nch, sampwidth, start, end, sr)
+
+
+def export_zip(media_dir, out_path=None, *, bank=0, overrides=None):
+    """Zip of the bank's pads as WAV files pad01.wav .. pad16.wav (empty pads left out). Returns the .zip path."""
+    return write_zip(bank_pads(media_dir, bank, overrides), out_path or os.path.join(
+        media_dir, f"{_read_json(media_dir, 'meta.json', {}).get('id', 'choppad')}-bank{bank + 1}.zip"))
+
+
+def write_zip(pads, out_path):
+    import io
+    import zipfile
+    cache = {}
+    tmp = out_path + ".part"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in pads:
+            sr, nch, sampwidth, data = pad_pcm(p, cache)
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(nch)
+                w.setsampwidth(sampwidth)
+                w.setframerate(sr)
+                w.writeframes(data)
+            z.writestr(f"pad{p['pad'] + 1:02d}.wav", buf.getvalue())
+    os.replace(tmp, out_path)
+    return out_path
+
+
 def write_hydrogen(pads, out_dir, kit_name=None):
     os.makedirs(out_dir, exist_ok=True)
     cache = {}
@@ -178,13 +214,7 @@ def write_hydrogen(pads, out_dir, kit_name=None):
 
     for p in pads:
         pad = p["pad"]
-        sr, nch, sampwidth, frames = _read_wav(p["stretch"] or p["audio"], cache)
-        if p["stretch"]:
-            start, end = 0, len(frames)
-        else:
-            start = round(p["start"] * sr) * nch * sampwidth
-            end = round(p["end"] * sr) * nch * sampwidth
-        data = _slice_declicked(frames, nch, sampwidth, start, end, sr)
+        sr, nch, sampwidth, data = pad_pcm(p, cache)
 
         wav_name = f"chop_{pad:02d}.wav"
         with wave.open(os.path.join(out_dir, wav_name), "wb") as dst:

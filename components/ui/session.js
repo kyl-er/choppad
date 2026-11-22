@@ -332,12 +332,22 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     store.dispatch({ type: "slice.setMany", bank, slices: slices.map(({ pad, start, end }) => ({ pad, start, end })) });
     return ai.pad_labels.slice(0, PADS);
   }
-  /** kind: "hydrogen" | "sfz". Returns { ok, path, note, error }. */
+  /** kind: "hydrogen" | "sfz" | "zip" (16 WAVs; also returns `url` to download). Returns { ok, path, url?, note, error }. */
   async function exportBank(kind) {
     const { bank, project } = store.get();
     const r = await postJson(`/api/songs/${id}/export`, { kind, bank, fx: project.fx, overrides: project.overrides });
     const body = await r.json().catch(() => ({}));
     return { ok: r.ok, ...body, error: r.ok ? undefined : (body.error || r.status) };
+  }
+
+  // ---- key (analysis.key, detected once on the server) ----
+  async function detectKey() {
+    if (analysis.key) return analysis.key;
+    const r = await postJson(`/api/songs/${id}/key`);
+    if (!r.ok) return null;
+    analysis.key = await r.json();
+    emit("key", analysis.key);
+    return analysis.key;
   }
 
   // ---- time-stretch (rubberband on the server; the result is a cached WAV the pad plays instead of the song region) ----
@@ -418,7 +428,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     regrid, reanalyze,
     toggleRecord, togglePattern, patternMidi, renderPatternWav,
     loadSections, advise, loadAiBank, exportBank,
-    stretchPad, stretchBank, stretchPattern, clearStretch, saveBankAsKit, loadKit,
+    stretchPad, stretchBank, stretchPattern, clearStretch, saveBankAsKit, loadKit, detectKey,
     panic,
     destroy() {
       unsubscribe();

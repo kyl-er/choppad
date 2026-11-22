@@ -92,6 +92,30 @@ class CoreApi(unittest.TestCase):
         self.assertEqual(self.call("/media/%s/stretch/../audio.wav" % self.id)[0], 404)
         self.assertEqual(self.call(f"/media/{self.id}/stretch/nothex.wav")[0], 404)
 
+    # ---------------- key and zip ----------------
+    def test_key_endpoint_and_library_row(self):
+        code, k = self.call(f"/api/songs/{self.id}/key", {})
+        self.assertEqual(code, 200, k)
+        self.assertIn(k["mode"], ("major", "minor"))
+        self.assertIn(k["tonic"], ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"))
+        self.assertTrue(0 <= k["confidence"] <= 1)
+        self.assertEqual(json.load(open(os.path.join(self.media_root, self.id, "analysis.json")))["key"], k)
+        self.assertEqual(self.call(f"/api/songs/{self.id}/key", {})[1], k)   # cached
+        lib = {s["id"]: s for s in self.call("/api/songs")[1]}
+        self.assertEqual(lib[self.id]["key"], k)
+        validate_analysis(self.call(f"/api/songs/{self.id}")[1]["analysis"])   # the optional key keeps the contract valid
+
+    def test_zip_export_is_downloadable(self):
+        import io, zipfile
+        code, out = self.call(f"/api/songs/{self.id}/export", {"kind": "zip", "bank": 0})
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["url"], f"/media/{self.id}/" + os.path.basename(out["path"]))
+        with urllib.request.urlopen(self.base + out["url"]) as r:
+            self.assertEqual(r.headers["Content-Type"], "application/zip")
+            z = zipfile.ZipFile(io.BytesIO(r.read()))
+        self.assertEqual(len(z.namelist()), len(self.call(f"/api/songs/{self.id}")[1]["chops"]["banks"][0]))
+        self.assertTrue(z.namelist()[0].endswith(".wav"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -135,8 +135,27 @@ def _export(media_dir, body):
                         apply_to_file(os.path.join(out, wav), fx)
                 note = "Tone/reverb baked into the samples. " + note
         return {"path": out, "kit": name, "note": note}
+    if body.get("kind") == "zip":
+        from choppad_export import export_zip
+        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"))
+        return {"path": os.path.abspath(path), "url": f"/media/{sid}/{os.path.basename(path)}",
+                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out), no pad sound settings or fx baked in."}
     path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"))
     return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
+
+
+# ---- W3: key detection ----
+def _key(media_dir, body):
+    """POST /api/songs/<id>/key -> {tonic, mode, confidence}; detected once and cached in analysis.json["key"]."""
+    path = os.path.join(media_dir, "analysis.json")
+    analysis = json.load(open(path))
+    if analysis.get("key") and not body.get("force"):
+        return analysis["key"]
+    from choppad_key import detect_key_file
+    analysis["key"] = detect_key_file(os.path.join(media_dir, "audio.wav"))
+    with open(path, "w") as f:
+        json.dump(analysis, f, indent=2)
+    return analysis["key"]
 
 
 # ---- W3: time-stretch ----
@@ -196,7 +215,7 @@ def make_server(media_root: str, port: int = 8960):
     os.makedirs(media_root, exist_ok=True)
     return _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
                  actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
-                          "savekit": _savekit})
+                          "savekit": _savekit, "key": _key})
 
 
 def main():

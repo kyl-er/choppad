@@ -64,7 +64,7 @@ export function mountLibrary(root, { onOpen }) {
       li.className = "song" + (s.id === active ? " active" : "");
       li.dataset.id = s.id;
       li.innerHTML = `<div class="title">${esc(s.title)}</div>
-        <div class="meta">${s.bpm.toFixed(1)} BPM · ${esc(s.meter)} · ${fmtTime(s.duration_s)} · ${s.banks} banks</div>`;
+        <div class="meta">${s.bpm.toFixed(1)} BPM · ${esc(s.meter)}${s.key ? ` · <span class="key">${esc(s.key.tonic)} ${s.key.mode === "minor" ? "min" : "maj"}</span>` : ""} · ${fmtTime(s.duration_s)} · ${s.banks} banks</div>`;
       li.addEventListener("click", () => onOpen(s.id));
       list.append(li);
     }

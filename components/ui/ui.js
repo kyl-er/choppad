@@ -24,7 +24,7 @@ export async function mountSong(root, { id, audio, input }) {
   <section class="song-view">
     <header class="lcd">
       <div class="lcd-main"><div class="lcd-title">${esc(meta.title)}</div>
-        <div class="lcd-row"><b class="bpm"></b> BPM · <b class="meter"></b> · <span class="pos">bar 1.1</span> · <span class="clock">0:00.0</span> / ${fmt(meta.duration_s)}
+        <div class="lcd-row"><b class="bpm"></b> BPM · <b class="meter"></b> · <b class="key" title="musical key"></b> · <span class="pos">bar 1.1</span> · <span class="clock">0:00.0</span> / ${fmt(meta.duration_s)}
         · confidence <span class="conf">${Math.round((analysis.confidence ?? 0) * 100)}%</span></div></div>
       <div class="master"><label>Volume <input class="vol" type="range" min="0" max="1.5" step="0.01"></label>
         <div class="vu"><i></i></div></div>
@@ -105,7 +105,7 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="row"><button class="ai-run">Analyze with AI</button><button class="ai-bank" disabled>load AI bank on pads</button></div>
         <div class="ai-out muted small">Sends a 32 kbps mono copy to an OpenRouter audio model (≤ $0.05/song, cached). Sections above work offline.</div></div>
       <div class="panel export"><h3>Export</h3>
-        <div class="row"><button class="exp-h2">install bank → Hydrogen kit</button><button class="exp-sfz">write bank → SFZ</button></div>
+        <div class="row"><button class="exp-h2">install bank → Hydrogen kit</button><button class="exp-sfz">write bank → SFZ</button><button class="exp-zip">bank → zip of WAVs</button></div>
         <div class="exp-out muted small">Exports the current bank (16 pads). The Hydrogen kit gets your tone/reverb baked in; SFZ stays dry.</div></div>
       <div class="panel"><h3>MIDI</h3><ul class="devices"></ul>
         <div class="row"><button class="learn">Learn pads</button><button class="reset">Reset map</button></div>
@@ -536,10 +536,21 @@ export async function mountSong(root, { id, audio, input }) {
     const out = $(".exp-out");
     out.textContent = "exporting…";
     const r = await session.exportBank(kind);
-    out.innerHTML = r.ok ? `✓ ${esc(r.path)}${r.note ? "<br>" + esc(r.note) : ""}` : `<span class="error">${esc(r.error)}</span>`;
+    out.innerHTML = r.ok ? `✓ ${esc(r.path)}${r.url ? ` <a class="exp-download" href="${esc(r.url)}" download>download</a>` : ""}${r.note ? "<br>" + esc(r.note) : ""}` : `<span class="error">${esc(r.error)}</span>`;
   }
   $(".exp-h2").addEventListener("click", () => doExport("hydrogen"));
   $(".exp-sfz").addEventListener("click", () => doExport("sfz"));
+  $(".exp-zip").addEventListener("click", () => doExport("zip"));
+
+  // ---- key (shown in the LCD; detected once on the server for songs that have none) ----
+  const keyText = (k) => (k ? `${k.tonic} ${k.mode === "minor" ? "min" : "maj"}` : "");
+  const renderKey = () => {
+    const k = analysis.key;
+    $(".key").textContent = keyText(k);
+    $(".key").title = k ? `key ${k.tonic} ${k.mode} (confidence ${Math.round(k.confidence * 100)}%)` : "musical key";
+  };
+  renderKey();
+  if (!analysis.key) session.detectKey().then((k) => { if (k) { renderKey(); window.choppad?.library?.refresh?.(); } });
 
   // ---- modes ----
   $(".mode").addEventListener("change", (e) => setting({ mode: e.target.value }));

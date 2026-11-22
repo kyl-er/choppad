@@ -178,8 +178,13 @@ def export_kit(media_root, kid, kind, *, hydrogen_root=None):
         out = os.path.join(kits_root(media_root), kid, f"{kid}.sfz")
         write_sfz(pads, out, default_audio=pads[0]["audio"])
         return {"path": out, "note": f"{len(pads)} pads from {len({p['audio'] for p in pads})} song(s)"}
+    if kind == "zip":
+        from choppad_export import write_zip
+        out = os.path.join(kits_root(media_root), kid, f"{kid}.zip")
+        write_zip(pads, out)
+        return {"path": out, "note": f"{len(pads)} WAVs"}
     if kind != "hydrogen":
-        raise ValueError("kind must be hydrogen or sfz")
+        raise ValueError("kind must be hydrogen, sfz or zip")
     name = re.sub(r"[^\w -]+", "", f"ChopPad kit {kit['name']}")[:60].strip()
     root = hydrogen_root or os.environ.get("CHOPPAD_HYDROGEN_DIR") or os.path.expanduser("~/.local/share/hydrogen/data/drumkits")
     out = os.path.join(root, name)

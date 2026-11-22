@@ -1,7 +1,7 @@
 import json, os, shutil, sys, tempfile, unittest, wave
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from _common import *  # noqa: E402,F403
-from choppad_export import bank_pads, export_hydrogen, export_sfz, kit_pads, write_hydrogen, write_sfz  # noqa: E402
+from choppad_export import bank_pads, export_hydrogen, export_sfz, export_zip, kit_pads, write_hydrogen, write_sfz, write_zip  # noqa: E402
 from choppad_stretch import stretch_slice  # noqa: E402
 
 
@@ -89,6 +89,30 @@ class ExportW3(unittest.TestCase):
             kit_pads(self.root, kit)
         with self.assertRaises(ValueError):
             kit_pads(self.root, {"pads": [{"song_id": "../etc", "start": 0, "end": 1}] + [None] * 15})
+
+    def test_zip_of_the_bank(self):
+        import io, zipfile
+        d = self.dirs["songA"]
+        r = stretch_slice(d, 2.0, 2.5, 2.0)
+        ov = {"0:1": {"start": 2.0, "end": 2.5, "stretch": {"ratio": 2.0, "url": f"/media/songA/stretch/{r['file']}"}},
+              "0:2": {"start": 5.0, "end": 5.3, "song": "songB"}}
+        path = export_zip(d, bank=0, overrides=ov)
+        self.assertTrue(path.endswith("songA-bank1.zip"))
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            self.assertEqual(names, [f"pad{i:02d}.wav" for i in range(1, 17)])
+            self.assertIsNone(z.testzip())
+            durs = []
+            for n in names[:3]:
+                with wave.open(io.BytesIO(z.read(n))) as w:
+                    self.assertEqual((w.getnchannels(), w.getsampwidth(), w.getframerate()), (2, 2, 44100))
+                    durs.append(w.getnframes() / w.getframerate())
+        self.assertAlmostEqual(durs[0], 0.5, delta=0.001)   # grid chop at 120 BPM
+        self.assertAlmostEqual(durs[1], 1.0, delta=0.002)   # stretched x2
+        self.assertAlmostEqual(durs[2], 0.3, delta=0.001)   # slice of the other song
+        # a short last bank has fewer files
+        with zipfile.ZipFile(export_zip(d, out_path=os.path.join(self.root, "b2.zip"), bank=2, overrides={})) as z:
+            self.assertEqual(len(z.namelist()), len(load_fixture("chops")["banks"][2]))
 
 
 if __name__ == "__main__":
