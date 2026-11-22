@@ -8,6 +8,8 @@ import struct
 import wave
 import xml.etree.ElementTree as ET
 
+import choppad_voice as V  # noqa: E402  (W3b: pad filter and envelope)
+
 HYDROGEN_NS = "http://www.hydrogen-music.org/drumkit"
 
 
@@ -42,6 +44,39 @@ def _song_audio(media_root, song_id):
     return path
 
 
+_RESAMPLE_URL = re.compile(r"^/media/([A-Za-z0-9_-]{1,64})/resample/([0-9a-f]{16}\.wav)$")
+STEMS = ("drums", "bass", "vocals", "other")
+
+
+def _resample_path(media_root, url):
+    """File of a pad's resample (`src: /media/<id>/resample/<hash>.wav`)."""
+    m = _RESAMPLE_URL.match(url or "")
+    if not m:
+        raise ValueError(f"bad resample url {url!r}")
+    path = os.path.join(media_root, m.group(1), "resample", m.group(2))
+    if not os.path.isfile(path):
+        raise ValueError(f"resample {url} is missing; resample it again")
+    return path
+
+
+def _stem_path(media_root, song_id, stem):
+    """File of a pad's stem (`stem: "drums"`) of `song_id`."""
+    if stem not in STEMS or not _ID.match(str(song_id or "")):
+        raise ValueError(f"bad stem {stem!r}")
+    path = os.path.join(media_root, song_id, "stems", f"{stem}.wav")
+    if not os.path.isfile(path):
+        raise ValueError(f"the {stem} stem of {song_id!r} is missing; run the stems step for that song")
+    return path
+
+
+def _sample_rate(path):
+    try:
+        with wave.open(path, "rb") as w:
+            return w.getframerate()
+    except (OSError, wave.Error, EOFError):
+        return 44100
+
+
 def _stretch_path(media_root, url):
     m = _STRETCH_URL.match(url or "")
     if not m:
@@ -74,11 +109,18 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def bank_pads(media_dir, bank=0, overrides=None, pad_params=None):
+def project_pad_sounds(media_dir):
+    """Same as project_pad_params (older name)."""
+    return project_pad_params(media_dir)
+
+
+def bank_pads(media_dir, bank=0, overrides=None, pad_params=None, sounds=None):
     """THE definition of "the audio of pad p on bank b, as played": the chop table plus the project's custom slices
     (`overrides`, default: the saved project.json), their stretch renderings and slices from other songs. Empty pads are
     left out. Every pad dict also carries the pad's sound settings that a DAW kit can express: `gain_db` and `pitch`
-    (semitones), from `pad_params` (16 dicts, default: the saved project's `pads`).
+    (semitones), and `params`, the full sound dict (filter, envelope, mute group) that the exporters bake into the audio
+    or write as opcodes; both come from `pad_params` (16 dicts; `sounds` is the same argument under its older name;
+    default: the saved project's `pads`).
     The Export button (Hydrogen kit, SFZ, zip) and the DAW bridge both start here."""
     chops = _read_json(media_dir, "chops.json")
     media_root = os.path.dirname(os.path.abspath(media_dir))
@@ -86,13 +128,20 @@ def bank_pads(media_dir, bank=0, overrides=None, pad_params=None):
     if overrides is None:
         overrides = project_overrides(media_dir)
     indices = chops["banks"][bank] if 0 <= bank < len(chops["banks"]) else []
+    if pad_params is None:
+        pad_params = sounds
     params = pad_params if pad_params is not None else project_pad_params(media_dir)
     pads = []
     for pad in range(16):
         o = overrides.get(f"{bank}:{pad}")
         if isinstance(o, dict) and _num(o.get("start")) and _num(o.get("end")) and o["end"] > o["start"]:
             start, end = o["start"], o["end"]
-            audio = own if not o.get("song") or o["song"] == os.path.basename(os.path.abspath(media_dir)) else _song_audio(media_root, o["song"])
+            own_id = os.path.basename(os.path.abspath(media_dir))
+            audio = own if not o.get("song") or o["song"] == own_id else _song_audio(media_root, o["song"])
+            if o.get("src"):                      # W3b: a resample, or a stem of the song, instead of the song's own audio
+                audio = _resample_path(media_root, o["src"])
+            elif o.get("stem"):
+                audio = _stem_path(media_root, o.get("song") or own_id, o["stem"])
             stretch = _stretch_path(media_root, o["stretch"]["url"]) if o.get("stretch") else None
         elif pad < len(indices):
             ch = chops["chops"][indices[pad]]
@@ -100,7 +149,8 @@ def bank_pads(media_dir, bank=0, overrides=None, pad_params=None):
         else:
             continue
         pr = params[pad] if pad < len(params) and isinstance(params[pad], dict) else {}
-        pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch,
+        pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch, "sr": _sample_rate(audio),
+                     "params": pr,
                      "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
                      "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
     return pads
@@ -113,15 +163,20 @@ def kit_pads(media_root, kit):
         if not p:
             continue
         audio = _song_audio(media_root, p["song_id"])
+        if p.get("src"):                          # W3b: a resample or a stem of that song
+            audio = _resample_path(media_root, p["src"])
+        elif p.get("stem"):
+            audio = _stem_path(media_root, p["song_id"], p["stem"])
         pr = p.get("params") or {}
-        pads.append({"pad": pad, "start": p["start"], "end": p["end"], "audio": audio,
+        pads.append({"pad": pad, "start": p["start"], "end": p["end"], "audio": audio, "sr": _sample_rate(audio),
                      "stretch": _stretch_path(media_root, p["stretch"]["url"]) if p.get("stretch") else None,
+                     "params": pr,
                      "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
                      "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
     return pads
 
 
-def export_sfz(media_dir, out_path=None, *, bank=0, overrides=None):
+def export_sfz(media_dir, out_path=None, *, bank=0, overrides=None, sounds=None):
     """Write a zero-copy .sfz referencing audio.wav with sample-frame offset/end, loop_mode=one_shot,
     group=1, off_by=1, ampeg_attack=0.002, and <region> key=36+pad for each pad of the bank.
     Custom slices follow `overrides` (default: the saved project); a stretched pad points at its rendered WAV
@@ -130,23 +185,40 @@ def export_sfz(media_dir, out_path=None, *, bank=0, overrides=None):
     if out_path is None:
         meta_id = meta.get("id", "choppad")
         out_path = os.path.join(media_dir, f"{meta_id}-bank{bank}.sfz")
-    return write_sfz(bank_pads(media_dir, bank, overrides), out_path, default_audio=os.path.join(media_dir, "audio.wav"))
+    return write_sfz(bank_pads(media_dir, bank, overrides, sounds), out_path, default_audio=os.path.join(media_dir, "audio.wav"))
+
+
+def mute_group_of(p):
+    """A pad's mute group 0..8 (0 = none) from its sound params."""
+    g = (p.get("params") or {}).get("muteGroup") or 0
+    return int(g) if isinstance(g, (int, float)) and not isinstance(g, bool) and 0 <= g <= 8 else 0
+
+
+def groups_in_use(pads):
+    """True when any pad has a mute group. Without any, exports keep the old behaviour (all pads cut each other)."""
+    return any(mute_group_of(p) for p in pads)
 
 
 def write_sfz(pads, out_path, *, default_audio):
-    sr = 44100
+    grouped = groups_in_use(pads)
     here = os.path.dirname(os.path.abspath(out_path))
     rel = lambda p: os.path.relpath(p, here).replace(os.sep, "/")  # noqa: E731
     lines = [
         "// generated by ChopPad export",
-        f"<group> sample={rel(default_audio)} loop_mode=one_shot group=1 off_by=1 ampeg_attack=0.002 ampeg_release=0.003",
+        # W3b: with mute groups in use each region names its own group (group=N off_by=N); otherwise the old "one group" choke
+        f"<group> sample={rel(default_audio)} loop_mode=one_shot " + ("" if grouped else "group=1 off_by=1 ")
+        + "ampeg_attack=0.002 ampeg_release=0.003",
     ]
     for p in pads:
+        ops = V.sfz_opcodes(p.get("params"))   # W3b: filter (fil_type, cutoff, resonance) and envelope (ampeg_*)
+        if grouped and mute_group_of(p):
+            ops += f" group={mute_group_of(p)} off_by={mute_group_of(p)}"
         if p["stretch"]:
-            lines.append(f"<region> sample={rel(p['stretch'])} key={36 + p['pad']}")
+            lines.append(f"<region> sample={rel(p['stretch'])} key={36 + p['pad']}{ops}")
             continue
         extra = "" if os.path.abspath(p["audio"]) == os.path.abspath(default_audio) else f" sample={rel(p['audio'])}"
-        lines.append(f"<region>{extra} key={36 + p['pad']} offset={round(p['start'] * sr)} end={round(p['end'] * sr)}")
+        sr = p.get("sr") or 44100   # the sample rate of the file the region plays (a resample may not be 44.1 kHz)
+        lines.append(f"<region>{extra} key={36 + p['pad']} offset={round(p['start'] * sr)} end={round(p['end'] * sr)}{ops}")
 
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -178,13 +250,13 @@ def _slice_declicked(frames, nch, sampwidth, start, end, sr):
     return bytes(out)
 
 
-def export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None, overrides=None, choke=True):
+def export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None, overrides=None, sounds=None, choke=True):
     """Slice audio.wav for each pad in the bank into out_dir/chop_00.wav..chop_NN.wav (s16le 44.1k stereo
     with 2.5 ms fade-in and 3 ms fade-out) and write out_dir/drumkit.xml (muteGroup 0 = choke, or -1 with choke=False;
     midiOutNote=36+pad; per-pad gain and pitch in the instrument's `gain` and `pitchOffset`).
     Custom slices follow `overrides` (default: the saved project); a stretched pad writes its rendering, a pad from
     another song is cut from that song. Returns the written drumkit.xml path."""
-    return write_hydrogen(bank_pads(media_dir, bank, overrides), out_dir, kit_name, choke=choke)
+    return write_hydrogen(bank_pads(media_dir, bank, overrides, sounds), out_dir, kit_name, choke=choke)
 
 
 def _read_wav(path, cache):
@@ -202,12 +274,20 @@ def pad_pcm(p, cache):
     else:
         start = round(p["start"] * sr) * nch * sampwidth
         end = round(p["end"] * sr) * nch * sampwidth
+    if sampwidth == 2 and p.get("params") and not V.is_neutral(p["params"]):
+        # W3b: the pad's filter and envelope are baked in (the envelope replaces the plain 2.5 ms / 3 ms declick)
+        import numpy as np
+        seg = np.frombuffer(frames[start:end], dtype="<i2")
+        seg = seg[: len(seg) // nch * nch].reshape(-1, nch).astype(np.float32) / 32768.0
+        if len(seg):
+            y = np.clip(np.round(V.bake(seg, sr, p["params"]) * 32768.0), -32768, 32767).astype("<i2")
+            return sr, nch, sampwidth, y.tobytes()
     return sr, nch, sampwidth, _slice_declicked(frames, nch, sampwidth, start, end, sr)
 
 
-def export_zip(media_dir, out_path=None, *, bank=0, overrides=None):
+def export_zip(media_dir, out_path=None, *, bank=0, overrides=None, sounds=None):
     """Zip of the bank's pads as WAV files pad01.wav .. pad16.wav (empty pads left out). Returns the .zip path."""
-    return write_zip(bank_pads(media_dir, bank, overrides), out_path or os.path.join(
+    return write_zip(bank_pads(media_dir, bank, overrides, sounds), out_path or os.path.join(
         media_dir, f"{_read_json(media_dir, 'meta.json', {}).get('id', 'choppad')}-bank{bank + 1}.zip"))
 
 
@@ -240,7 +320,7 @@ def hydrogen_pitch(pitch):
     return round(max(-24.0, min(24.0, float(pitch or 0.0))), 4)
 
 
-def _hy_instrument(inst_list, p, wav_name, choke):
+def _hy_instrument(inst_list, p, wav_name, choke, grouped=False):
     """One <instrument> in the element order drumkit.xsd demands (so `h2cli -c` accepts the kit as current format).
     Per-pad gain and pitch go into the instrument (`gain`, `pitchOffset`), not into the WAV, so the WAVs stay identical
     to the zip export and a Hydrogen user can still change them."""
@@ -266,7 +346,8 @@ def _hy_instrument(inst_list, p, wav_name, choke):
     el("Release", "1000")
     # Hydrogen: -1 = no mute group, 0 and up = a real group (all instruments of one group cut each other off; the
     # shipped kits use -1). ChopPad's "choke" setting (on by default) is exactly "one pad at a time", i.e. one group.
-    el("muteGroup", "0" if choke else "-1")
+    # With per-pad mute groups in use, each pad gets its own group (none = -1); otherwise the global choke decides.
+    el("muteGroup", (mute_group_of(p) or -1) if grouped else ("0" if choke else "-1"))
     el("midiOutChannel", "-1")
     el("midiOutNote", 36 + pad)
     el("isStopNote", "false")
@@ -305,6 +386,7 @@ def write_hydrogen(pads, out_dir, kit_name=None, *, choke=True):
     ET.SubElement(comp, "name").text = "Main"
     ET.SubElement(comp, "volume").text = "1.0"
     inst_list = ET.SubElement(root, "instrumentList")
+    grouped = groups_in_use(pads)
 
     for p in pads:
         pad = p["pad"]
@@ -315,7 +397,7 @@ def write_hydrogen(pads, out_dir, kit_name=None, *, choke=True):
             dst.setsampwidth(sampwidth)
             dst.setframerate(sr)
             dst.writeframes(data)
-        _hy_instrument(inst_list, p, wav_name, choke)
+        _hy_instrument(inst_list, p, wav_name, choke, grouped)
 
     ET.indent(root, space=" ")
     xml_path = os.path.join(out_dir, "drumkit.xml")

@@ -85,12 +85,13 @@ def swung_beat(beat, quant, swing):
 
 def content_key(pads, bank, fx, choke):
     """Hash of everything that decides what the kit sounds like: for every pad the audio file (path, size, mtime), the
-    slice, the stretch rendering, gain and pitch; plus bank, master fx and choke."""
+    slice, the stretch rendering, gain, pitch and the sound params baked into the WAV (filter, envelope, mute group);
+    plus bank, master fx and choke."""
     def stat(path):
         st = os.stat(path) if path else None
         return [path, st.st_size, int(st.st_mtime)] if st else None
     blob = json.dumps([KIT_FORMAT, bank, fx or {}, bool(choke)] +
-                      [[p["pad"], stat(p["audio"]), p["start"], p["end"], stat(p["stretch"]), p.get("gain_db"), p.get("pitch")]
+                      [[p["pad"], stat(p["audio"]), p["start"], p["end"], stat(p["stretch"]), p.get("gain_db"), p.get("pitch"), p.get("params")]
                        for p in pads], sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:8]
 
@@ -127,15 +128,25 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
     kit_dir = os.path.join(out_root, kit_name)
     if not os.path.isfile(os.path.join(kit_dir, "drumkit.xml")):
         stage = kit_dir + ".part"
-        shutil.rmtree(stage, ignore_errors=True)
-        X.render_bank_kit(pads, stage, kit_name, fx=fx, choke=choke)
-        os.makedirs(out_root, exist_ok=True)
-        shutil.rmtree(kit_dir, ignore_errors=True)
-        os.replace(stage, kit_dir)
+        try:
+            shutil.rmtree(stage, ignore_errors=True)
+            X.render_bank_kit(pads, stage, kit_name, fx=fx, choke=choke)
+            os.makedirs(out_root, exist_ok=True)
+            shutil.rmtree(kit_dir, ignore_errors=True)
+            os.replace(stage, kit_dir)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
     by_pad = {p["pad"]: p for p in pads}
     slots = [Chop(p, os.path.join(kit_dir, f"chop_{p:02d}.wav"), 36 + p, by_pad[p]["gain_db"], by_pad[p]["pitch"])
              if p in by_pad else None for p in range(PADS)]
-    bpm = float(chops.get("bpm") or 120.0)
+    # W3b: the project tempo (project.json "tempo": {bpm, follow}) wins over the song's own tempo
+    bpm = float(((proj.get("tempo") or {}).get("bpm")) or chops.get("bpm") or 120.0)
+    groups = [X.mute_group_of(by_pad[i]) if i in by_pad else 0 for i in range(PADS)]
+    if any(groups):  # W3b: mute groups travel inside the pattern dict (see h2song.build_song)
+        pattern = {**pattern, "mute_groups": groups}
+    song = proj.get("song")
+    if isinstance(song, dict) and song.get("mode") == "song" and song.get("chain") and song.get("patterns"):
+        pattern = {**pattern, "song": song}  # W3b: song mode: one Hydrogen pattern per ChopPad pattern, the chain as the sequence
     return DawProject(song_id=sid, title=title, bpm=bpm, beats_per_bar=int(chops.get("beats_per_bar") or 4), bank=bank,
                       chops=slots, pattern=pattern, kit_name=kit_name, kit_dir=kit_dir, key=key,
                       swing=swing, quant=quant, choke=choke)

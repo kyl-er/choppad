@@ -207,4 +207,27 @@ def separate(media_dir: str, *, backend: str | None = None) -> dict[str, str]   
 - Exports (Hydrogen, SFZ, zip) follow the pads as played: custom slices, other-song sources and stretch renderings, read from the request body or the saved `project.json`.
 - Session: `stretchPad(bank, pad, {ratio|target_bpm})`, `stretchBank`, `stretchPattern`, `clearStretch`, `saveBankAsKit(name)`, `loadKit(kitOrId)`, `detectKey()`; regrid change `{mode: "grid"|"transient", sensitivity?}`; event `key`.
 - Engine: `setPadBuffer(bank, pad, buffer|null, {whole, gain})`, `getPadBuffer(bank, pad)`; nothing asynchronous on the trigger path.
-- Open: there is no project tempo yet (the sequencer runs at `chops.bpm`), so a stretched pattern cannot play at a new tempo.
+- Kit pads may carry `src`, `stem` and `stretch.fit` (§14).
+
+## 14. Sampler core (W3 second slice, built)
+Saved project, new optional keys (absent = defaults, so old `project.json` files load unchanged):
+```
+project.tempo: { bpm: number | null, follow: bool }   // null = the song's own tempo; follow = fitted pads are re-fitted when it changes
+project.song:  { patterns: [{id, name, bars, events}], chain: [{pattern: id, repeats: 1..64}], mode: "pattern"|"song", current: id|null }
+pads[i] gains: decay 0..10 s (0), sustain 0..1 (1), filter {type: off|lp|hp|bp, cutoff 20..20000 Hz (8000), q 0.1..24 (0.7)}, muteGroup 0..8 (0)
+overrides["b:p"] gains optional src: "/media/<id>/resample/<16hex>.wav" (a resample) and stem: "drums"|"bass"|"vocals"|"other"
+stretch: { ratio, url, fit? }   // fit = the project tempo this rendering was made for; absent = stretched by hand
+pattern events gain optional pitch (semitones) and cutoff (Hz)
+settings gains sixteen: null | {pad, mode: "velocity"|"pitch"|"filter"}   // view setting, not saved
+```
+- `project.song.current` names the entry of `patterns` that `project.pattern` is; every `pattern.*` action is mirrored into it; `project.pattern` stays authoritative on load.
+- Actions (all with fixture cases, in both reducers): `tempo.set {bpm|null, follow?}`, `slice.src {bank, pad, src|null, start, end}`, `slice.stem {bank, pad, stem|null}`, `song.addPattern {name?, bars?, copy?, beatsPerBar?}`, `song.selectPattern {id}`, `song.renamePattern {id, name}`, `song.removePattern {id}`, `song.setChain {chain}`, `song.setMode {mode}`, `song.load {song|null}`. `kit.load` pads may carry `src` or `stem`. `slice.stretch` is refused on a pad that has `src`.
+- The global `settings.choke` (default on) still means every pad cuts every pad; per-pad mute groups matter once it is off.
+- Session: `setTempo(bpm|null, {follow})`, `fitToTempo({scope: "pattern"|"bank"})`, `refitAll()`, `whenFitted()`, `tempoBpm`, `setSixteenLevels({pad, mode})`, `sixteen`, `resample({bars|seconds, source: "pattern"|"master", pad, bank?})`, `songMidi()`, `renderSongWav()`, `songPosition()`, `separateStems({force})`, `setStem(bank, pad, stem|null)`; event `stems`; `hit(pad, vel, {raw})` (raw skips the 16-levels mapping; used for remote hits).
+- Tempo: the sequencer, metronome, note repeat, MIDI export, offline render and the DAW bridge use the project tempo when set. A pad is "fitted" when its `stretch.fit` is set; hand-stretched pads are never re-fitted.
+- Resample: pattern source renders offline (deterministic); master source records the bus through an AudioWorklet (`GET /capture-worklet.js`). `POST /api/songs/<id>/resample` (raw 16-bit WAV body) → `{url, hash, duration, sample_rate, channels}`; `GET /media/<id>/resample/<hash>.wav`. Transport command `resample {source, bars|seconds, pad, bank?}` asks the open browser to do it.
+- Song mode: the sequencer plays the chain bar-accurately; recording is off while a chain plays; the Hydrogen song gets one pattern per ChopPad pattern with the chain as its sequence, plus velocity and pitch per note.
+- Exports: the pad's filter and envelope are baked into Hydrogen-kit and zip WAVs; SFZ gets `fil_type`, `cutoff`, `resonance`, `ampeg_*`. With pad mute groups in use each pad carries its own group (Hydrogen `muteGroup`, SFZ `group`/`off_by`); otherwise the global choke decides (§7).
+- Stems (§12 as built): `separate(media_dir, *, backend=None, force=False)`; backend from `CHOPPAD_STEMS_BACKEND` (default `none` → `StemsUnavailable`); `remote` uses `CHOPPAD_STEMS_URL`, optional `CHOPPAD_STEMS_KEY` (Bearer), `CHOPPAD_STEMS_TIMEOUT`: raw POST of `audio.wav`, zip of four WAVs back, validated and cached in `media/<id>/stems/`. `POST /api/songs/<id>/stems {force?}` → 501 or 502 on failure; `GET /media/<id>/stems/<name>.wav`; `POST …/stretch` accepts `stem`.
+- CLI: `tempo`, `song`, `resample`, `stems`; `pad` gains `--filter-type --cutoff --q --decay --sustain --mute-group`; `pattern` gains `--pitch --cutoff`. MCP: `tempo`, `song`, `resample`, `stems`.
+- Known limits: the master limiter adds a constant ~6 ms to live audio and renders; MIDI export ignores per-event pitch; per-hit cutoff does not reach Hydrogen or SFZ; reverse is not carried into exports.

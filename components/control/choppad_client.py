@@ -24,7 +24,8 @@ PRESETS = {  # twin of components/ui/fx.js PRESETS
     "radio": {"tone": 0, "low": -8, "mid": 6, "high": -6, "filter": 0.45, "reverb": 0, "size": 0.5},
 }
 FX_KEYS = ("tone", "low", "mid", "high", "filter", "reverb", "size")
-PAD_KEYS = ("gainDb", "pitch", "attack", "release", "reverse", "mode")
+PAD_KEYS = ("gainDb", "pitch", "attack", "decay", "sustain", "release", "reverse", "mode", "filter", "muteGroup")
+FILTER_TYPES = ("off", "lp", "hp", "bp")
 
 
 class ControlError(Exception):
@@ -203,10 +204,11 @@ class Client:
         if p:
             acts.append({"type": "pad.set", "pad": pad, "params": p})
         if not acts:
-            raise ControlError("nothing to change; give --gain/--pitch/--attack/--release/--reverse/--mode or --reset")
+            raise ControlError("nothing to change; give --gain/--pitch/--attack/--decay/--sustain/--release/--reverse/--mode/"
+                               "--filter-type/--cutoff/--q or --reset")
         return self.actions(sid, acts)
 
-    def pattern_set(self, sid, steps=None, bars=None, bank=None, vel=1.0, add=False):
+    def pattern_set(self, sid, steps=None, bars=None, bank=None, vel=1.0, add=False, pitch=None, cutoff=None):
         """Replace the pattern with `steps` ("1:0,8 3:4,12"), or with add=True merge them in. Only `bars`: change loop length."""
         d = self.song(sid)
         cur = (d.get("project") or {}).get("pattern") or {"bars": 2, "events": []}
@@ -217,13 +219,191 @@ class Client:
             return self.actions(sid, [{"type": "pattern.setBars", "bars": bars, "beatsPerBar": bpb}])
         bank = bank if bank is not None else (d.get("view") or {}).get("bank") or 0
         use_bars = bars if bars is not None else cur.get("bars", 2)
-        events = pattern_events(parse_steps(steps, use_bars, bpb), bank, vel)
+        events = pattern_events(parse_steps(steps, use_bars, bpb), bank, vel, pitch, cutoff)
         if add:
             have = {(e["pad"], round(e["beat"] * 4)) for e in cur.get("events", [])}
             events = cur.get("events", []) + [e for e in events if (e["pad"], round(e["beat"] * 4)) not in have]
             if bars is None:
                 use_bars = cur.get("bars", 2)
         return self.actions(sid, [{"type": "pattern.load", "pattern": {"bars": use_bars, "events": events}}])
+
+    # ---- W3b: project tempo ----
+    def _slice_of(self, d, bank, pad):
+        """(source song id, start, end) of the slice on (bank, pad), or None when the pad is empty."""
+        o = ((d.get("project") or {}).get("overrides") or {}).get(f"{bank}:{pad}")
+        if o and o.get("end", 0) > o.get("start", 0):
+            return (o.get("song") or d["meta"]["id"], o["start"], o["end"])
+        chops = d["chops"]
+        try:
+            ch = chops["chops"][chops["banks"][bank][pad]]
+        except (IndexError, TypeError):
+            return None
+        return (d["meta"]["id"], ch["start"], ch["end"])
+
+    def fit_tempo(self, sid, scope="pattern", refit=False):
+        """Stretch the pads of `scope` ("pattern": the pads the pattern plays; "bank": the bank on screen) to the project
+        tempo with the server's stretch endpoint, mark them `fit`, and save it as slice.stretch actions. `refit`: instead
+        every pad that was fitted before. Pads stretched by hand and resample pads are left alone.
+        Returns {tempo, fitted: [{bank, pad, ratio}], skipped: [{bank, pad, reason}]}."""
+        d = self.song(sid)
+        proj = d.get("project") or {}
+        T = (proj.get("tempo") or {}).get("bpm")
+        ov = proj.get("overrides") or {}
+        if refit:
+            keys = [k for k, o in ov.items() if (o.get("stretch") or {}).get("fit") is not None]
+        elif scope == "bank":
+            bank = (d.get("view") or {}).get("bank") or 0
+            keys = [f"{bank}:{p}" for p in range(PADS)]
+        elif scope == "pattern":
+            keys = sorted({f"{e.get('bank', 0)}:{e['pad']}" for e in (proj.get("pattern") or {}).get("events", [])})
+        else:
+            raise ControlError("scope must be pattern or bank")
+        if not refit and T is None:
+            raise ControlError("set a project tempo first (choppad tempo ID --bpm N)")
+        acts, fitted, skipped = [], [], []
+        for k in keys:
+            bank, pad = (int(x) for x in k.split(":"))
+            o = ov.get(k) or {}
+            st = o.get("stretch")
+            if T is None:
+                if st and st.get("fit") is not None:
+                    acts.append({"type": "slice.stretch", "bank": bank, "pad": pad, "stretch": None})
+                    fitted.append({"bank": bank, "pad": pad, "ratio": 1})
+                continue
+            if st and st.get("fit") is None:
+                skipped.append({"bank": bank, "pad": pad, "reason": "stretched by hand"})
+                continue
+            if o.get("src"):
+                skipped.append({"bank": bank, "pad": pad, "reason": "resample (already at the project tempo)"})
+                continue
+            sl = self._slice_of(d, bank, pad)
+            if not sl:
+                continue
+            if st and st.get("fit") == T:
+                skipped.append({"bank": bank, "pad": pad, "reason": "already fitted"})
+                continue
+            body = {"bank": bank, "pad": pad, "start": sl[1], "end": sl[2], "target_bpm": T}
+            if o.get("stem"):  # a pad that plays a stem is stretched from that stem
+                body["stem"] = o["stem"]
+            r = self.post(f"/api/songs/{_sid(sl[0])}/stretch", body, timeout=300)
+            if abs(r["ratio"] - 1) < 0.002:
+                if st:
+                    acts.append({"type": "slice.stretch", "bank": bank, "pad": pad, "stretch": None})
+            else:
+                acts.append({"type": "slice.stretch", "bank": bank, "pad": pad,
+                             "stretch": {"ratio": r["ratio"], "url": r["url"], "fit": T}})
+            fitted.append({"bank": bank, "pad": pad, "ratio": round(r["ratio"], 4)})
+        if acts:
+            self.actions(sid, acts)
+        return {"tempo": T, "fitted": fitted, "skipped": skipped}
+
+    def tempo(self, sid, bpm=None, song=False, follow=None, fit=None):
+        """Show or change the project tempo. `bpm` sets it, `song=True` goes back to the song's own tempo, `follow`
+        (bool) = fitted pads follow tempo changes, `fit` = "pattern" | "bank" fits those pads now. When follow is on,
+        pads fitted earlier are re-fitted to a new tempo."""
+        if bpm is not None and not 20 <= bpm <= 400:
+            raise ControlError("tempo must be between 20 and 400 BPM")
+        d = self.song(sid)
+        cur = (d.get("project") or {}).get("tempo") or {"bpm": None, "follow": True}
+        act = {"type": "tempo.set"}
+        if song:
+            act["bpm"] = None
+        elif bpm is not None:
+            act["bpm"] = bpm
+        if follow is not None:
+            act["follow"] = follow
+        out = {"tempo": cur["bpm"], "follow": cur["follow"], "song_bpm": round(d["chops"]["bpm"], 3)}
+        if len(act) > 1:
+            r = self.actions(sid, [act])
+            out.update(applied=r.get("applied"), listeners=r.get("listeners"))
+            t = r["project"].get("tempo") or {"bpm": None, "follow": True}
+            out.update(tempo=t["bpm"], follow=t["follow"])
+            if t["follow"] and (bpm is not None or song):
+                fit_r = self.fit_tempo(sid, refit=True)
+                if fit_r["fitted"]:
+                    out["refitted"] = len(fit_r["fitted"])
+        if fit:
+            out["fit"] = self.fit_tempo(sid, fit)
+        return out
+
+    # ---- W3b: song mode ----
+    def song_show(self, sid):
+        """The song-mode state: {mode, editing, patterns: [{id, name, bars, hits}], chain: [{pattern, repeats}], bars}."""
+        d = self.song(sid)
+        proj = d.get("project") or {}
+        s = proj.get("song") or {"patterns": [], "chain": [], "mode": "pattern", "current": None}
+        cur = proj.get("pattern") or {"bars": 2, "events": []}
+        pats = [{"id": p["id"], "name": p["name"], "bars": p["bars"], "hits": len(p["events"])} for p in s["patterns"]]
+        if not pats:  # an old project: the one pattern it has
+            pats = [{"id": None, "name": "(the pattern, not yet in a song)", "bars": cur.get("bars", 2), "hits": len(cur.get("events", []))}]
+        sizes = {p["id"]: p["bars"] for p in s["patterns"]}
+        return {"mode": s["mode"], "editing": s["current"], "patterns": pats, "chain": s["chain"],
+                "chain_bars": sum(sizes.get(c["pattern"], 0) * c["repeats"] for c in s["chain"])}
+
+    def song_edit(self, sid, op, pattern=None, name=None, bars=None, copy=False, chain=None, mode=None):
+        """Song-mode edits: op = add | select | rename | remove | chain | mode. `chain` is "p1:2 p2" (pattern:repeats) or a list
+        of {pattern, repeats}. Browsers show the change live."""
+        def need(v, what):
+            if v is None:
+                raise ControlError(f"{op} needs {what}")
+            return v
+        if op == "add":
+            bpb = self.song(sid)["chops"]["beats_per_bar"]
+            act = {"type": "song.addPattern", "beatsPerBar": bpb, **({"name": name} if name else {}),
+                   **({"bars": bars} if bars is not None else {}), **({"copy": True} if copy else {})}
+        elif op == "select":
+            act = {"type": "song.selectPattern", "id": need(pattern, "a pattern id")}
+        elif op == "rename":
+            act = {"type": "song.renamePattern", "id": need(pattern, "a pattern id"), "name": need(name, "a name")}
+        elif op == "remove":
+            act = {"type": "song.removePattern", "id": need(pattern, "a pattern id")}
+        elif op == "chain":
+            act = {"type": "song.setChain", "chain": parse_chain(chain) if isinstance(chain, str) else need(chain, "a chain like 'p1:2 p2'")}
+        elif op == "mode":
+            if mode not in ("pattern", "song"):
+                raise ControlError("mode must be pattern or song")
+            act = {"type": "song.setMode", "mode": mode}
+        else:
+            raise ControlError("song op must be add, select, rename, remove, chain or mode")
+        return self.actions(sid, [act])
+
+    # ---- W3b: stems ----
+    def stems(self, sid, force=False):
+        """Split the song into stems with the server's stems backend (CHOPPAD_STEMS_BACKEND=remote + CHOPPAD_STEMS_URL on the
+        server). Can take minutes. Returns {stems: [...], urls: {...}}; without a backend the server's message is the error."""
+        return self.post(f"/api/songs/{_sid(sid)}/stems", {"force": True} if force else {}, timeout=1800)
+
+    def pad_stem(self, sid, bank, pad, stem):
+        """Make a pad play its slice from a stem ("drums", "bass", "vocals", "other"), or from the full mix again with stem=None."""
+        if stem is not None and stem not in ("drums", "bass", "vocals", "other"):
+            raise ControlError("stem must be drums, bass, vocals or other")
+        return self.actions(sid, [{"type": "slice.stem", "bank": bank, "pad": pad, "stem": stem}])
+
+    # ---- W3b: resample ----
+    def resample(self, sid, pad, bars=None, seconds=None, source="pattern", bank=None, wait_s=120):
+        """Ask the browser that has the song open to resample into a new sound on `pad` (the browser renders or records, so
+        one must be open). source "pattern" = an offline render of the step pattern at the project tempo, "master" = a
+        live recording of the master bus (real time). Waits until the pad plays the new file; returns {bank, pad, src, start, end}."""
+        if source not in ("pattern", "master"):
+            raise ControlError("source must be pattern or master")
+        if (bars is None) == (seconds is None):
+            raise ControlError("give bars or seconds (one of them)")
+        if not (isinstance(pad, int) and 0 <= pad < PADS):
+            raise ControlError("pad must be 0..15")
+        bank = bank if bank is not None else self.current_bank(sid)
+        key = f"{bank}:{pad}"
+        old = (((self.song(sid).get("project") or {}).get("overrides") or {}).get(key) or {}).get("src")
+        body = {"source": source, "pad": pad, "bank": bank, **({"bars": bars} if bars is not None else {"seconds": seconds})}
+        r = self.transport(sid, "resample", **body)
+        if r.get("listeners") == 0:
+            raise ControlError("no browser has this song open; resampling is done by the browser (open the song, then retry)")
+        end = time.time() + wait_s
+        while time.time() < end:
+            o = (((self.song(sid).get("project") or {}).get("overrides") or {}).get(key) or {})
+            if o.get("src") and o["src"] != old:
+                return {"bank": bank, "pad": pad, "src": o["src"], "start": o["start"], "end": o["end"]}
+            time.sleep(0.5)
+        raise ControlError(f"the browser did not finish the resample within {wait_s}s (is audio enabled in that tab?)")
 
     def pattern_clear(self, sid):
         return self.actions(sid, [{"type": "pattern.clear"}])
@@ -282,6 +462,10 @@ def song_summary(d):
     key = ana.get("key") or meta.get("key")
     if key:
         out["key"] = key
+    if (proj.get("tempo") or {}).get("bpm"):  # W3b: the project tempo, when one is set
+        out["project_tempo"] = proj["tempo"]["bpm"]
+    if proj.get("song"):  # W3b: song mode, when the project has patterns or a chain
+        out["song"] = {"mode": proj["song"]["mode"], "patterns": len(proj["song"]["patterns"]), "chain_entries": len(proj["song"]["chain"])}
     bank = (d.get("view") or {}).get("bank")
     if bank is not None:
         out["current_bank"] = bank
@@ -377,16 +561,48 @@ def parse_steps(text, bars=None, beats_per_bar=4):
     return out
 
 
-def pattern_events(steps_by_pad, bank, vel=1.0):
-    return [{"beat": s / 4, "pad": pad, "bank": bank, "vel": vel, "pass": -1}
+def parse_chain(text):
+    """`"p1:2 p2 p1:3"` -> [{pattern: "p1", repeats: 2}, {pattern: "p2", repeats: 1}, ...] (groups split on whitespace, `;` or `,`)."""
+    out = []
+    for group in str(text).replace(";", " ").replace(",", " ").split():
+        pid, sep, reps = group.partition(":")
+        try:
+            n = int(reps) if sep else 1
+        except ValueError:
+            raise ControlError(f"bad chain entry {group!r}; expected PATTERN or PATTERN:REPEATS like p1:2") from None
+        if not pid or not 1 <= n <= 64:
+            raise ControlError(f"bad chain entry {group!r}; repeats are 1-64")
+        out.append({"pattern": pid, "repeats": n})
+    if not out:
+        raise ControlError("the chain is empty; give entries like 'p1:2 p2'")
+    return out
+
+
+def pattern_events(steps_by_pad, bank, vel=1.0, pitch=None, cutoff=None):
+    """Events for `pad:steps` groups. pitch (semitones) and cutoff (Hz) are optional per-hit offsets (W3b, as recorded in 16 levels)."""
+    extra = {**({"pitch": pitch} if pitch is not None else {}), **({"cutoff": cutoff} if cutoff is not None else {})}
+    return [{"beat": s / 4, "pad": pad, "bank": bank, "vel": vel, "pass": -1, **extra}
             for pad, steps in sorted(steps_by_pad.items()) for s in sorted(set(steps))]
 
 
-def pad_params(gain=None, pitch=None, attack=None, release=None, reverse=None, mode=None):
+def pad_params(gain=None, pitch=None, attack=None, release=None, reverse=None, mode=None,
+               decay=None, sustain=None, filter_type=None, cutoff=None, q=None, mute_group=None):
     p = {}
-    for k, v in (("gainDb", gain), ("pitch", pitch), ("attack", attack), ("release", release), ("reverse", reverse)):
+    for k, v in (("gainDb", gain), ("pitch", pitch), ("attack", attack), ("decay", decay), ("sustain", sustain),
+                 ("release", release), ("reverse", reverse)):
         if v is not None:
             p[k] = v
+    if sustain is not None and not 0 <= sustain <= 1:
+        raise ControlError("sustain must be between 0 and 1")
+    if mute_group is not None:
+        if not (isinstance(mute_group, int) and 0 <= mute_group <= 8):
+            raise ControlError("mute group must be a whole number from 0 (none) to 8")
+        p["muteGroup"] = mute_group
+    if filter_type is not None and filter_type not in FILTER_TYPES:
+        raise ControlError("filter type must be off, lp, hp or bp")
+    f = {k: v for k, v in (("type", filter_type), ("cutoff", cutoff), ("q", q)) if v is not None}
+    if f:  # only the given fields change: the server merges a partial filter onto the pad's own
+        p["filter"] = f
     if mode is not None:
         if mode not in ("oneshot", "gate", "playthrough", "default"):
             raise ControlError("mode must be oneshot, gate, playthrough or default")

@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 # Sibling components are plain modules (no package install); make them importable when run as a CLI.
 _COMPONENTS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-for _c in ("ingest", "rhythm", "chop", "advisor", "export", "control", "daw"):
+for _c in ("ingest", "rhythm", "chop", "advisor", "export", "control", "daw", "stems"):
     _p = os.path.join(_COMPONENTS, _c)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -143,7 +143,7 @@ def _export(media_dir, body):
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
         # the same pad -> audio path the DAW bridge uses (custom slice, other song, stretch, fx bake; gain/pitch in the kit)
-        _, baked = render_bank_kit(bank_pads(media_dir, bank, body.get("overrides")), out, name, fx=body.get("fx"),
+        _, baked = render_bank_kit(bank_pads(media_dir, bank, body.get("overrides"), body.get("pads")), out, name, fx=body.get("fx"),
                                    choke=body.get("choke", True) is not False)
         note = "Restart Hydrogen or use Drumkits > Rescan to see it."
         if baked:
@@ -151,10 +151,10 @@ def _export(media_dir, body):
         return {"path": out, "kit": name, "note": note}
     if body.get("kind") == "zip":
         from choppad_export import export_zip
-        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"))
+        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
         return {"path": os.path.abspath(path), "url": f"/media/{sid}/{os.path.basename(path)}",
-                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out), no pad sound settings or fx baked in."}
-    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"))
+                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out by default); each pad's filter and envelope are baked in, pitch, gain and master fx are not."}
+    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
     return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
 
 
@@ -190,6 +190,7 @@ def _stretch(media_dir, body):
     """POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]}
     Renders the pad's slice at `ratio` x its length (same pitch) into media/<id>/stretch/<hash>.wav (cached).
     target_bpm: the slice is fitted so the song's tempo (or source_bpm) becomes target_bpm.
+    `stem` (W3b): cut the slice from that stem of the song instead of the full mix.
     Returns {url, duration, ratio, hash, start, end}."""
     sid = os.path.basename(media_dir)
     try:
@@ -204,11 +205,25 @@ def _stretch(media_dir, body):
             ratio = _ratio_for_tempo(src, float(body["target_bpm"]))
         else:
             raise _StretchError("ratio or target_bpm required")
-        r = _stretch_slice(media_dir, start, end, ratio)
+        stem = body.get("stem")
+        if stem is not None and stem not in ("drums", "bass", "vocals", "other"):
+            raise _StretchError("stem must be drums, bass, vocals or other")
+        r = _stretch_slice(media_dir, start, end, ratio, f"stems/{stem}.wav" if stem else "audio.wav")
     except (_StretchError, ValueError) as e:
         raise ValueError(str(e))
     return {"url": f"/media/{sid}/stretch/{r['file']}", "duration": r["duration"], "ratio": r["ratio"], "hash": r["hash"],
             "start": start, "end": end}
+
+
+# ---- W3b: stems ----
+def _stems(media_dir, body):
+    """POST /api/songs/<id>/stems {force?} -> {stems: [...], urls: {name: url}, backend}. Needs a stems backend (components/stems:
+    CHOPPAD_STEMS_BACKEND=remote and CHOPPAD_STEMS_URL); without one it answers 501 with the steps. Cached in media/<id>/stems/."""
+    from choppad_stems import separate
+    paths = separate(media_dir, force=bool(body.get("force")))
+    sid = os.path.basename(media_dir)
+    return {"stems": list(paths), "urls": {n: f"/media/{sid}/stems/{n}.wav" for n in paths},
+            "backend": (os.environ.get("CHOPPAD_STEMS_BACKEND") or "none").lower()}
 
 
 # ---- W3: kits ----
@@ -239,7 +254,7 @@ def make_server(media_root: str, port: int = 8960):
         return daw.command(os.path.basename(media_dir), media_dir, body)
     srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
-                         "savekit": _savekit, "key": _key, "daw": _daw},
+                         "savekit": _savekit, "key": _key, "daw": _daw, "stems": _stems},
                 on_transport=daw.on_transport, daw_state=daw.state_for)
     srv.daw = daw
     daw.on_change = lambda sid: srv.announce_daw(sid)  # `daw` events when a bridge opens or closes
@@ -256,7 +271,8 @@ def make_server(media_root: str, port: int = 8960):
 # Agent verbs: `choppad songs|show|import|regrid|assign|pad|pattern|fx|play|hit|export|daw ...`
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
-VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station")
+VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
+         "tempo", "resample", "song", "stems")
 
 
 def build_verb_parser():
@@ -298,6 +314,12 @@ def build_verb_parser():
     s.add_argument("--release", type=float, help="seconds")
     s.add_argument("--reverse", action=argparse.BooleanOptionalAction, default=None)
     s.add_argument("--mode", choices=["oneshot", "gate", "playthrough", "default"])
+    s.add_argument("--decay", type=float, help="envelope decay in seconds (0-10)")
+    s.add_argument("--sustain", type=float, help="envelope sustain level 0-1 (1 = no decay)")
+    s.add_argument("--filter-type", choices=["off", "lp", "hp", "bp"], help="per-pad filter: off, low-pass, high-pass, band-pass")
+    s.add_argument("--cutoff", type=float, help="filter cutoff in Hz (20-20000)")
+    s.add_argument("--q", type=float, help="filter resonance (0.1-24, 0.7 = flat)")
+    s.add_argument("--mute-group", type=int, help="mute group 0-8: a pad cuts the voices of pads in its group (0 = none)")
     s.add_argument("--reset", action="store_true", help="back to defaults first")
     s = add("pattern", "the step pattern: set | add | clear | show")
     s.add_argument("id")
@@ -306,6 +328,8 @@ def build_verb_parser():
     s.add_argument("--bars", type=float, help="loop length in bars")
     s.add_argument("--bank", type=int, help="bank the hits play (default: the bank on screen)")
     s.add_argument("--vel", type=float, default=1.0, help="velocity 0..1 (default 1)")
+    s.add_argument("--pitch", type=float, help="semitones added to the pad's pitch for these hits (like 16 levels pitch)")
+    s.add_argument("--cutoff", type=float, help="filter cutoff in Hz for these hits (like 16 levels filter; turns a low-pass on)")
     s = add("fx", "master effects: a preset and/or single knobs")
     s.add_argument("id")
     s.add_argument("--preset", choices=list(cc.PRESETS))
@@ -324,6 +348,36 @@ def build_verb_parser():
     s.add_argument("id")
     s.add_argument("kind", choices=["hydrogen", "sfz"])
     s.add_argument("--bank", type=int, default=0)
+    # --- W3b sampler core ---
+    s = add("tempo", "project tempo: show it, set it (--bpm), go back to the song's tempo (--song), fit pads to it (--fit)")
+    s.add_argument("id")
+    s.add_argument("--bpm", type=float, help="project tempo in BPM (20-400)")
+    s.add_argument("--song", action="store_true", help="use the song's own tempo again (fitted pads go back to plain slices)")
+    s.add_argument("--follow", action=argparse.BooleanOptionalAction, default=None,
+                   help="pads fitted earlier are re-fitted when the tempo changes (default on)")
+    s.add_argument("--fit", choices=["pattern", "bank"], help="stretch the pads of the pattern, or of the bank on screen, to the tempo now")
+    s = add("song", "song mode: patterns and the chain that plays them. ops: show | add | select | rename | remove | chain | mode")
+    s.add_argument("id")
+    s.add_argument("op", choices=["show", "add", "select", "rename", "remove", "chain", "mode"])
+    s.add_argument("arg", nargs="*", help="select/remove PATTERN; rename PATTERN NAME; chain 'p1:2 p2'; mode pattern|song")
+    s.add_argument("--name", help="add: name of the new pattern")
+    s.add_argument("--bars", type=float, help="add: its length in bars (default: the edited pattern's)")
+    s.add_argument("--copy", action="store_true", help="add: start from a copy of the edited pattern")
+    s = add("stems", "split the song into drums, bass, vocals and other (needs a stems backend on the server), optionally put a stem on a pad")
+    s.add_argument("id")
+    s.add_argument("--force", action="store_true", help="ask the backend again even when the stems are cached")
+    s.add_argument("--pad", type=int, help="pad (0-15) that should play its slice from a stem")
+    s.add_argument("--bank", type=int, help="bank of that pad (default: the bank on screen)")
+    s.add_argument("--stem", choices=["drums", "bass", "vocals", "other", "mix"], help="the stem for --pad ('mix' = the full song again)")
+    s = add("resample", "render the pattern (or record the master bus) into a new sound on a pad; the open browser does the work")
+    s.add_argument("id")
+    s.add_argument("--pad", type=int, required=True, help="pad (0-15) that gets the new sound")
+    s.add_argument("--bars", type=float, help="length in bars at the project tempo")
+    s.add_argument("--seconds", type=float, help="length in seconds (instead of --bars)")
+    s.add_argument("--source", choices=["pattern", "master"], default="pattern",
+                   help="pattern = offline render of the step pattern (default); master = live recording of the master bus")
+    s.add_argument("--bank", type=int, help="bank of the pad (default: the bank on screen)")
+    s.add_argument("--wait", type=float, default=120, help="seconds to wait for the browser (default 120)")
     # --- W2 DAW bridge (components/daw) ---
     s = add("daw", "DAW bridge: open a song in Hydrogen or Ardour, re-sync it after edits, drive its transport")
     s.add_argument("op", choices=["open", "sync", "play", "stop"])
@@ -440,14 +494,15 @@ def run_verb(argv, client=None, out=None, err=None):
             reply(c.assign(a.id, a.bank, a.pad, a.start, a.end, a.clear))
         elif a.verb == "pad":
             reply(c.pad(a.id, a.pad, a.reset, gain=a.gain, pitch=a.pitch, attack=a.attack, release=a.release,
-                        reverse=a.reverse, mode=a.mode))
+                        reverse=a.reverse, mode=a.mode, decay=a.decay, sustain=a.sustain, filter_type=a.filter_type,
+                        cutoff=a.cutoff, q=a.q, mute_group=a.mute_group))
         elif a.verb == "pattern":
             if a.op == "show":
                 out(c.pattern_view(a.id, a.bank))
             elif a.op == "clear":
                 reply(c.pattern_clear(a.id))
             else:
-                reply(c.pattern_set(a.id, a.steps, a.bars, a.bank, a.vel, add=a.op == "add"))
+                reply(c.pattern_set(a.id, a.steps, a.bars, a.bank, a.vel, add=a.op == "add", pitch=a.pitch, cutoff=a.cutoff))
         elif a.verb == "fx":
             reply(c.fx(a.id, a.preset, **{k: getattr(a, k) for k in cc.FX_KEYS}))
         elif a.verb == "play":
@@ -462,6 +517,26 @@ def run_verb(argv, client=None, out=None, err=None):
                 err("note: no browser has this song open, so nothing is playing")
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
+        elif a.verb == "stems":
+            if a.stem is not None and a.pad is None:
+                raise cc.ControlError("--stem needs --pad")
+            r = c.stems(a.id, a.force)
+            j(r)
+            if a.pad is not None:
+                bank = a.bank if a.bank is not None else c.current_bank(a.id)
+                reply(c.pad_stem(a.id, bank, a.pad, None if a.stem == "mix" else (a.stem or "drums")))
+        elif a.verb == "song":
+            if a.op == "show":
+                j(c.song_show(a.id))
+            else:
+                one = a.arg[0] if a.arg else None
+                reply(c.song_edit(a.id, a.op, pattern=one if a.op in ("select", "rename", "remove") else None,
+                                  name=(" ".join(a.arg[1:]) or None) if a.op == "rename" else a.name, bars=a.bars, copy=a.copy,
+                                  chain=" ".join(a.arg) if a.op == "chain" else None, mode=one if a.op == "mode" else None))
+        elif a.verb == "resample":
+            j(c.resample(a.id, a.pad, a.bars, a.seconds, a.source, a.bank, a.wait))
+        elif a.verb == "tempo":
+            j(c.tempo(a.id, a.bpm, a.song, a.follow, a.fit))
         elif a.verb == "daw":
             r = c.daw(a.id, a.daw, a.op, a.bank, **{k: getattr(a, k) for k in ("swing", "quant", "choke") if getattr(a, k) is not None})
             j(r)

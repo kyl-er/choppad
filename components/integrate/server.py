@@ -43,12 +43,14 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import kits  # W3: /api/kits (kits.py next to this file)
+import rendered  # W3b: resample uploads, files of a song a pad can play (rendered.py next to this file)
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "components", "control"))
 import choppad_actions as A  # noqa: E402  (server-side twin of components/ui/actions.js)
 UI_DIR = os.path.join(REPO, "components", "ui")
 MIDI_JS = os.path.join(REPO, "components", "midi", "midi.js")
+CAPTURE_WORKLET_JS = os.path.join(REPO, "components", "integrate", "capture_worklet.js")  # W3b: master-bus capture (AudioWorklet)
 CHUNK = 256 * 1024
 MAX_RANGE = 8 * 2**20  # answer open-ended ranges with at most 8 MiB; browsers ask again for more
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -106,7 +108,7 @@ def write_json_atomic(path: str, doc) -> None:
         raise
 
 
-TRANSPORT_COMMANDS = ("play-pattern", "stop", "play-song", "hit")
+TRANSPORT_COMMANDS = ("play-pattern", "stop", "play-song", "hit", "resample")
 KEEPALIVE_S = 10.0
 
 
@@ -475,6 +477,15 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     msg["bank"] = body["bank"]
             if cmd == "play-song" and isinstance(body.get("from"), (int, float)):
                 msg["from"] = body["from"]
+            if cmd == "resample":  # W3b: the open browser renders or records, uploads and puts the result on a pad
+                num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0  # noqa: E731
+                if body.get("source", "pattern") not in ("pattern", "master"):
+                    return self._err(400, "source must be pattern or master")
+                if not (num(body.get("bars")) or num(body.get("seconds"))):
+                    return self._err(400, "resample needs bars or seconds")
+                if not (isinstance(body.get("pad"), int) and not isinstance(body["pad"], bool) and 0 <= body["pad"] < 16):
+                    return self._err(400, "resample needs the pad (0..15) to put the result on")
+                msg.update({k: body[k] for k in ("source", "bars", "seconds", "pad", "bank") if body.get(k) is not None})
             if body.get("local") is True:
                 return self._local_transport(sid, msg)
             listeners = hub.publish(sid, "transport", msg)
@@ -542,6 +553,9 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     doc["pattern"] = proj["pattern"]
                 if isinstance(proj.get("fx"), dict):
                     doc["fx"] = {k: float(v) for k, v in proj["fx"].items() if isinstance(v, (int, float))}
+                for k in ("tempo", "song"):  # W3b: optional project keys
+                    if isinstance(proj.get(k), dict):
+                        doc[k] = proj[k]
                 with song_lock(m.group(1)):
                     old = A.initial_state(load_project(d))["project"]
                     write_json_atomic(os.path.join(d, "project.json"), doc)
@@ -569,8 +583,18 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._static(os.path.join(UI_DIR, "index.html"))
             if p == "/midi.js":
                 return self._static(MIDI_JS)
+            if p == "/capture-worklet.js":
+                return self._static(CAPTURE_WORKLET_JS)
             if p.startswith("/media/"):
                 parts = p[len("/media/"):].split("/")
+                if len(parts) == 3 and parts[1] == "resample":  # W3b: rendered or recorded takes
+                    if not ID_RE.match(parts[0]) or not re.match(r"^[0-9a-f]{16}\.wav$", parts[2]):
+                        return self._err(404, "not found")
+                    return self._media(os.path.join(media_root, parts[0], "resample", parts[2]))
+                if len(parts) == 3 and parts[1] == "stems":  # W3b: stems of a song
+                    if not ID_RE.match(parts[0]) or parts[2] not in tuple(f"{n}.wav" for n in rendered.STEMS):
+                        return self._err(404, "not found")
+                    return self._media(os.path.join(media_root, parts[0], "stems", parts[2]))
                 if len(parts) == 3 and parts[1] == "stretch":  # W3: rendered time-stretched slices
                     if not ID_RE.match(parts[0]) or not re.match(r"^[0-9a-f]{16}\.wav$", parts[2]):
                         return self._err(404, "not found")
@@ -626,6 +650,20 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._kits("POST")
             if p == "/api/upload":
                 return self._upload()
+            m = re.match(r"^/api/songs/([^/]+)/resample$", p)   # W3b: raw WAV body -> media/<id>/resample/<hash>.wav
+            if m:
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > rendered.MAX_BYTES:
+                    self.close_connection = True
+                    return self._err(413, f"the WAV must be at most {rendered.MAX_BYTES // 2**20} MB")
+                data = self.rfile.read(n)
+                d = self._song_dir(m.group(1))
+                if not d:
+                    return self._err(404, "unknown song")
+                try:
+                    return self._json(rendered.save_resample(d, data))
+                except ValueError as e:
+                    return self._err(400, str(e))
             m = re.match(r"^/api/songs/([^/]+)/(actions|transport)$", p)
             if m:
                 d = self._song_dir(m.group(1))

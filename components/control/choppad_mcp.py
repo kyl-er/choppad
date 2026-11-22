@@ -91,26 +91,66 @@ def build_tools(client, progress=lambda: None):
               {"id": _ID, "bank": _BANK, "pad": _PAD, "start": _N("seconds"), "end": _N("seconds, > start"),
                "clear": {"type": "boolean"}}, ["id", "bank", "pad"],
               lambda a: _watch(c.assign(a["id"], a["bank"], a["pad"], a.get("start"), a.get("end"), bool(a.get("clear"))))),
-        _tool("pad", "Sound settings of one pad: gain (dB), pitch (semitones), attack/release (s), reverse, mode "
-              "(oneshot, gate, playthrough, default). Only the given fields change.",
+        _tool("pad", "Sound settings of one pad: gain (dB), pitch (semitones), ADSR envelope (attack, decay, release in s, "
+              "sustain 0-1), a filter (filter_type off/lp/hp/bp, cutoff Hz, q resonance), reverse, mode (oneshot, gate, "
+              "playthrough, default). Only the given fields change.",
               {"id": _ID, "pad": _PAD, "gain": _N("dB"), "pitch": _N("semitones"), "attack": _N("s"), "release": _N("s"),
+               "decay": _N("s, 0-10", minimum=0, maximum=10), "sustain": _N("0-1, 1 = hold the level", minimum=0, maximum=1),
+               "filter_type": _S("off, lp, hp or bp", enum=["off", "lp", "hp", "bp"]),
+               "cutoff": _N("filter cutoff, Hz (20-20000)", minimum=20, maximum=20000),
+               "q": _N("filter resonance (0.1-24; 0.7 is flat)", minimum=0.1, maximum=24),
+               "mute_group": _I("0 = none; pads in the same group 1-8 cut each other's voices", minimum=0, maximum=8),
                "reverse": {"type": "boolean"}, "mode": _S("oneshot, gate, playthrough or default"),
                "reset": {"type": "boolean", "description": "defaults first"}}, ["id", "pad"],
               lambda a: _watch(c.pad(a["id"], a["pad"], bool(a.get("reset")), gain=a.get("gain"), pitch=a.get("pitch"),
                                      attack=a.get("attack"), release=a.get("release"), reverse=a.get("reverse"),
-                                     mode=a.get("mode")))),
+                                     mode=a.get("mode"), decay=a.get("decay"), sustain=a.get("sustain"),
+                                     filter_type=a.get("filter_type"), cutoff=a.get("cutoff"), q=a.get("q"),
+                                     mute_group=a.get("mute_group")))),
         _tool("pattern_set", "Set the step pattern. `steps` is 'pad:step,step pad:step' with 1/16 steps from the loop start "
               "(0-based), e.g. '0:0,8 1:4,12' = kick on 1 and 3, snare on 2 and 4 in a bar of 4/4. Replaces the pattern "
               "(add=true merges). With only `bars` it just changes the loop length.",
               {"id": _ID, "steps": _S("e.g. '0:0,8 1:4,12'"), "bars": _N("loop length in bars"), "bank": _BANK,
-               "vel": _N("0..1", minimum=0, maximum=1), "add": {"type": "boolean"}}, ["id"],
+               "vel": _N("0..1", minimum=0, maximum=1), "add": {"type": "boolean"},
+               "pitch": _N("semitones added to the pad's pitch for these hits"),
+               "cutoff": _N("filter cutoff in Hz for these hits (turns a low-pass on)", minimum=20, maximum=20000)}, ["id"],
               lambda a: _watch(c.pattern_set(a["id"], a.get("steps"), a.get("bars"), a.get("bank"), a.get("vel", 1.0),
-                                             add=bool(a.get("add"))))),
+                                             add=bool(a.get("add")), pitch=a.get("pitch"), cutoff=a.get("cutoff")))),
         _tool("pattern_clear", "Empty the pattern.", {"id": _ID}, ["id"], lambda a: _watch(c.pattern_clear(a["id"]))),
         _tool("fx", "Master effects. A preset (dry, warm, room, hall, lofi, radio) and/or tone, low, mid, high, filter, "
               "reverb, size. Only the given fields change.",
               {"id": _ID, "preset": _S("preset name", enum=list(cc.PRESETS)), **{k: _N(k) for k in cc.FX_KEYS}}, ["id"],
               lambda a: _watch(c.fx(a["id"], a.get("preset"), **{k: a.get(k) for k in cc.FX_KEYS}))),
+        _tool("tempo", "Project tempo: the sequencer, metronome, MIDI export and renders play at it instead of the song's own "
+              "tempo. Give bpm to set it, song=true to go back to the song's tempo, follow=false to stop fitted pads "
+              "re-fitting on tempo changes, fit='pattern' or 'bank' to stretch those pads to it now (rubberband, pitch kept; "
+              "pads stretched by hand are never touched). With nothing given it just reports.",
+              {"id": _ID, "bpm": _N("20-400", minimum=20, maximum=400), "song": {"type": "boolean"},
+               "follow": {"type": "boolean"}, "fit": _S("pattern or bank", enum=["pattern", "bank"])}, ["id"],
+              lambda a: c.tempo(a["id"], a.get("bpm"), bool(a.get("song")), a.get("follow"), a.get("fit"))),
+        _tool("stems", "Split the song into drums, bass, vocals and other (needs a stems backend set up on the server: "
+              "CHOPPAD_STEMS_BACKEND=remote and CHOPPAD_STEMS_URL; otherwise the error says so). With pad and stem, that pad then plays "
+              "its slice from the stem ('mix' = back to the full song). Can take minutes.",
+              {"id": _ID, "force": {"type": "boolean"}, "pad": _PAD, "bank": _BANK,
+               "stem": _S("drums, bass, vocals, other or mix", enum=["drums", "bass", "vocals", "other", "mix"])}, ["id"],
+              lambda a: {**c.stems(a["id"], bool(a.get("force"))), **({"pad": _watch(c.pad_stem(
+                  a["id"], a["bank"] if a.get("bank") is not None else c.current_bank(a["id"]), a["pad"],
+                  None if a.get("stem") == "mix" else (a.get("stem") or "drums")))} if a.get("pad") is not None else {})}),
+        _tool("song", "Song mode: several step patterns and a chain that plays them (the arrangement). op 'show' reads it; 'add' makes a new "
+              "pattern (name, bars, copy=true starts from the edited one) and selects it for editing; 'select', 'rename', 'remove' work on "
+              "a pattern id; 'chain' sets the order as 'p1:2 p2:1' (pattern:repeats); 'mode' is 'pattern' (loop the edited pattern) or "
+              "'song' (play the chain). Use pattern_set after 'select' to fill a pattern.",
+              {"id": _ID, "op": _S("show, add, select, rename, remove, chain or mode", enum=["show", "add", "select", "rename", "remove", "chain", "mode"]),
+               "pattern": _S("pattern id like p1 (select, rename, remove)"), "name": _S("name (add, rename)"), "bars": _N("add: length in bars"),
+               "copy": {"type": "boolean"}, "chain": _S("e.g. 'p1:2 p2:1 p1'"), "mode": _S("pattern or song", enum=["pattern", "song"])}, ["id", "op"],
+              lambda a: c.song_show(a["id"]) if a["op"] == "show" else _watch(c.song_edit(
+                  a["id"], a["op"], a.get("pattern"), a.get("name"), a.get("bars"), bool(a.get("copy")), a.get("chain"), a.get("mode")))),
+        _tool("resample", "Make a new sound from what the pad machine plays and put it on a pad. source 'pattern' renders the step "
+              "pattern offline at the project tempo for N bars (a short pattern loops); source 'master' records the master bus live "
+              "(real time). The browser with the song open does the rendering, so one must be open.",
+              {"id": _ID, "pad": _PAD, "bars": _N("length in bars at the project tempo"), "seconds": _N("length in seconds, instead of bars"),
+               "source": _S("pattern or master", enum=["pattern", "master"]), "bank": _BANK}, ["id", "pad"],
+              lambda a: c.resample(a["id"], a["pad"], a.get("bars"), a.get("seconds"), a.get("source", "pattern"), a.get("bank"))),
         _tool("play", "Start or stop playback in the open browser: pattern, song or stop.",
               {"id": _ID, "what": _S("pattern, song or stop", enum=["pattern", "song", "stop"]), "from": _N("song start, seconds")},
               ["id", "what"], lambda a: hit_text(c.play(a["id"], a["what"], a.get("from")))),
