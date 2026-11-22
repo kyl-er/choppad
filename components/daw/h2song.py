@@ -28,7 +28,7 @@ def _txt(parent, tag, value):
     return el
 
 
-def _instrument(parent, pad, name, wav_path, *, choke, gain, kit="ChopPad", lookup=1):
+def _instrument(parent, pad, name, wav_path, *, choke, gain, kit="ChopPad", lookup=1, mute_group=None):
     i = ET.SubElement(parent, "instrument")
     _txt(i, "id", pad)
     _txt(i, "name", name)
@@ -51,7 +51,8 @@ def _instrument(parent, pad, name, wav_path, *, choke, gain, kit="ChopPad", look
     _txt(i, "Release", 1000)
     _txt(i, "pitchOffset", 0.0)
     _txt(i, "randomPitchFactor", 0.0)
-    _txt(i, "muteGroup", 0 if choke else -1)
+    # W3b: with mute groups in use (`mute_group` is the pad's 0..8) Hydrogen gets the same group, -1 = none
+    _txt(i, "muteGroup", (mute_group if mute_group else -1) if mute_group is not None else (0 if choke else -1))
     _txt(i, "isStopNote", False)
     _txt(i, "sampleSelectionAlgo", "VELOCITY")
     _txt(i, "midiOutChannel", -1)
@@ -85,6 +86,10 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
     """
     if len(wavs) != PADS:
         raise ValueError(f"wavs must have {PADS} entries")
+    # extras DawProject carries inside `pattern` (hydrogen.py passes the dict as it is): "mute_groups" = 16 ints 0..8
+    mute_groups = (pattern or {}).get("mute_groups")
+    if not (isinstance(mute_groups, list) and len(mute_groups) == PADS and any(mute_groups)):
+        mute_groups = None
     bars = float((pattern or {}).get("bars") or 2)
     size = pattern_ticks(bars, beats_per_bar)
     root = ET.Element("song")
@@ -121,7 +126,8 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
             raise ValueError(f"pad {pad} has no WAV and no empty_wav was given")
         # always 16 instruments, so NOTE_ON note 36+n (= list position n) and midiOutNote 36+n both mean pad n
         _instrument(inst_list, pad, f"Pad {pad + 1}" if wavs[pad] else f"Pad {pad + 1} (empty)", wav,
-                    choke=choke, gain=1.0 if wavs[pad] else 0.0, kit=kit_name)
+                    choke=choke, gain=1.0 if wavs[pad] else 0.0, kit=kit_name,
+                    mute_group=int(mute_groups[pad]) if mute_groups else None)
 
     pats = ET.SubElement(root, "patternList")
     pat = ET.SubElement(pats, "pattern")

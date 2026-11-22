@@ -339,7 +339,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const off = new OfflineAudioContext(2, Math.ceil(seconds * buffer.sampleRate), buffer.sampleRate);
     const ofx = createFx(off, project.fx);
     ofx.output.connect(off.destination);
-    const oe = createEngine({ ctx: off, buffer, chops, output: ofx.input });
+    const oe = createEngine({ ctx: off, buffer, chops, output: ofx.input, choke: settings.choke, fullLevel: settings.fullLevel });
     for (let p = 0; p < PADS; p++) oe.setPadParams(p, project.pads[p]);
     await Promise.all([...pending]);
     for (const [k, sl] of Object.entries(project.overrides)) {

@@ -41,6 +41,21 @@ class ProjectTempo(unittest.TestCase):
         self.assertEqual(open(os.path.join(plain.kit_dir, "chop_01.wav"), "rb").read(),
                          open(os.path.join(shaped.kit_dir, "chop_01.wav"), "rb").read(), "pads without settings are unchanged")
 
+    def test_mute_groups_reach_the_h2song(self):
+        pads = [{} for _ in range(16)]
+        pads[0], pads[1], pads[4] = {"muteGroup": 1}, {"muteGroup": 1}, {"muteGroup": 3}
+        p = self.build(pads=pads)
+        self.assertEqual(p.pattern["mute_groups"][:5], [1, 1, 0, 0, 3])
+        root, _ = h2song.build_song(title=p.title, bpm=p.bpm, beats_per_bar=p.beats_per_bar, wavs=p.wavs(), pattern=p.pattern,
+                                    empty_wav="/x.wav")
+        groups = [i.find("muteGroup").text for i in root.find("instrumentList")]
+        self.assertEqual(groups[:5], ["1", "1", "-1", "-1", "3"])
+        # no groups: the old behaviour, every pad in group 0 (choke)
+        plain = self.build()
+        self.assertNotIn("mute_groups", plain.pattern)
+        root, _ = h2song.build_song(title=plain.title, bpm=plain.bpm, beats_per_bar=4, wavs=plain.wavs(), pattern=plain.pattern, empty_wav="/x.wav")
+        self.assertEqual({i.find("muteGroup").text for i in root.find("instrumentList")}, {"0"})
+
     def test_h2song_carries_the_project_tempo(self):
         p = self.build(tempo={"bpm": 92.5, "follow": True})
         root, _ = h2song.build_song(title=p.title, bpm=p.bpm, beats_per_bar=p.beats_per_bar, wavs=p.wavs(), pattern=p.pattern,

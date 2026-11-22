@@ -320,6 +320,41 @@ class Core2(unittest.TestCase):
         self.assertIn("ampeg_sustain=30.0", sfz)
         self.assertEqual(errors, [])
 
+    # ------------------------------------------------------------------ 3. mute groups
+    def test_mute_groups_in_the_real_engine_and_over_http(self):
+        page, errors = self.open_song()
+        S = self.S
+        # an agent sets the groups over HTTP; the page gets them
+        st, out = api(self.base, f"/api/songs/{self.sid}/actions", {"actions": [
+            {"type": "pad.set", "pad": 0, "params": {"muteGroup": 1}}, {"type": "pad.set", "pad": 1, "params": {"muteGroup": 1}},
+            {"type": "pad.set", "pad": 2, "params": {"muteGroup": 2}}, {"type": "pad.set", "pad": 9, "params": {"muteGroup": 12}}]})
+        self.assertEqual((st, out["applied"]), (200, 3), "a group of 12 is not a group")
+        page.wait_for_function(f"{S}.store.get().project.pads[2].muteGroup === 2", timeout=10000)
+        self.assertEqual(page.evaluate(f"{S}.store.get().project.pads.map((p) => p.muteGroup).slice(0, 4)"), [1, 1, 2, 0])
+        self.assertEqual(self.project_on_disk()["pads"][1]["muteGroup"], 1)
+        # which voices a hit cuts: spy on real source nodes (a one-shot voice is only ever stopped by a cut)
+        js = """(choke) => {
+            const ctx = window.choppad.audio.ctx, s = window.choppad.song.session;
+            const made = [], cut = new Set();
+            const mk = ctx.createBufferSource.bind(ctx); ctx.createBufferSource = () => { const n = mk(); made.push(n); return n; };
+            const stop = AudioBufferSourceNode.prototype.stop;
+            AudioBufferSourceNode.prototype.stop = function (...a) { cut.add(this); return stop.apply(this, a); };
+            s.store.dispatch({ type: 'settings.set', params: { choke } });
+            for (const p of [0, 2, 3]) s.engine.trigger(p, 1);
+            const before = made.map((n) => cut.has(n));
+            s.engine.trigger(1, 1);
+            const after = made.map((n) => cut.has(n));
+            s.engine.stopAll(); ctx.createBufferSource = mk; AudioBufferSourceNode.prototype.stop = stop;
+            s.store.dispatch({ type: 'settings.set', params: { choke: true } });
+            return { before, after };
+        }"""
+        off = page.evaluate(js, False)
+        self.assertEqual(off["before"], [False, False, False])
+        self.assertEqual(off["after"][:3], [True, False, False], "pad 1 cuts pad 0 (same group), not pad 2 (other group) or pad 3 (none)")
+        on = page.evaluate(js, True)
+        self.assertEqual(on["after"][:3], [True, True, True], "global choke: everything is cut, as before")
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

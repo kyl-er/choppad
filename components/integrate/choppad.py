@@ -291,6 +291,7 @@ def build_verb_parser():
     s.add_argument("--filter-type", choices=["off", "lp", "hp", "bp"], help="per-pad filter: off, low-pass, high-pass, band-pass")
     s.add_argument("--cutoff", type=float, help="filter cutoff in Hz (20-20000)")
     s.add_argument("--q", type=float, help="filter resonance (0.1-24, 0.7 = flat)")
+    s.add_argument("--mute-group", type=int, help="mute group 0-8: a pad cuts the voices of pads in its group (0 = none)")
     s.add_argument("--reset", action="store_true", help="back to defaults first")
     s = add("pattern", "the step pattern: set | add | clear | show")
     s.add_argument("id")
@@ -439,7 +440,7 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "pad":
             reply(c.pad(a.id, a.pad, a.reset, gain=a.gain, pitch=a.pitch, attack=a.attack, release=a.release,
                         reverse=a.reverse, mode=a.mode, decay=a.decay, sustain=a.sustain, filter_type=a.filter_type,
-                        cutoff=a.cutoff, q=a.q))
+                        cutoff=a.cutoff, q=a.q, mute_group=a.mute_group))
         elif a.verb == "pattern":
             if a.op == "show":
                 out(c.pattern_view(a.id, a.bank))

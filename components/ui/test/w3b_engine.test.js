@@ -98,6 +98,37 @@ test("decay 0 with a sustain below 1 drops to the sustain level right after the 
   assert.equal(c[0], "set"); near(c[1], 0.25); assert.ok(Math.abs(c[2] - 10.002) < 1e-9);
 });
 
+const stopped = (ctx) => ctx.log.map((l) => l.node.stops.length > 0);
+
+test("global choke on (the default): a new voice cuts every other voice, mute groups or not", () => {
+  const { ctx, eng } = rig();
+  eng.setPadParams(0, { muteGroup: 1 });
+  eng.trigger(0, 1, 10); eng.trigger(1, 1, 10); eng.trigger(2, 1, 10);
+  assert.deepEqual(stopped(ctx), [true, true, false]);
+});
+
+test("choke off: a pad cuts only the voices of its own non-zero mute group", () => {
+  const { ctx, eng } = rig({ choke: false });
+  eng.setPadParams(0, { muteGroup: 1 });
+  eng.setPadParams(1, { muteGroup: 1 });
+  eng.setPadParams(2, { muteGroup: 2 });
+  // pad 3 has no group
+  eng.trigger(0, 1, 10); eng.trigger(2, 1, 10); eng.trigger(3, 1, 10);
+  assert.deepEqual(stopped(ctx), [false, false, false], "different groups and no group do not cut each other");
+  eng.trigger(1, 1, 10.1);   // group 1 again: cuts pad 0 only
+  assert.deepEqual(stopped(ctx), [true, false, false, false]);
+  eng.trigger(3, 1, 10.2);   // no group: cuts nothing
+  eng.trigger(3, 1, 10.3);
+  assert.deepEqual(stopped(ctx), [true, false, false, false, false, false]);
+});
+
+test("choke off: a pad in a group also cuts its own earlier voice", () => {
+  const { ctx, eng } = rig({ choke: false });
+  eng.setPadParams(4, { muteGroup: 7 });
+  eng.trigger(4, 1, 10); eng.trigger(4, 1, 10.2);
+  assert.deepEqual(stopped(ctx), [true, false]);
+});
+
 test("a hit's own pitch and cutoff (16 levels) add to the pad's pitch and switch a lowpass on", () => {
   const { ctx, eng } = rig();
   eng.setPadParams(0, { pitch: 2 });

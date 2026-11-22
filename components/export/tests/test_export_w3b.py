@@ -1,5 +1,6 @@
 """W3b export: pad filter and envelope baked into Hydrogen and zip audio, written as SFZ opcodes, kept by kits."""
 import json, os, shutil, sys, tempfile, unittest, wave, zipfile
+import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from _common import *  # noqa: E402,F403
 import numpy as np  # noqa: E402
@@ -143,6 +144,43 @@ class Exports(unittest.TestCase):
                   open(os.path.join(self.d, "project.json"), "w"))
         self.addCleanup(os.remove, os.path.join(self.d, "project.json"))
         self.assertEqual(bank_pads(self.d, 0)[0]["params"]["filter"]["type"], "lp")
+
+
+class MuteGroups(Exports):
+    """Mute groups in SFZ and Hydrogen kits; without any group the old 'everything chokes' output is unchanged."""
+
+    def regions(self, sfz):
+        return {int(l.split("key=")[1].split()[0]): l for l in open(sfz).read().splitlines() if l.startswith("<region>")}
+
+    def test_sfz_without_groups_keeps_the_single_choke_group(self):
+        sfz = export_sfz(self.d, out_path=os.path.join(self.root, "g0.sfz"), bank=0, overrides={}, sounds=self.sounds())
+        text = open(sfz).read()
+        self.assertIn("group=1 off_by=1", text.splitlines()[1])
+        self.assertNotIn("off_by", "".join(self.regions(sfz).values()))
+
+    def test_sfz_with_groups_names_each_region_group(self):
+        sounds = self.sounds(p0={"muteGroup": 2}, p1={"muteGroup": 2}, p5={"muteGroup": 7})
+        sfz = export_sfz(self.d, out_path=os.path.join(self.root, "g1.sfz"), bank=0, overrides={}, sounds=sounds)
+        header = open(sfz).read().splitlines()[1]
+        self.assertNotIn("off_by", header, "the global choke group is gone once pads have their own groups")
+        r = self.regions(sfz)
+        self.assertIn("group=2 off_by=2", r[36])
+        self.assertIn("group=2 off_by=2", r[37])
+        self.assertIn("group=7 off_by=7", r[41])
+        self.assertNotIn("group=", r[38], "a pad without a group cuts nothing")
+
+    def kit_groups(self, sounds):
+        out = os.path.join(self.root, "h2g")
+        shutil.rmtree(out, ignore_errors=True)
+        export_hydrogen(self.d, out, bank=0, overrides={}, sounds=sounds)
+        root = ET.parse(os.path.join(out, "drumkit.xml")).getroot()
+        ns = "{http://www.hydrogen-music.org/drumkit}"
+        return [i.find(ns + "muteGroup").text for i in root.iter(ns + "instrument")]
+
+    def test_hydrogen_kit_mute_groups(self):
+        self.assertEqual(set(self.kit_groups(self.sounds())), {"0"}, "no groups: the old all-in-one group")
+        g = self.kit_groups(self.sounds(p0={"muteGroup": 1}, p2={"muteGroup": 4}))
+        self.assertEqual((g[0], g[1], g[2]), ("1", "-1", "4"))
 
 
 class Kits(unittest.TestCase):

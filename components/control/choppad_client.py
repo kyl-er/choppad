@@ -23,7 +23,7 @@ PRESETS = {  # twin of components/ui/fx.js PRESETS
     "radio": {"tone": 0, "low": -8, "mid": 6, "high": -6, "filter": 0.45, "reverb": 0, "size": 0.5},
 }
 FX_KEYS = ("tone", "low", "mid", "high", "filter", "reverb", "size")
-PAD_KEYS = ("gainDb", "pitch", "attack", "decay", "sustain", "release", "reverse", "mode", "filter")
+PAD_KEYS = ("gainDb", "pitch", "attack", "decay", "sustain", "release", "reverse", "mode", "filter", "muteGroup")
 FILTER_TYPES = ("off", "lp", "hp", "bp")
 
 
@@ -419,7 +419,7 @@ def pattern_events(steps_by_pad, bank, vel=1.0):
 
 
 def pad_params(gain=None, pitch=None, attack=None, release=None, reverse=None, mode=None,
-               decay=None, sustain=None, filter_type=None, cutoff=None, q=None):
+               decay=None, sustain=None, filter_type=None, cutoff=None, q=None, mute_group=None):
     p = {}
     for k, v in (("gainDb", gain), ("pitch", pitch), ("attack", attack), ("decay", decay), ("sustain", sustain),
                  ("release", release), ("reverse", reverse)):
@@ -427,6 +427,10 @@ def pad_params(gain=None, pitch=None, attack=None, release=None, reverse=None, m
             p[k] = v
     if sustain is not None and not 0 <= sustain <= 1:
         raise ControlError("sustain must be between 0 and 1")
+    if mute_group is not None:
+        if not (isinstance(mute_group, int) and 0 <= mute_group <= 8):
+            raise ControlError("mute group must be a whole number from 0 (none) to 8")
+        p["muteGroup"] = mute_group
     if filter_type is not None and filter_type not in FILTER_TYPES:
         raise ControlError("filter type must be off, lp, hp or bp")
     f = {k: v for k, v in (("type", filter_type), ("cutoff", cutoff), ("q", q)) if v is not None}

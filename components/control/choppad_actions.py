@@ -18,7 +18,7 @@ TEMPO_MIN, TEMPO_MAX = 20, 400
 FILTER_TYPES = ("off", "lp", "hp", "bp")
 DEFAULT_FILTER = {"type": "off", "cutoff": 8000, "q": 0.7}
 DEFAULT_PAD = {"gainDb": 0, "pitch": 0, "attack": 0.0025, "decay": 0, "sustain": 1, "release": 0.003, "reverse": False,
-               "mode": None, "filter": DEFAULT_FILTER}
+               "mode": None, "filter": DEFAULT_FILTER, "muteGroup": 0}
 DEFAULT_FX = {"tone": 0, "low": 0, "mid": 0, "high": 0, "filter": 0, "reverb": 0, "size": 0.5}
 DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant": "1/16", "swing": 0,
                     "metronome": True, "repeat": False, "repeatRate": 0.25, "follow": True}
@@ -111,6 +111,12 @@ def clean_pad(raw, cur=None):
             out["decay"] = _clamp(out["decay"], 0, 10)
         else:
             del out["decay"]
+    if "muteGroup" in out:  # 0..8, an integer (3.0 counts, like Number.isInteger)
+        g = out["muteGroup"]
+        if _is_num(g) and float(g).is_integer() and 0 <= g <= 8:
+            out["muteGroup"] = int(g)
+        else:
+            del out["muteGroup"]
     if "sustain" in out:
         if _is_num(out["sustain"]):
             out["sustain"] = _clamp(out["sustain"], 0, 1)

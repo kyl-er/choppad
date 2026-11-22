@@ -88,12 +88,14 @@ def build_tools(client):
                "filter_type": _S("off, lp, hp or bp", enum=["off", "lp", "hp", "bp"]),
                "cutoff": _N("filter cutoff, Hz (20-20000)", minimum=20, maximum=20000),
                "q": _N("filter resonance (0.1-24; 0.7 is flat)", minimum=0.1, maximum=24),
+               "mute_group": _I("0 = none; pads in the same group 1-8 cut each other's voices", minimum=0, maximum=8),
                "reverse": {"type": "boolean"}, "mode": _S("oneshot, gate, playthrough or default"),
                "reset": {"type": "boolean", "description": "defaults first"}}, ["id", "pad"],
               lambda a: _watch(c.pad(a["id"], a["pad"], bool(a.get("reset")), gain=a.get("gain"), pitch=a.get("pitch"),
                                      attack=a.get("attack"), release=a.get("release"), reverse=a.get("reverse"),
                                      mode=a.get("mode"), decay=a.get("decay"), sustain=a.get("sustain"),
-                                     filter_type=a.get("filter_type"), cutoff=a.get("cutoff"), q=a.get("q")))),
+                                     filter_type=a.get("filter_type"), cutoff=a.get("cutoff"), q=a.get("q"),
+                                     mute_group=a.get("mute_group")))),
         _tool("pattern_set", "Set the step pattern. `steps` is 'pad:step,step pad:step' with 1/16 steps from the loop start "
               "(0-based), e.g. '0:0,8 1:4,12' = kick on 1 and 3, snare on 2 and 4 in a bar of 4/4. Replaces the pattern "
               "(add=true merges). With only `bars` it just changes the loop length.",

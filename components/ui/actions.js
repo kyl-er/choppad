@@ -48,6 +48,7 @@ function cleanFilter(f, base) {
 export function cleanPad(raw, cur = DEFAULT_PAD) {
   const out = pick(raw, PAD_KEYS);
   if ("decay" in out) { if (isNum(out.decay)) out.decay = clamp(out.decay, 0, 10); else delete out.decay; }
+  if ("muteGroup" in out && !(Number.isInteger(out.muteGroup) && out.muteGroup >= 0 && out.muteGroup <= 8)) delete out.muteGroup;
   if ("sustain" in out) { if (isNum(out.sustain)) out.sustain = clamp(out.sustain, 0, 1); else delete out.sustain; }
   if ("filter" in out) { const f = cleanFilter(out.filter, cur.filter ?? DEFAULT_FILTER); if (f) out.filter = f; else delete out.filter; }
   return out;

@@ -7,8 +7,11 @@ export const MAX_NORM_GAIN = 4;
 // filter.type "off" | "lp" | "hp" | "bp"; cutoff in Hz; q = resonance (linear, 0.7 = flat).
 export const FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
 export const DEFAULT_FILTER = Object.freeze({ type: "off", cutoff: 8000, q: 0.7 });
+// muteGroup 0..8: a pad cuts the voices of the pads in its own group (0 = none). The global `choke` setting still means
+// "everything cuts everything" (the default), groups matter once it is off.
+export const MUTE_GROUPS = 8;
 export const DEFAULT_PAD = Object.freeze({ gainDb: 0, pitch: 0, attack: 0.0025, decay: 0, sustain: 1, release: 0.003,
-  reverse: false, mode: null, filter: DEFAULT_FILTER });
+  reverse: false, mode: null, filter: DEFAULT_FILTER, muteGroup: 0 });
 const BIQUAD = { lp: "lowpass", hp: "highpass", bp: "bandpass" };
 
 /** Pure: chop for (bank, pad) or null when the pad is empty. = chops.chops[chops.banks[bank]?.[pad]] ?? null */
@@ -122,14 +125,17 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     return out;
   }
 
-  function chokeAll(now) {
-    for (const v of activeVoices) {
+  /** Cut the active voices (all of them, or only those of mute group `group`) with the short fade. */
+  function chokeAll(now, group = 0) {
+    for (let i = activeVoices.length - 1; i >= 0; i--) {
+      const v = activeVoices[i];
+      if (group && v.group !== group) continue;
       v.gain.gain.cancelScheduledValues(now);
       v.gain.gain.setValueAtTime(v.gain.gain.value, now);
       v.gain.gain.linearRampToValueAtTime(1e-6, now + FADE_OUT);
       v.source.stop(now + FADE_OUT);
+      activeVoices.splice(i, 1);
     }
-    activeVoices.length = 0;
   }
 
   /** Play `pad` now, or at AudioContext time `when` (sequencer); `bank` defaults to the current bank.
@@ -141,6 +147,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     const mode = P.mode ?? _mode;
     const now = when ?? ctx.currentTime;
     if (_choke) chokeAll(now);
+    else if (P.muteGroup > 0) chokeAll(now, P.muteGroup);   // a pad cuts the voices of its own mute group
 
     const alt = padBuffers.get(`${bank}:${pad}`);   // stretched slice or another song's audio, else the main song
     const srcBuf = alt ? alt.buffer : buffer;
@@ -200,7 +207,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
       if (follow) followAt(now, chop.start, null);
     }
 
-    const voice = { source, gain: gainNode, pad, mode, release: P.release };
+    const voice = { source, gain: gainNode, pad, mode, release: P.release, group: P.muteGroup | 0 };
     activeVoices.push(voice);
     source.onended = () => { const i = activeVoices.indexOf(voice); if (i >= 0) activeVoices.splice(i, 1); };
   }

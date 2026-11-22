@@ -153,6 +153,15 @@ class PadSound(Rig):
             with self.assertRaises(cc.ControlError):
                 self.c.pad("song1", 4, **bad)
 
+    def test_mute_group(self):
+        choppad.run_verb(["pad", "song1", "2", "--mute-group", "3"], client=self.c, out=lambda s: None, err=lambda s: None)
+        self.assertEqual(self.project()["pads"][2]["muteGroup"], 3)
+        for bad in (9, -1):
+            with self.assertRaises(cc.ControlError):
+                self.c.pad("song1", 2, mute_group=bad)
+        choppad_mcp.build_tools(self.c)["pad"]["_fn"]({"id": "song1", "pad": 2, "mute_group": 0})
+        self.assertEqual(self.project()["pads"][2]["muteGroup"], 0)
+
     def test_pad_tool_in_mcp(self):
         tools = choppad_mcp.build_tools(self.c)
         tools["pad"]["_fn"]({"id": "song1", "pad": 1, "filter_type": "hp", "cutoff": 2000})
