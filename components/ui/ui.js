@@ -73,7 +73,11 @@ export async function mountSong(root, { id, audio, input }) {
       <div class="stepgrid" title="Click a cell to add/remove a hit on the current bank · Shift-click = soft hit · click a row name to hear the pad"></div>
     </div>
     <div class="panels">
-      <div class="panel"><h3>Grid</h3><div class="row grid-btns"></div><div class="row meter-btns"></div>
+      <div class="panel"><h3>Grid</h3>
+        <div class="row chop-mode"><span class="muted small">chop by:</span>
+          <button class="mode-grid" type="button">grid</button><button class="mode-transient" type="button">transients</button>
+          <input class="sens" type="range" min="0" max="1" step="0.05" value="0.5" title="transient sensitivity"><span class="sens-out muted small"></span></div>
+        <div class="row grid-btns"></div><div class="row meter-btns"></div>
         <div class="row tempo-btns"></div>
         <div class="row"><button class="tap" title="T">tap tempo (T)</button><span class="tap-bpm muted">tap 4×…</span><button class="tap-apply" disabled>apply</button></div></div>
       <div class="panel"><h3>Pads</h3>
@@ -213,6 +217,9 @@ export async function mountSong(root, { id, audio, input }) {
   };
   for (const g of ["1/4", "1/8", "1/16"]) btn(".grid-btns", g, () => regrid({ grid: g }), "grid-" + g.replace("/", "-"));
   for (const m of ["2/4", "3/4", "4/4"]) btn(".meter-btns", m, () => regrid({ meter: m }), "meter-" + m.replace("/", "-"));
+  $(".mode-grid").addEventListener("click", () => regrid({ mode: "grid" }));
+  $(".mode-transient").addEventListener("click", () => regrid({ mode: "transient" }));
+  $(".sens").addEventListener("change", (e) => regrid({ mode: "transient", sensitivity: Number(e.target.value) }));
   btn(".tempo-btns", "÷2", () => regrid({ mult: 0.5 }));
   btn(".tempo-btns", "×2", () => regrid({ mult: 2 }));
   btn(".tempo-btns", "beat −1", () => regrid({ shift: -1 }));
@@ -224,7 +231,12 @@ export async function mountSong(root, { id, audio, input }) {
     const { chops } = st();
     $(".bpm").textContent = chops.bpm.toFixed(1);
     $(".meter").textContent = `${chops.beats_per_bar}/4`;
-    root.querySelectorAll(".grid-btns button").forEach((b) => b.classList.toggle("on", b.textContent === chops.grid));
+    const transient = chops.mode === "transient";
+    $(".mode-grid").classList.toggle("on", !transient);
+    $(".mode-transient").classList.toggle("on", transient);
+    $(".sens-out").textContent = transient ? `${chops.chops.length} slices` : "";
+    if (transient && document.activeElement !== $(".sens")) $(".sens").value = chops.sensitivity ?? 0.5;
+    root.querySelectorAll(".grid-btns button").forEach((b) => b.classList.toggle("on", !transient && b.textContent === chops.grid));
     root.querySelectorAll(".meter-btns button").forEach((b) => b.classList.toggle("on", b.textContent === `${chops.beats_per_bar}/4`));
   }
   const vol = $(".vol");

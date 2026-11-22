@@ -201,12 +201,20 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     store.dispatch({ type: "chops.replace", chops });
     followTo(t);
   }
-  /** change: { grid } | { meter } | { mult } | { shift } | { bar1: true } */
+  let lastGrid = null; // the grid to return to when switching back from transient mode
+  /** change: { grid } | { meter } | { mult } | { shift } | { bar1: true } | { mode: "grid"|"transient", sensitivity? } */
   async function regrid(change) {
     const { chops } = store.get();
+    let mode = chops.mode ?? "grid";
+    let sensitivity = chops.sensitivity ?? 0.5;
+    if (mode === "grid") lastGrid = chops.grid;
+    if (change.mode) mode = change.mode;
+    if (change.sensitivity !== undefined) { sensitivity = change.sensitivity; mode = "transient"; }
+    if (change.grid) mode = "grid";
     let beat_offset = chops.beat_offset ?? 0;
     let bpm_mult = chops.bpm_mult ?? 1;
     let grid = chops.grid;
+    if (mode === "grid" && chops.mode === "transient") grid = lastGrid ?? "1/4";
     if (change.grid) grid = change.grid;
     if (change.meter !== undefined) meterOverride = change.meter;
     if (change.mult) bpm_mult = MULTS.reduce((a, b) => (Math.abs(b - bpm_mult * change.mult) < Math.abs(a - bpm_mult * change.mult) ? b : a));
@@ -218,7 +226,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const bpb = meterOverride ? Number(meterOverride.split("/")[0]) : chops.beats_per_bar;
     beat_offset = ((beat_offset % bpb) + bpb) % bpb;
     if (beat_offset > 3) beat_offset -= bpb;
-    const r = await postJson(`/api/songs/${id}/regrid`, { grid, meter: meterOverride, beat_offset, bpm_mult });
+    const r = await postJson(`/api/songs/${id}/regrid`, { grid, meter: meterOverride, beat_offset, bpm_mult, mode, sensitivity });
     if (!r.ok) return false;
     adoptChops(await r.json());
     return true;

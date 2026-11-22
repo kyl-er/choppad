@@ -273,7 +273,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._err(404, "unknown song")
                 try:
                     chops = regrid(d, grid=body.get("grid") or "1/4", meter=body.get("meter"),
-                                   beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1)
+                                   beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1,
+                                   **({"mode": body["mode"], "sensitivity": body.get("sensitivity")} if body.get("mode") else {}))
                 except (ValueError, KeyError) as e:
                     return self._err(400, str(e))
                 return self._json(chops)

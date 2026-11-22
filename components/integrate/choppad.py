@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(_COMPONENTS, "..", "contracts"))
 from choppad_ingest import ingest as _ingest
 from choppad_rhythm import analyze as _analyze
 from choppad_chop import chop as _chop
+from choppad_transient import chop_transients as _chop_transients, detect_onsets as _detect_onsets
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 UI_DIR = os.path.join(REPO_DIR, "components", "ui")
@@ -58,7 +59,7 @@ def run_pipeline(source: str, media_root: str, grid: str = "1/4", meter: str | N
         json.dump(analysis, f, indent=2)
 
     stage("chopping", 0.85)
-    chops = _chop(analysis, grid=grid, meter=meter)
+    chops = {**_chop(analysis, grid=grid, meter=meter), "mode": "grid"}
     chops_path = os.path.join(media_dir, "chops.json")
     with open(chops_path, "w") as f:
         json.dump(chops, f, indent=2)
@@ -66,10 +67,29 @@ def run_pipeline(source: str, media_root: str, grid: str = "1/4", meter: str | N
     return media_dir
 
 
-def regrid(media_dir: str, *, grid="1/4", meter=None, beat_offset=0, bpm_mult=1) -> dict:
-    """Re-run chop on media_dir/analysis.json, write chops.json, return it."""
+def _onsets(media_dir: str) -> dict:
+    """Onset candidates of audio.wav, cached as onsets.json (the sensitivity slider only re-filters them)."""
+    audio = os.path.join(media_dir, "audio.wav")
+    path = os.path.join(media_dir, "onsets.json")
+    if os.path.isfile(path) and os.path.getmtime(path) >= os.path.getmtime(audio):
+        return json.load(open(path))
+    table = _detect_onsets(audio)
+    with open(path, "w") as f:
+        json.dump(table, f)
+    return table
+
+
+def regrid(media_dir: str, *, grid="1/4", meter=None, beat_offset=0, bpm_mult=1, mode="grid", sensitivity=0.5) -> dict:
+    """Re-run chop on media_dir/analysis.json, write chops.json, return it.
+    mode="transient": slices start at detected onsets (sensitivity 0..1) instead of on the tempo grid."""
     analysis = json.load(open(os.path.join(media_dir, "analysis.json")))
-    chops = _chop(analysis, grid=grid, meter=meter, beat_offset=beat_offset, bpm_mult=bpm_mult)
+    if mode == "transient":
+        sens = float(0.5 if sensitivity is None else sensitivity)
+        chops = _chop_transients(_onsets(media_dir), analysis, sensitivity=sens, meter=meter, beat_offset=beat_offset)
+    elif mode in (None, "grid"):
+        chops = {**_chop(analysis, grid=grid, meter=meter, beat_offset=beat_offset, bpm_mult=bpm_mult), "mode": "grid"}
+    else:
+        raise ValueError("mode must be grid or transient")
     with open(os.path.join(media_dir, "chops.json"), "w") as f:
         json.dump(chops, f, indent=2)
     return chops
