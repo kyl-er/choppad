@@ -37,3 +37,35 @@ Append a field to a sub-page in `views/lcdpages.js` (kinds: `num`, `inp`, `bool`
 - Video is black in headless Chromium (no H.264); not checked with a real video frame in the shots.
 - Step-grid row numbers are 8.5 px at 1500x1000 (rows are about 8 px); they are readable but at the floor. At 1920x1080 rows are 12 px.
 - Phone mode in portrait leaves empty bands above and below the square pad grid.
+
+# CHOP-12: the second sampler-core slice in the station (2026-11-22)
+
+Every feature of contracts §14 now has a home; presentation only (state, actions, session methods). Tests: `tests/e2e/test_station2.py` (one test per feature, operated through the screen). Screenshots: `docs/design/shots/built2-{light,dark}-<page>.png` (`CHOPPAD_SHOTS=1` rewrites them).
+
+## Where things are
+| Feature | Place |
+|---|---|
+| Project tempo, fit to tempo | GRID page 4 "project tempo" (tempo, song tempo, follow, refit all, fit pattern / bank pads, result list with skipped pads and reasons). Header and MAIN status line show `92.0 BPM (song 101.0)`. Pads: `FIT` tag + `.fitted` for `stretch.fit`, `≈` + `.handstretched` for hand stretches |
+| Envelope | PAD 5 (attack, decay, sustain, release + drawn ADSR curve) |
+| Filter | PAD 6 (type, cutoff on a log range typed in Hz, Q on a log range) |
+| Mute group | PAD 7 (group 0-8, choke toggle, one-line explanation that follows the choke setting); `M<n>` badge on the pad |
+| 16 levels | `16 LEVELS` key under the pads (source = selected pad, mode = last mode used) and PAD 8 (mode, source). While on, the pads show the level (vel %, semitones, cutoff Hz); the LCD MAIN line and PAD 8 name the source pad |
+| Resample | EXPORT 3 "sample" (source, unit, length, target pad, GO, progress bar, result); `RS` tag + `.resampled` on the pad |
+| Song mode | SEQ 3 "song" (mode, new, copy, name, edit, remove, pattern list) and SEQ 4 "chain" (entries with pattern, repeats, reorder, remove; whole-song .wav / .mid). While a chain plays: the entry is marked in the list and named on the LCD (SEQ pages and MAIN line); the PLAY key reads "Chain" in song mode |
+| Stems | AI 2 "stems" (separate; plain explanation of `CHOPPAD_STEMS_BACKEND=remote` + `CHOPPAD_STEMS_URL` on 501; per-pad mix/drums/bass/vocals/other); stem tag on the pad |
+| Import progress | `library.js`: rows driven by `GET /api/events` `job` events (step, bar, percent); polling `/api/jobs/<id>` only when a job gets no news for 3 s; opens the song when done (only for imports this tab started) |
+| DAW bridge | header chip `-> Hydrogen (bank A)` and `display only` for a non-primary tab; EXPORT 4 "DAW" (`> Hydrogen`, Sync, Stop) |
+
+## Decisions
+- New sub-pages are appended after the old ones so the numbers tests rely on (PAD 4 stretch, GRID 3, EXPORT 1-2) did not move. The LCD head now also names the sub-page (`5/8 ENV`).
+- The LCD mechanism got three small extensions: `extra` (an element under the rows: curve, lists, results), `scale` on `num` fields (log ranges that still take real units from the keypad and wheel), and the `cols2` page class (two columns, leaving room for an extra). Documented at the top of `lcdpages.js`.
+- The 16 LEVELS key sits on the bank-label line (not a new row) so the step grid keeps 143 px at 1500x1000.
+- PLAY key: shows pause bars and "Playing" while the loop runs, so it no longer reads like STOP. It keeps the text "■" in a visually hidden span (older tests in test_smoke assert it and may not be edited).
+- Enter: on a control the keyboard focused (Tab) it activates the control; after a mouse click, on the body and on the song it is still play/pause. Decided by a flag set by Tab / pointerdown, not by `:focus-visible` (which also matches after a key press). No test edits were needed.
+- DAW: the server has no `close` command (only open, sync, play, stop), so the EXPORT 4 page has Stop (the bridge's transport) and says to quit Hydrogen itself.
+- `session.js` got two thin additions: the DAW name in `remote.daw` (`{open, daw, bank}`, it was dropped from the stream event) and `dawCommand(name, command, {bank})`.
+
+## Known limits
+- The LCD is 125 px tall inside: the chain editor and result lists scroll inside their own box (mouse wheel over them scrolls when they overflow; the data wheel works as usual elsewhere).
+- Pads are 57 px wide at 1500x1000: the `M<n>` badge and the FIT / RS / stem tag share the bottom edge, and a tagged pad moves its label up a little.
+- SONG key (`.play`) still plays the original recording; the chain plays on the PLAY key in song mode.
