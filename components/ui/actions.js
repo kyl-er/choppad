@@ -9,7 +9,7 @@
 //   bank, selected                                                                            what the player is looking at
 //   settings { mode, choke, fullLevel, quant, swing, metronome, repeat, repeatRate, follow }   not saved
 
-import { DEFAULT_PAD } from "./engine.js";
+import { DEFAULT_FILTER, DEFAULT_PAD, FILTER_TYPES } from "./engine.js";
 import { DEFAULT_FX } from "./fx.js";
 
 export { DEFAULT_PAD, DEFAULT_FX };
@@ -27,8 +27,31 @@ const FX_KEYS = Object.keys(DEFAULT_FX);
 const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 const isPad = (p) => Number.isInteger(p) && p >= 0 && p < PADS;
 const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => obj && k in obj).map((k) => [k, obj[k]]));
-const same = (a, b) => Object.keys(b).every((k) => a[k] === b[k]);
 const isNum = (x) => typeof x === "number" && Number.isFinite(x);
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+/** Deep equality for JSON values (pad filters are objects). */
+const eq = (a, b) => a === b || (!!a && !!b && typeof a === "object" && typeof b === "object" && Array.isArray(a) === Array.isArray(b)
+  && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => eq(a[k], b[k])));
+const same = (a, b) => Object.keys(b).every((k) => eq(a[k], b[k]));
+
+/** Pure: a filter {type, cutoff, q} made from `f` on top of `base`; fields that are not valid are ignored. null when `f` is no object. */
+function cleanFilter(f, base) {
+  if (!f || typeof f !== "object" || Array.isArray(f)) return null;
+  const o = { ...base };
+  if (FILTER_TYPES.includes(f.type)) o.type = f.type;
+  if (isNum(f.cutoff)) o.cutoff = clamp(f.cutoff, 20, 20000);
+  if (isNum(f.q)) o.q = clamp(f.q, 0.1, 24);
+  return o;
+}
+/** Pure: the valid part of pad params. gainDb/pitch/attack/release/reverse/mode pass through as before; the W3b keys are
+ *  validated (decay 0..10 s, sustain 0..1, filter merged onto the pad's current filter). */
+export function cleanPad(raw, cur = DEFAULT_PAD) {
+  const out = pick(raw, PAD_KEYS);
+  if ("decay" in out) { if (isNum(out.decay)) out.decay = clamp(out.decay, 0, 10); else delete out.decay; }
+  if ("sustain" in out) { if (isNum(out.sustain)) out.sustain = clamp(out.sustain, 0, 1); else delete out.sustain; }
+  if ("filter" in out) { const f = cleanFilter(out.filter, cur.filter ?? DEFAULT_FILTER); if (f) out.filter = f; else delete out.filter; }
+  return out;
+}
 
 /** Tempo the sequencer, metronome, note repeat and every render use: the project tempo when set, else the song's own. */
 export const projectBpm = (state) => state.project.tempo?.bpm ?? state.chops?.bpm;
@@ -46,7 +69,7 @@ export function initialState({ project = {}, chops, sections = [] } = {}) {
   const pattern = project?.pattern;
   return {
     project: {
-      pads: Array.from({ length: PADS }, (_, p) => ({ ...DEFAULT_PAD, ...pick(project?.pads?.[p], PAD_KEYS) })),
+      pads: Array.from({ length: PADS }, (_, p) => ({ ...DEFAULT_PAD, ...cleanPad(project?.pads?.[p]) })),
       overrides: { ...(project?.overrides ?? {}) },
       pattern: { bars: pattern?.bars ?? 2, events: [...(pattern?.events ?? [])] },
       fx: { ...DEFAULT_FX, ...pick(project?.fx, FX_KEYS) },
@@ -79,7 +102,7 @@ export function reduce(state, action) {
   switch (a.type) {
     case "pad.set": {
       if (!isPad(a.pad)) return state;
-      const params = pick(a.params, PAD_KEYS);
+      const params = cleanPad(a.params, state.project.pads[a.pad]);
       if (same(state.project.pads[a.pad], params)) return state;
       const pads = state.project.pads.map((P, p) => (p === a.pad ? { ...P, ...params } : P));
       return withProject(state, { pads });
@@ -145,7 +168,7 @@ export function reduce(state, action) {
         if (k.song_id !== a.song) o.song = k.song_id;   // `song` = the open song's id: its own slices need no source
         if (k.stretch && k.stretch.url && Number(k.stretch.ratio) > 0) o.stretch = cleanStretch(k.stretch);
         overrides[`${bank}:${pad}`] = o;
-        const params = pick(k.params, PAD_KEYS);
+        const params = cleanPad(k.params, pads[pad]);
         if (Object.keys(params).length) pads = pads.map((P, i) => (i === pad ? { ...P, ...params } : P));
       });
       return withProject(state, { overrides, pads });

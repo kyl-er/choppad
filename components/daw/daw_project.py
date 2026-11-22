@@ -90,6 +90,16 @@ def content_key(media_dir, chops, bank, fx):
     return hashlib.sha1(blob.encode()).hexdigest()[:8]
 
 
+def pads_key(media_dir, pads, bank, fx):
+    """Content hash of what the kit sounds like: the exporter's pads (slices, stretch renderings, other songs, filter and
+    envelope), the bank, the master fx and the song's audio file. A different sound is a different kit folder."""
+    import choppad_voice as V
+    st = os.stat(os.path.join(media_dir, "audio.wav"))
+    blob = json.dumps([[p["pad"], p["start"], p["end"], p["audio"], p["stretch"], V.params_of(p.get("params"))] for p in pads] +
+                      [bank, fx or {}, st.st_size, int(st.st_mtime)], sort_keys=True, default=str)
+    return hashlib.sha1(blob.encode()).hexdigest()[:8]
+
+
 def build_project(media_dir, out_root, *, bank=None, fx="project", project=None):
     """Render the kit into `out_root/<kit name>/` (skipped when that exact content is already there) and describe it.
 
@@ -103,23 +113,23 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None)
     proj = project if project is not None else _read(os.path.join(media_dir, "project.json"), {})
     pattern = proj.get("pattern") or {"bars": 2, "events": []}
     bank = pick_bank(pattern, bank, len(chops["banks"]))
-    chops = effective_chops(chops, proj.get("overrides"), bank)
+    # W3b: the kit is built from the exporter's pad list, so custom slices, stretched pads, pads from other songs and each
+    # pad's filter and envelope (baked into the WAV) all reach the DAW; unusable overrides are skipped
+    overrides = {k: o for k, o in (proj.get("overrides") or {}).items() if isinstance(o, dict)
+                 and isinstance(o.get("start"), (int, float)) and isinstance(o.get("end"), (int, float)) and o["end"] > o["start"]}
+    pads = X.bank_pads(media_dir, bank, overrides, proj.get("pads"))
     if fx == "project":
         fx = proj.get("fx")
     sid = meta.get("id") or os.path.basename(os.path.abspath(media_dir))
     title = meta.get("title") or sid
-    key = content_key(media_dir, chops, bank, fx)
+    key = pads_key(media_dir, pads, bank, fx)
     kit_name = f"ChopPad {clean_name(title)} B{bank + 1} {key}"
     kit_dir = os.path.join(out_root, kit_name)
     if not os.path.isfile(os.path.join(kit_dir, "drumkit.xml")):
-        tmp = tempfile.mkdtemp(prefix="choppad-daw-view-")  # exporter input: audio.wav + the effective chops.json
         try:
-            os.symlink(os.path.abspath(os.path.join(media_dir, "audio.wav")), os.path.join(tmp, "audio.wav"))
-            with open(os.path.join(tmp, "chops.json"), "w") as f:
-                json.dump(chops, f)
             stage = kit_dir + ".part"
             shutil.rmtree(stage, ignore_errors=True)
-            X.export_hydrogen(tmp, stage, bank=bank, kit_name=kit_name)
+            X.write_hydrogen(pads, stage, kit_name)
             if fx:
                 from choppad_fx import apply_to_file, is_neutral
                 if not is_neutral(fx):
@@ -130,7 +140,7 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None)
             shutil.rmtree(kit_dir, ignore_errors=True)
             os.replace(stage, kit_dir)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(kit_dir + ".part", ignore_errors=True)
     n = len(chops["banks"][bank])
     slots = [Chop(p, os.path.join(kit_dir, f"chop_{p:02d}.wav"), 36 + p) if p < n else None for p in range(PADS)]
     # W3b: the project tempo (project.json "tempo": {bpm, follow}) wins over the song's own tempo

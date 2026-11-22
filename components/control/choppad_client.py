@@ -23,7 +23,8 @@ PRESETS = {  # twin of components/ui/fx.js PRESETS
     "radio": {"tone": 0, "low": -8, "mid": 6, "high": -6, "filter": 0.45, "reverb": 0, "size": 0.5},
 }
 FX_KEYS = ("tone", "low", "mid", "high", "filter", "reverb", "size")
-PAD_KEYS = ("gainDb", "pitch", "attack", "release", "reverse", "mode")
+PAD_KEYS = ("gainDb", "pitch", "attack", "decay", "sustain", "release", "reverse", "mode", "filter")
+FILTER_TYPES = ("off", "lp", "hp", "bp")
 
 
 class ControlError(Exception):
@@ -136,7 +137,8 @@ class Client:
         if p:
             acts.append({"type": "pad.set", "pad": pad, "params": p})
         if not acts:
-            raise ControlError("nothing to change; give --gain/--pitch/--attack/--release/--reverse/--mode or --reset")
+            raise ControlError("nothing to change; give --gain/--pitch/--attack/--decay/--sustain/--release/--reverse/--mode/"
+                               "--filter-type/--cutoff/--q or --reset")
         return self.actions(sid, acts)
 
     def pattern_set(self, sid, steps=None, bars=None, bank=None, vel=1.0, add=False):
@@ -416,11 +418,20 @@ def pattern_events(steps_by_pad, bank, vel=1.0):
             for pad, steps in sorted(steps_by_pad.items()) for s in sorted(set(steps))]
 
 
-def pad_params(gain=None, pitch=None, attack=None, release=None, reverse=None, mode=None):
+def pad_params(gain=None, pitch=None, attack=None, release=None, reverse=None, mode=None,
+               decay=None, sustain=None, filter_type=None, cutoff=None, q=None):
     p = {}
-    for k, v in (("gainDb", gain), ("pitch", pitch), ("attack", attack), ("release", release), ("reverse", reverse)):
+    for k, v in (("gainDb", gain), ("pitch", pitch), ("attack", attack), ("decay", decay), ("sustain", sustain),
+                 ("release", release), ("reverse", reverse)):
         if v is not None:
             p[k] = v
+    if sustain is not None and not 0 <= sustain <= 1:
+        raise ControlError("sustain must be between 0 and 1")
+    if filter_type is not None and filter_type not in FILTER_TYPES:
+        raise ControlError("filter type must be off, lp, hp or bp")
+    f = {k: v for k, v in (("type", filter_type), ("cutoff", cutoff), ("q", q)) if v is not None}
+    if f:  # only the given fields change: the server merges a partial filter onto the pad's own
+        p["filter"] = f
     if mode is not None:
         if mode not in ("oneshot", "gate", "playthrough", "default"):
             raise ControlError("mode must be oneshot, gate, playthrough or default")

@@ -267,6 +267,59 @@ class Core2(unittest.TestCase):
         page2.wait_for_function(f"{S}.store.get().project.tempo.bpm === 70", timeout=10000)
         self.assertEqual(errors + errors2, [])
 
+    # ------------------------------------------------------------------ 2. per-pad filter and ADSR
+    RENDER_PAD = """async ([pad, params]) => {
+        const s = window.choppad.song.session, T = window.__t;
+        s.store.dispatch({ type: 'pad.reset', pad });
+        if (params) s.store.dispatch({ type: 'pad.set', pad, params });
+        s.store.dispatch({ type: 'pattern.load', pattern: { bars: 1, events: [{ beat: 0, pad, bank: 0, vel: 1, pass: -1 }] } });
+        const buf = await T.decode(Array.from(await s.renderPatternWav()));
+        const x = buf.getChannelData(0), sr = buf.sampleRate;
+        const n = Math.round(0.5 * sr);
+        let e = 0, d = 0, tail = 0, head = 0;
+        for (let i = 1; i < n; i++) { e += x[i] * x[i]; d += (x[i] - x[i - 1]) ** 2; }
+        for (let i = Math.round(0.25 * sr); i < Math.round(0.4 * sr); i++) tail += x[i] * x[i];
+        for (let i = Math.round(0.02 * sr); i < Math.round(0.1 * sr); i++) head += x[i] * x[i];
+        return { energy: e, hf: d / (e + 1e-12), tail, head };
+    }"""
+
+    def test_pad_filter_and_envelope_in_the_offline_render_and_over_http(self):
+        page, errors = self.open_song()
+        S = self.S
+        plain = page.evaluate(self.RENDER_PAD, [3, None])
+        lp = page.evaluate(self.RENDER_PAD, [3, {"filter": {"type": "lp", "cutoff": 400, "q": 0.7}}])
+        hp = page.evaluate(self.RENDER_PAD, [3, {"filter": {"type": "hp", "cutoff": 6000, "q": 0.7}}])
+        self.assertLess(lp["hf"], 0.25 * plain["hf"], (plain, lp))      # a low-pass takes the top off
+        self.assertGreater(hp["hf"], 2 * plain["hf"], (plain, hp))      # a high-pass leaves the top
+        self.assertLess(hp["energy"], 0.5 * plain["energy"])
+        # the envelope: sustain 0 with a short decay silences the tail, the default holds it
+        shaped = page.evaluate(self.RENDER_PAD, [3, {"decay": 0.04, "sustain": 0}])
+        self.assertLess(shaped["tail"], 0.02 * plain["tail"], (plain, shaped))
+        self.assertGreater(shaped["head"], 0.01 * plain["head"], "the attack and the start of the decay are still there")
+        # an agent (the HTTP action endpoint) sets a filter; the open page shows it and it is saved
+        st, out = api(self.base, f"/api/songs/{self.sid}/actions", {"actions": [
+            {"type": "pad.set", "pad": 5, "params": {"filter": {"type": "bp", "cutoff": 1500, "q": 4}, "decay": 0.2, "sustain": 0.3}}]})
+        self.assertEqual(st, 200)
+        page.wait_for_function(f"{S}.store.get().project.pads[5].filter.type === 'bp'", timeout=10000)
+        pad5 = page.evaluate(f"{S}.store.get().project.pads[5]")
+        self.assertEqual((pad5["filter"], pad5["decay"], pad5["sustain"]), ({"type": "bp", "cutoff": 1500, "q": 4}, 0.2, 0.3))
+        self.assertEqual(out["project"]["pads"][5]["filter"]["cutoff"], 1500)
+        # the engine voice for that pad has a filter in the graph (and a pad without one has none)
+        n = page.evaluate(f"""() => {{
+            const ctx = window.choppad.audio.ctx; let made = 0; const orig = ctx.createBiquadFilter.bind(ctx);
+            ctx.createBiquadFilter = () => {{ made++; return orig(); }};
+            const s = {S}; s.engine.trigger(6, 1); const none = made; s.engine.trigger(5, 1); const one = made;
+            s.engine.stopAll(); ctx.createBiquadFilter = orig; return [none, one];
+        }}""")
+        self.assertEqual(n, [0, 1])
+        # export: the saved project's pad settings reach the SFZ
+        st, out = api(self.base, f"/api/songs/{self.sid}/export", {"kind": "sfz", "bank": 0})
+        self.assertEqual(st, 200, out)
+        sfz = open(out["path"]).read()
+        self.assertIn("fil_type=bpf_2p", sfz)
+        self.assertIn("ampeg_sustain=30.0", sfz)
+        self.assertEqual(errors, [])
+
 
 if __name__ == "__main__":
     unittest.main()

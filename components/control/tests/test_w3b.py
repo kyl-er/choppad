@@ -137,5 +137,27 @@ class TempoVerbs(Rig):
         self.assertIn("tempo", {t["name"] for t in choppad_mcp.McpServer(self.c).tools_list()})
 
 
+class PadSound(Rig):
+    def test_pad_filter_and_envelope_through_the_pad_verb(self):
+        lines = []
+        rc = choppad.run_verb(["pad", "song1", "4", "--filter-type", "lp", "--cutoff", "900", "--q", "2",
+                               "--decay", "0.2", "--sustain", "0.5"], client=self.c, out=lines.append, err=lambda s: None)
+        self.assertEqual(rc, 0)
+        p = self.project()["pads"][4]
+        self.assertEqual((p["filter"], p["decay"], p["sustain"]), ({"type": "lp", "cutoff": 900, "q": 2}, 0.2, 0.5))
+        self.c.pad("song1", 4, cutoff=300)   # only the given field changes
+        self.assertEqual(self.project()["pads"][4]["filter"], {"type": "lp", "cutoff": 300, "q": 2})
+        self.c.pad("song1", 4, reset=True)
+        self.assertEqual(self.project()["pads"][4]["filter"]["type"], "off")
+        for bad in ({"filter_type": "notch"}, {"sustain": 2}):
+            with self.assertRaises(cc.ControlError):
+                self.c.pad("song1", 4, **bad)
+
+    def test_pad_tool_in_mcp(self):
+        tools = choppad_mcp.build_tools(self.c)
+        tools["pad"]["_fn"]({"id": "song1", "pad": 1, "filter_type": "hp", "cutoff": 2000})
+        self.assertEqual(self.project()["pads"][1]["filter"]["type"], "hp")
+
+
 if __name__ == "__main__":
     unittest.main()

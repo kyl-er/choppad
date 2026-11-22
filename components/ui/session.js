@@ -77,7 +77,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     }, Math.max(0, (when - ctx.currentTime) * 1000));
     timers.add(t);
   }
-  const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b) => { engine.trigger(p, vel, when, b); flashAt(when, p, b); } });
+  const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b, ev) => { engine.trigger(p, vel, when, b, ev); flashAt(when, p, b); } });
   const syncSeqTempo = () => {   // the project tempo when set, else the song's own
     const st = store.get();
     seq.setBpm(projectBpm(st));
@@ -352,7 +352,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     for (const e of pat.events) {
       const step = q ? Math.round(e.beat / q) : 0;
       const beat = q && step % 2 === 1 ? e.beat + settings.swing * q : e.beat;
-      oe.trigger(e.pad, e.vel, (beat * 60) / bpm, e.bank);
+      oe.trigger(e.pad, e.vel, (beat * 60) / bpm, e.bank, e);
     }
     return encodeWav(await off.startRendering());
   }
@@ -385,7 +385,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   /** kind: "hydrogen" | "sfz" | "zip" (16 WAVs; also returns `url` to download). Returns { ok, path, url?, note, error }. */
   async function exportBank(kind) {
     const { bank, project } = store.get();
-    const r = await postJson(`/api/songs/${id}/export`, { kind, bank, fx: project.fx, overrides: project.overrides });
+    const r = await postJson(`/api/songs/${id}/export`, { kind, bank, fx: project.fx, overrides: project.overrides, pads: project.pads });
     const body = await r.json().catch(() => ({}));
     return { ok: r.ok, ...body, error: r.ok ? undefined : (body.error || r.status) };
   }

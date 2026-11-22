@@ -15,7 +15,10 @@ import math
 PADS = 16
 DEFAULT_TEMPO = {"bpm": None, "follow": True}
 TEMPO_MIN, TEMPO_MAX = 20, 400
-DEFAULT_PAD = {"gainDb": 0, "pitch": 0, "attack": 0.0025, "release": 0.003, "reverse": False, "mode": None}
+FILTER_TYPES = ("off", "lp", "hp", "bp")
+DEFAULT_FILTER = {"type": "off", "cutoff": 8000, "q": 0.7}
+DEFAULT_PAD = {"gainDb": 0, "pitch": 0, "attack": 0.0025, "decay": 0, "sustain": 1, "release": 0.003, "reverse": False,
+               "mode": None, "filter": DEFAULT_FILTER}
 DEFAULT_FX = {"tone": 0, "low": 0, "mid": 0, "high": 0, "filter": 0, "reverb": 0, "size": 0.5}
 DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant": "1/16", "swing": 0,
                     "metronome": True, "repeat": False, "repeatRate": 0.25, "follow": True}
@@ -75,8 +78,55 @@ def _pick(obj, keys):
 
 
 def _same_value(a, b):
-    """JS ===: True is not 1."""
+    """JS ===, extended to JSON objects (pad filters): True is not 1."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
     return a == b and isinstance(a, bool) == isinstance(b, bool)
+
+
+def _clamp(v, lo, hi):
+    return min(hi, max(lo, v))
+
+
+def _clean_filter(f, base):
+    """A filter {type, cutoff, q} made from `f` on top of `base`; fields that are not valid are ignored. None when `f` is no object."""
+    if not isinstance(f, dict):
+        return None
+    o = dict(base)
+    if f.get("type") in FILTER_TYPES:
+        o["type"] = f["type"]
+    if _is_num(f.get("cutoff")):
+        o["cutoff"] = _clamp(f["cutoff"], 20, 20000)
+    if _is_num(f.get("q")):
+        o["q"] = _clamp(f["q"], 0.1, 24)
+    return o
+
+
+def clean_pad(raw, cur=None):
+    """The valid part of pad params (twin of cleanPad in actions.js): gainDb/pitch/attack/release/reverse/mode pass through;
+    decay is 0..10 s, sustain 0..1, filter is merged onto the pad's current filter."""
+    out = _pick(raw, DEFAULT_PAD)
+    if "decay" in out:
+        if _is_num(out["decay"]):
+            out["decay"] = _clamp(out["decay"], 0, 10)
+        else:
+            del out["decay"]
+    if "sustain" in out:
+        if _is_num(out["sustain"]):
+            out["sustain"] = _clamp(out["sustain"], 0, 1)
+        else:
+            del out["sustain"]
+    if "filter" in out:
+        f = _clean_filter(out["filter"], (cur or DEFAULT_PAD).get("filter") or DEFAULT_FILTER)
+        if f is not None:
+            out["filter"] = f
+        else:
+            del out["filter"]
+    return out
+
+
+def _default_pad():
+    return copy.deepcopy(DEFAULT_PAD)
 
 
 def _same(a, b):
@@ -98,7 +148,7 @@ def initial_state(project=None, chops=None, sections=None):
     overrides = project.get("overrides") if isinstance(project.get("overrides"), dict) else {}
     return {
         "project": {
-            "pads": [{**DEFAULT_PAD, **_pick(pads[p] if p < len(pads) else None, DEFAULT_PAD)} for p in range(PADS)],
+            "pads": [{**_default_pad(), **clean_pad(pads[p] if p < len(pads) else None)} for p in range(PADS)],
             "overrides": copy.deepcopy(overrides),
             "pattern": {"bars": pattern.get("bars") if pattern.get("bars") is not None else 2,
                         "events": copy.deepcopy(list(pattern.get("events") or []))},
@@ -136,8 +186,10 @@ def reduce(state, action):
     proj = state["project"]
     if t == "pad.set":
         pad = _pad(a.get("pad"))
-        params = _pick(a.get("params"), DEFAULT_PAD)
-        if pad is None or _same(proj["pads"][pad], params):
+        if pad is None:
+            return state
+        params = clean_pad(a.get("params"), proj["pads"][pad])
+        if _same(proj["pads"][pad], params):
             return state
         pads = [{**P, **params} if p == pad else P for p, P in enumerate(proj["pads"])]
         return _with_project(state, pads=pads)
@@ -145,7 +197,7 @@ def reduce(state, action):
         pad = _pad(a.get("pad"))
         if pad is None:
             return state
-        return _with_project(state, pads=[dict(DEFAULT_PAD) if p == pad else P for p, P in enumerate(proj["pads"])])
+        return _with_project(state, pads=[_default_pad() if p == pad else P for p, P in enumerate(proj["pads"])])
     if t == "pad.copyToAll":
         pad = _pad(a.get("pad"))
         if pad is None:
@@ -221,7 +273,7 @@ def reduce(state, action):
             if isinstance(ks, dict) and ks.get("url") and _is_num(ks.get("ratio")) and ks["ratio"] > 0:
                 o["stretch"] = _clean_stretch(ks)
             overrides[f"{bank}:{pad}"] = o
-            params = _pick(k.get("params"), DEFAULT_PAD)
+            params = clean_pad(k.get("params"), pads[pad])
             if params:
                 pads = [{**P, **params} if i == pad else P for i, P in enumerate(pads)]
         return _with_project(state, overrides=overrides, pads=pads)

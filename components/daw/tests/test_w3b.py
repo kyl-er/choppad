@@ -29,6 +29,18 @@ class ProjectTempo(unittest.TestCase):
         p = self.build(tempo={"bpm": None, "follow": True})
         self.assertEqual(p.bpm, 120.0)
 
+    def test_pad_filter_and_envelope_are_baked_into_the_kit(self):
+        plain = self.build()
+        pads = [{} for _ in range(16)]
+        pads[0] = {"filter": {"type": "lp", "cutoff": 300, "q": 2}, "sustain": 0.2, "decay": 0.05}
+        shaped = self.build(pads=pads)
+        self.assertNotEqual(plain.key, shaped.key, "a different sound is a different kit")
+        a = open(os.path.join(plain.kit_dir, "chop_00.wav"), "rb").read()
+        b = open(os.path.join(shaped.kit_dir, "chop_00.wav"), "rb").read()
+        self.assertNotEqual(a, b)
+        self.assertEqual(open(os.path.join(plain.kit_dir, "chop_01.wav"), "rb").read(),
+                         open(os.path.join(shaped.kit_dir, "chop_01.wav"), "rb").read(), "pads without settings are unchanged")
+
     def test_h2song_carries_the_project_tempo(self):
         p = self.build(tempo={"bpm": 92.5, "follow": True})
         root, _ = h2song.build_song(title=p.title, bpm=p.bpm, beats_per_bar=p.beats_per_bar, wavs=p.wavs(), pattern=p.pattern,

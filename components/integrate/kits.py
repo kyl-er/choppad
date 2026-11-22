@@ -22,7 +22,9 @@ SCHEMA = "choppad.kit/1"
 KIT_DIR = "_kits"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PARAM_KEYS = {"gainDb": (int, float), "pitch": (int, float), "attack": (int, float), "release": (int, float),
-              "reverse": (bool,), "mode": (str, type(None))}
+              "reverse": (bool,), "mode": (str, type(None)),
+              # W3b: ADSR, filter, mute group (validated and clamped like the pad.set action does)
+              "decay": (int, float), "sustain": (int, float), "filter": (dict,), "muteGroup": (int,)}
 FX_KEYS = ("tone", "low", "mid", "high", "filter", "reverb", "size")
 
 
@@ -36,6 +38,17 @@ def _num(v):
 
 def _song_exists(media_root, sid):
     return isinstance(sid, str) and ID_RE.match(sid) and os.path.isfile(os.path.join(media_root, sid, "meta.json"))
+
+
+def _clean_params(params):
+    """Pad params of a kit pad, validated the way the pad.set action does it (clamped decay/sustain/filter, mute group 0..8)."""
+    import sys
+    ctl = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "control")
+    if ctl not in sys.path:
+        sys.path.insert(0, ctl)
+    import choppad_actions
+    out = choppad_actions.clean_pad(params)
+    return {k: v for k, v in out.items() if k in params}
 
 
 def normalize(doc, media_root, *, partial=None):
@@ -64,7 +77,7 @@ def normalize(doc, media_root, *, partial=None):
         params = p.get("params") or {}
         if not isinstance(params, dict):
             raise ValueError(f"pad {i + 1}: params must be an object")
-        out["params"] = {k: v for k, v in params.items() if k in PARAM_KEYS and isinstance(v, PARAM_KEYS[k])}
+        out["params"] = _clean_params({k: v for k, v in params.items() if k in PARAM_KEYS and isinstance(v, PARAM_KEYS[k])})
         st = p.get("stretch")
         if st:
             m = re.match(r"^/media/([A-Za-z0-9_-]{1,64})/stretch/[0-9a-f]{16}\.wav$", str(st.get("url") or ""))

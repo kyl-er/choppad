@@ -80,14 +80,20 @@ def build_tools(client):
               {"id": _ID, "bank": _BANK, "pad": _PAD, "start": _N("seconds"), "end": _N("seconds, > start"),
                "clear": {"type": "boolean"}}, ["id", "bank", "pad"],
               lambda a: _watch(c.assign(a["id"], a["bank"], a["pad"], a.get("start"), a.get("end"), bool(a.get("clear"))))),
-        _tool("pad", "Sound settings of one pad: gain (dB), pitch (semitones), attack/release (s), reverse, mode "
-              "(oneshot, gate, playthrough, default). Only the given fields change.",
+        _tool("pad", "Sound settings of one pad: gain (dB), pitch (semitones), ADSR envelope (attack, decay, release in s, "
+              "sustain 0-1), a filter (filter_type off/lp/hp/bp, cutoff Hz, q resonance), reverse, mode (oneshot, gate, "
+              "playthrough, default). Only the given fields change.",
               {"id": _ID, "pad": _PAD, "gain": _N("dB"), "pitch": _N("semitones"), "attack": _N("s"), "release": _N("s"),
+               "decay": _N("s, 0-10", minimum=0, maximum=10), "sustain": _N("0-1, 1 = hold the level", minimum=0, maximum=1),
+               "filter_type": _S("off, lp, hp or bp", enum=["off", "lp", "hp", "bp"]),
+               "cutoff": _N("filter cutoff, Hz (20-20000)", minimum=20, maximum=20000),
+               "q": _N("filter resonance (0.1-24; 0.7 is flat)", minimum=0.1, maximum=24),
                "reverse": {"type": "boolean"}, "mode": _S("oneshot, gate, playthrough or default"),
                "reset": {"type": "boolean", "description": "defaults first"}}, ["id", "pad"],
               lambda a: _watch(c.pad(a["id"], a["pad"], bool(a.get("reset")), gain=a.get("gain"), pitch=a.get("pitch"),
                                      attack=a.get("attack"), release=a.get("release"), reverse=a.get("reverse"),
-                                     mode=a.get("mode")))),
+                                     mode=a.get("mode"), decay=a.get("decay"), sustain=a.get("sustain"),
+                                     filter_type=a.get("filter_type"), cutoff=a.get("cutoff"), q=a.get("q")))),
         _tool("pattern_set", "Set the step pattern. `steps` is 'pad:step,step pad:step' with 1/16 steps from the loop start "
               "(0-based), e.g. '0:0,8 1:4,12' = kick on 1 and 3, snare on 2 and 4 in a bar of 4/4. Replaces the pattern "
               "(add=true merges). With only `bars` it just changes the loop length.",

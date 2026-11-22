@@ -130,7 +130,7 @@ def _export(media_dir, body):
     if body.get("kind") == "hydrogen":
         name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
         out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        export_hydrogen(media_dir, out, bank=bank, kit_name=name, overrides=body.get("overrides"))
+        export_hydrogen(media_dir, out, bank=bank, kit_name=name, overrides=body.get("overrides"), sounds=body.get("pads"))
         note = "Restart Hydrogen or use Drumkits > Rescan to see it."
         fx = body.get("fx")
         if fx:
@@ -143,10 +143,10 @@ def _export(media_dir, body):
         return {"path": out, "kit": name, "note": note}
     if body.get("kind") == "zip":
         from choppad_export import export_zip
-        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"))
+        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
         return {"path": os.path.abspath(path), "url": f"/media/{sid}/{os.path.basename(path)}",
-                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out), no pad sound settings or fx baked in."}
-    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"))
+                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out by default); each pad's filter and envelope are baked in, pitch, gain and master fx are not."}
+    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
     return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
 
 
@@ -286,6 +286,11 @@ def build_verb_parser():
     s.add_argument("--release", type=float, help="seconds")
     s.add_argument("--reverse", action=argparse.BooleanOptionalAction, default=None)
     s.add_argument("--mode", choices=["oneshot", "gate", "playthrough", "default"])
+    s.add_argument("--decay", type=float, help="envelope decay in seconds (0-10)")
+    s.add_argument("--sustain", type=float, help="envelope sustain level 0-1 (1 = no decay)")
+    s.add_argument("--filter-type", choices=["off", "lp", "hp", "bp"], help="per-pad filter: off, low-pass, high-pass, band-pass")
+    s.add_argument("--cutoff", type=float, help="filter cutoff in Hz (20-20000)")
+    s.add_argument("--q", type=float, help="filter resonance (0.1-24, 0.7 = flat)")
     s.add_argument("--reset", action="store_true", help="back to defaults first")
     s = add("pattern", "the step pattern: set | add | clear | show")
     s.add_argument("id")
@@ -433,7 +438,8 @@ def run_verb(argv, client=None, out=None, err=None):
             reply(c.assign(a.id, a.bank, a.pad, a.start, a.end, a.clear))
         elif a.verb == "pad":
             reply(c.pad(a.id, a.pad, a.reset, gain=a.gain, pitch=a.pitch, attack=a.attack, release=a.release,
-                        reverse=a.reverse, mode=a.mode))
+                        reverse=a.reverse, mode=a.mode, decay=a.decay, sustain=a.sustain, filter_type=a.filter_type,
+                        cutoff=a.cutoff, q=a.q))
         elif a.verb == "pattern":
             if a.op == "show":
                 out(c.pattern_view(a.id, a.bank))

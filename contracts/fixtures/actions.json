@@ -129,6 +129,27 @@
     { "name": "W3b kit.load carries a stretch's `fit`",
       "actions": [{ "type": "kit.load", "bank": 0, "song": "me", "pads": [
         { "song_id": "me", "start": 1, "end": 2, "stretch": { "ratio": 0.9, "url": "/media/me/stretch/ffffffffffffffff.wav", "fit": 112 } }] }],
-      "expect": { "project": { "overrides": { "0:0": { "start": 1, "end": 2, "stretch": { "ratio": 0.9, "url": "/media/me/stretch/ffffffffffffffff.wav", "fit": 112 } } } } } }
+      "expect": { "project": { "overrides": { "0:0": { "start": 1, "end": 2, "stretch": { "ratio": 0.9, "url": "/media/me/stretch/ffffffffffffffff.wav", "fit": 112 } } } } } },
+    { "name": "W3b a pad starts with ADSR defaults that keep today's sound and the filter off",
+      "actions": [],
+      "expect": { "project": { "pads": [{ "attack": 0.0025, "decay": 0, "sustain": 1, "release": 0.003, "filter": { "type": "off", "cutoff": 8000, "q": 0.7 } }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }] } } },
+    { "name": "W3b pad.set takes decay, sustain and a filter; a partial filter merges onto the pad's filter",
+      "actions": [{ "type": "pad.set", "pad": 2, "params": { "decay": 0.3, "sustain": 0.4, "filter": { "type": "lp", "cutoff": 1200, "q": 3 } } },
+        { "type": "pad.set", "pad": 2, "params": { "filter": { "cutoff": 900 } } }],
+      "expect": { "project": { "pads": [{ "decay": 0 }, { "decay": 0 }, { "decay": 0.3, "sustain": 0.4, "filter": { "type": "lp", "cutoff": 900, "q": 3 } }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }] } } },
+    { "name": "W3b pad.set clamps decay, sustain, cutoff and q",
+      "actions": [{ "type": "pad.set", "pad": 0, "params": { "decay": 99, "sustain": 7, "filter": { "type": "hp", "cutoff": 5, "q": 500 } } },
+        { "type": "pad.set", "pad": 1, "params": { "decay": -2, "sustain": -1, "filter": { "cutoff": 99999, "q": 0 } } }],
+      "expect": { "project": { "pads": [{ "decay": 10, "sustain": 1, "filter": { "type": "hp", "cutoff": 20, "q": 24 } }, { "decay": 0, "sustain": 0, "filter": { "type": "off", "cutoff": 20000, "q": 0.1 } }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }] } } },
+    { "name": "W3b pad.set ignores a bad filter, a bad filter type and non-numeric envelope values",
+      "actions": [{ "type": "pad.set", "pad": 0, "params": { "decay": "slow", "sustain": null, "filter": "lp" } },
+        { "type": "pad.set", "pad": 0, "params": { "filter": { "type": "notch", "cutoff": "high", "q": true } } }],
+      "unchanged": true },
+    { "name": "W3b pad.reset and kit.load handle the new pad params, saved pads without them load with defaults",
+      "project": { "pads": [{ "pitch": 3 }, { "filter": { "type": "bp", "cutoff": 2000 }, "sustain": 0.5 }] },
+      "actions": [{ "type": "kit.load", "bank": 0, "song": "me", "pads": [null, null,
+          { "song_id": "me", "start": 1, "end": 2, "params": { "decay": 0.2, "filter": { "type": "lp", "cutoff": 500, "q": 2 } } }] },
+        { "type": "pad.reset", "pad": 1 }],
+      "expect": { "project": { "pads": [{ "pitch": 3, "sustain": 1, "filter": { "type": "off" } }, { "sustain": 1, "filter": { "type": "off", "cutoff": 8000, "q": 0.7 } }, { "decay": 0.2, "filter": { "type": "lp", "cutoff": 500, "q": 2 } }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }, { "gainDb": 0 }] } } }
   ]
 }

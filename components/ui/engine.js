@@ -3,7 +3,13 @@ export const FADE_IN = 0.0025;   // s
 export const FADE_OUT = 0.003;   // s
 export const TARGET_PEAK = 0.891; // -1 dBFS
 export const MAX_NORM_GAIN = 4;
-export const DEFAULT_PAD = Object.freeze({ gainDb: 0, pitch: 0, attack: 0.0025, release: 0.003, reverse: false, mode: null });
+// Pad sound. attack/decay/release are seconds, sustain 0..1 (the defaults are today's sound: instant decay to full level).
+// filter.type "off" | "lp" | "hp" | "bp"; cutoff in Hz; q = resonance (linear, 0.7 = flat).
+export const FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
+export const DEFAULT_FILTER = Object.freeze({ type: "off", cutoff: 8000, q: 0.7 });
+export const DEFAULT_PAD = Object.freeze({ gainDb: 0, pitch: 0, attack: 0.0025, decay: 0, sustain: 1, release: 0.003,
+  reverse: false, mode: null, filter: DEFAULT_FILTER });
+const BIQUAD = { lp: "lowpass", hp: "highpass", bp: "bandpass" };
 
 /** Pure: chop for (bank, pad) or null when the pad is empty. = chops.chops[chops.banks[bank]?.[pad]] ?? null */
 export function resolveChop(chops, bank, pad) {
@@ -126,8 +132,9 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     activeVoices.length = 0;
   }
 
-  /** Play `pad` now, or at AudioContext time `when` (sequencer); `bank` defaults to the current bank. */
-  function trigger(pad, velocity = 1, when = null, bank = _bank) {
+  /** Play `pad` now, or at AudioContext time `when` (sequencer); `bank` defaults to the current bank.
+   *  `extra` = {pitch?, cutoff?}: semitones added to the pad's pitch and a cutoff in Hz for this hit only (16 levels). */
+  function trigger(pad, velocity = 1, when = null, bank = _bank, extra = null) {
     const chop = sliceFor(bank, pad);
     if (!chop) return;
     const P = padParams[pad];
@@ -138,13 +145,25 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     const alt = padBuffers.get(`${bank}:${pad}`);   // stretched slice or another song's audio, else the main song
     const srcBuf = alt ? alt.buffer : buffer;
     const sliceBuf = alt && !alt.whole;             // the buffer is exactly the slice: play it from 0
-    const rate = Math.pow(2, P.pitch / 12);
+    const xPitch = Number.isFinite(extra?.pitch) ? extra.pitch : 0;
+    const rate = Math.pow(2, (P.pitch + xPitch) / 12);
     const level = (alt ? alt.gain : normGain) * Math.pow(10, P.gainDb / 20) * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
     const source = ctx.createBufferSource();
     source.buffer = P.reverse ? reversedOf(srcBuf) : srcBuf;
     source.playbackRate.value = rate;
     const gainNode = ctx.createGain();
-    source.connect(gainNode);
+    // One BiquadFilter per voice, only when the filter is on (or this hit carries a cutoff): source -> filter -> gain
+    const F = P.filter ?? DEFAULT_FILTER;
+    const xCut = Number.isFinite(extra?.cutoff) ? extra.cutoff : null;
+    const ftype = F.type !== "off" ? F.type : xCut !== null ? "lp" : null;
+    if (ftype) {
+      const filter = ctx.createBiquadFilter();
+      filter.type = BIQUAD[ftype];
+      filter.frequency.value = Math.max(20, Math.min(xCut ?? F.cutoff, (ctx.sampleRate || 44100) * 0.45));
+      filter.Q.value = ftype === "bp" ? F.q : 20 * Math.log10(F.q);   // WebAudio lowpass/highpass Q is in dB, bandpass Q is linear
+      source.connect(filter);
+      filter.connect(gainNode);
+    } else source.connect(gainNode);
     gainNode.connect(output ?? ctx.destination);
 
     const dur = sliceBuf ? srcBuf.duration : chop.end - chop.start;   // in source time
@@ -152,11 +171,27 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     const offset = sliceBuf ? 0 : (P.reverse ? srcBuf.duration - chop.end : chop.start);
     const follow = !(alt && alt.whole);      // the video is the open song's: it does not follow another song's pad
     const attack = Math.min(P.attack, realDur / 2);
+    // ADSR on the gain AudioParam, all scheduled up front (nothing asynchronous): attack to `level`, decay to level * sustain.
+    const sustain = Math.min(1, Math.max(0, P.sustain ?? 1)), decay = Math.max(0, P.decay ?? 0);
+    const sus = level * sustain;
+    const envAt = (t) => {   // envelope value t seconds after the start
+      if (t < attack) return level * (attack > 0 ? t / attack : 1);
+      if (sustain >= 1) return level;
+      if (decay > 0 && t < attack + decay) return level + (sus - level) * ((t - attack) / decay);
+      return sus;
+    };
     gainNode.gain.setValueAtTime(0, now);
     gainNode.gain.linearRampToValueAtTime(level, now + attack);
+    const releaseAt = realDur - P.release;   // oneshot: when the final fade starts
+    if (sustain < 1) {
+      const endDecay = mode === "oneshot" ? Math.min(attack + decay, Math.max(attack, releaseAt)) : attack + decay;
+      if (decay > 0) gainNode.gain.linearRampToValueAtTime(envAt(endDecay), now + endDecay);
+      else gainNode.gain.setValueAtTime(sus, now + attack);
+    }
 
     if (mode === "oneshot") {
-      gainNode.gain.setValueAtTime(level, now + Math.max(attack, realDur - P.release));
+      const tr = Math.max(attack, releaseAt);
+      gainNode.gain.setValueAtTime(envAt(tr), now + tr);
       gainNode.gain.linearRampToValueAtTime(1e-6, now + realDur);
       source.start(now, offset, dur);
       if (follow) followAt(now, chop.start, realDur);
