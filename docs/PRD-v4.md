@@ -2,7 +2,7 @@
 title: ChopPad — PRD v4 (ChopPad Station)
 type: prd
 version: 4
-status: draft-for-signoff
+status: signed-off (neo, 2026-11-22)
 owner: neo
 date: 2026-11-21
 supersedes: docs/history/PRD-v3.md
@@ -140,8 +140,10 @@ Ardour's own MCP surface also means an agent can work in ChopPad and Ardour in o
 
 Local stem separation models, hosting or accounts, a native (non-browser) rewrite, plugin hosting inside ChopPad, mobile layout beyond the phone pad mode.
 
-## 8. Open questions for neo
+## 8. Decisions at sign-off (neo, 2026-11-22)
 
-1. Is the palette reference **Mirror's Edge**?
-2. W3 is a long list. Is there a must-have order? Proposed: transient chop, time-stretch, kits across songs, then the rest.
-3. Name: keep "ChopPad", or does the workstation get a new name on the faceplate?
+1. Palette reference is **Mirror's Edge**.
+2. W3 order: transient chop, time-stretch, kits across songs, then the rest.
+3. The name stays **ChopPad**.
+4. `sfizz` was not requested, so chops go into Ardour as audio regions.
+5. The W4 design-direction pick is neo's: work stops and reports there.

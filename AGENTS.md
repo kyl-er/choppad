@@ -10,7 +10,7 @@ Browser MPC sampler for YouTube songs (`choppad --serve` → http://127.0.0.1:89
 Rules:
 - Work on branch `v4` or a worktree branched from it; one workstream per worktree. Write only inside the folders your task names.
 - Never edit tests to make them pass. Contracts are orchestrator-owned: ask for a change in a task comment.
-- Tests: `tools/status.py` runs every suite in dependency order (`--vault` writes `docs/STATUS.md`). Use the repo `.venv`.
+- Tests: `PATH="$PWD/.venv/bin:$PATH" python3 tools/status.py` runs every suite in dependency order (`--vault` writes `docs/STATUS.md`). The Python suites need the repo `.venv`; the browser suite (`tests/e2e/`) runs on `/usr/bin/python3`, which has Playwright.
 - A milestone is done only with green suites **and** a real-browser pass on a real song (Funkorama, Faster Does It, Mellowtron are in `media/`).
 - Finish with a task comment: SUMMARY / CHANGES / TESTS / FOLLOWUPS, then set the task to `in-review`. Stuck on a decision: comment `BLOCKED: <decision needed>` and stop.
 - Kill any server you start. Find it by port (`ss -ltnp | grep 8960`), not `pkill -f`. No network in default test runs. `media/` stays gitignored.

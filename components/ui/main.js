@@ -61,4 +61,4 @@ async function route() {
 }
 window.addEventListener("hashchange", route);
 route();
-window.choppad = { audio, input, library }; // for debugging / e2e
+window.choppad = { audio, input, library, get song() { return current; } }; // for debugging / e2e: song.session.store

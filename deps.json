@@ -9,6 +9,7 @@
     "ui":        { "owner": "agent-ui",         "deps": ["contracts"],                               "cmd": "node --test components/ui/test/" },
     "advisor":   { "owner": "agent-advisor",    "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/advisor/tests" },
     "export":    { "owner": "agent-export",     "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/export/tests" },
-    "integrate": { "owner": "agent-integrator", "deps": ["ingest", "rhythm", "chop", "midi", "ui"], "cmd": "python3 -m unittest discover -s components/integrate/tests" }
+    "integrate": { "owner": "agent-integrator", "deps": ["ingest", "rhythm", "chop", "midi", "ui"], "cmd": "python3 -m unittest discover -s components/integrate/tests" },
+    "e2e":       { "owner": "orchestrator",     "deps": ["integrate"],                               "cmd": "/usr/bin/python3 -W ignore -m unittest tests/e2e/test_smoke.py" }
   }
 }

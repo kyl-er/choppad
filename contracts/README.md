@@ -1,9 +1,10 @@
-# ChopPad contracts (v2.1)
+# ChopPad contracts (v4)
 
-Owner: orchestrator. Components MUST NOT edit this folder; request changes via the vault Inbox
-(type `contract-change`). `validate.py` is the executable definition — if prose and code disagree, code wins.
-v2.1 = PRD v2.1 (debate + research + 3–0 consensus). All times are seconds (float) from the start of `audio.wav`.
-Pipeline per source lives in `media/<id>/`.
+Owner: orchestrator. Builders MUST NOT edit this folder; ask for a change in a comment on your Kaneo task (`CHOP-n`).
+`validate.py` and `fixtures/actions.json` are the executable definitions: if prose and code disagree, code wins.
+§0–§7 are unchanged from v2.1 and describe what is built. §8–§12 are new in v4 (PRD `docs/PRD-v4.md`): §8–§9 are
+implemented in the browser; §10–§12 are interfaces the v4 workstreams build to.
+All times are seconds (float) from the start of `audio.wav`. Pipeline per source lives in `media/<id>/`.
 
 ## 0. Entry points (module boundaries)
 | Component | File | Signature |
@@ -14,7 +15,10 @@ Pipeline per source lives in `media/<id>/`.
 | midi | `components/midi/midi.js` | `parseMidiMessage(data, mapping?, time?)`, `createInput({midiAccess, keyboardTarget, mapping, storage})`, `defaultMapping`, `STORAGE_KEY` |
 | ui | `components/ui/engine.js` | `resolveChop`, `normalizationGain`, `createEngine`, `FADE_IN`, `FADE_OUT` |
 | ui | `components/ui/layout.js` | `padToCell(pad)`, `cellToPad(row, col)` |
-| ui | `components/ui/ui.js` | `mountUI(rootEl, {meta, analysis, chops, engine, input, onRegrid}) -> {updateChops, destroy}` (page; not unit-tested) |
+| ui | `components/ui/actions.js` | `initialState({project, chops, sections})`, `reduce(state, action)`, `projectDoc(state)`, `stepOf(event)`, `DEFAULT_PAD`, `DEFAULT_FX`, `DEFAULT_SETTINGS` (pure; §8) |
+| ui | `components/ui/store.js` | `createStore(reduce, initial) -> { get(), dispatch(action, meta?), subscribe(fn) }` |
+| ui | `components/ui/session.js` | `openSong({id, audio, onProgress?}) -> session` (§9) |
+| ui | `components/ui/ui.js` | `mountSong(rootEl, {id, audio, input}) -> {session, state, destroy}` (view only; covered by `tests/e2e/`) |
 | advisor | `components/advisor/choppad_advisor.py` | `advise(media_dir, *, client=None, model="qwen/qwen3.8-omni-flash", max_cost_usd=0.05, force=False) -> advisor` · `build_prompt(analysis, chops) -> str` · `estimate_cost_usd(duration_s, model=...) -> float` |
 | export | `components/export/choppad_export.py` | `export_sfz(media_dir, out_path=None, *, bank=0) -> sfz_path` · `export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None) -> xml_path` |
 | integrate | `components/integrate/choppad.py` | `run_pipeline(source, media_root, grid, meter, bpm, **ingest_kw)`, `make_server(media_root, port)`; `components/ui/main.js` wiring |
@@ -88,3 +92,92 @@ createEngine({ ctx, buffer, chops, video?, mode: "oneshot"|"gate"|"playthrough",
 ## 7. DAW Export — **export** (Ardour SFZ & Hydrogen drumkit)
 - `export_sfz(media_dir, out_path=None, *, bank=0) -> sfz_path`: writes a zero-copy `.sfz` text file (default `<media_dir>/<id>-bank<bank>.sfz`) referencing `audio.wav` with `<group>` (`loop_mode=one_shot`, `group=1`, `off_by=1`, `ampeg_attack=0.002`) and one `<region>` per pad in `chops["banks"][bank]` (`key=36+pad`, `offset=<round(start*sr)>`, `end=<round(end*sr)>`).
 - `export_hydrogen(media_dir, out_dir, *, bank=0, kit_name=None) -> xml_path`: writes `chop_00.wav`..`chop_NN.wav` (44.1 kHz stereo s16le with 2.5 ms fade-in and 3 ms fade-out) and `drumkit.xml` (`xmlns="http://www.hydrogen-music.org/drumkit"`, `<muteGroup>0</muteGroup>`, `<midiOutNote>36+pad</midiOutNote>`) into `out_dir`.
+
+## 8. Actions and state (JS today; W1 adds the same reducer on the server)
+State of one open song. Only `project` is saved (`media/<id>/project.json`, `PUT /api/songs/<id>/project`).
+```js
+{ project: { pads: [16 × { gainDb, pitch, attack, release, reverse, mode|null }],
+             overrides: { "<bank>:<pad>": { start, end } },          // custom slices; absent = grid chop
+             pattern: { bars, events: [{ beat, pad, bank, vel, pass }] },   // beat = quarter notes from loop start; pass -1 = drawn
+             fx: { tone, low, mid, high, filter, reverb, size } },
+  chops,                       // §3, replaced on regrid
+  sections: [{ label, letter, start_s, end_s, start_bar, end_bar }],
+  bank, selected,
+  settings: { mode, choke, fullLevel, quant: "off"|"1/8"|"1/16", swing, metronome, repeat, repeatRate, follow } }   // not saved
+```
+Every change is an action `{ type, ... }` applied by a pure reducer. Invalid or unknown actions leave the state untouched.
+
+| type | payload | effect |
+|---|---|---|
+| `pad.set` | `pad, params` | merge sound params into a pad |
+| `pad.reset` | `pad` | pad back to defaults |
+| `pad.copyToAll` | `pad` | copy this pad's sound to all 16 |
+| `pad.select` | `pad` | pad shown in the inspector |
+| `slice.set` | `bank, pad, start, end` | custom slice on a pad (`end > start`) |
+| `slice.clear` | `bank, pad` | back to the grid chop |
+| `slice.setMany` | `bank, slices: [{pad, start, end}]` | several custom slices at once |
+| `fx.set` | `params` | merge master fx params |
+| `pattern.toggleStep` | `pad, step, bank?, vel?` | add or remove a drawn hit at 1/16 step `step` |
+| `pattern.addEvent` | `event` | append a recorded hit |
+| `pattern.undo` | — | drop the latest recorded take (highest `pass`) |
+| `pattern.clear` | — | empty the pattern |
+| `pattern.setBars` | `bars, beatsPerBar?` | loop length; hits past the end are dropped |
+| `pattern.load` | `pattern` | replace the pattern |
+| `bank.set` | `bank` | current bank (clamped) |
+| `chops.replace` | `chops` | new chop table, bank back to 0 |
+| `sections.set` | `sections` | replace the section list |
+| `settings.set` | `params` | merge player settings |
+
+- `fixtures/actions.json` holds the cases; `components/ui/test/actions.test.js` runs them. A second implementation passes the same file.
+- New state or actions (W3: filter, ADSR, mute groups, kits; W1: transport) are added here first, with fixture cases, by the orchestrator.
+
+## 9. Session (JS): the seam between sound and screen
+`openSong()` returns the only object a view needs. A view never creates an engine, sequencer or fetch call of its own.
+```js
+session.store                       // §8: get(), dispatch(action, meta), subscribe((state, prev, action, meta) => …)
+session.meta .analysis .peaks .buffer .video .engine .seq
+session.hit(pad, velocity) .release(pad) .startRepeat(pad, velocity) .stopRepeat(pad) .panic()
+session.setBank(n, seekVideo) .followTo(t) .chopLabel(chop) .position() .playSong(from?) .stopSong() .songPlaying .lastChop
+session.regrid({grid}|{meter}|{mult}|{shift}|{bar1}) .reanalyze(bpm)             // -> Promise<bool>
+session.toggleRecord() .togglePattern() .patternMidi() .renderPatternWav()
+session.loadSections() .advise() .loadAiBank() .exportBank("hydrogen"|"sfz")
+session.on(type, fn) .off(type, fn) .destroy()
+```
+- Events: `hit {pad, velocity}` (a pad was played live), `flash {pad}` (a sequenced hit sounds now on the visible bank), `song {playing}`, `seq {}` (record/play state changed; read `session.seq.state`).
+- The session applies state to the engine, sequencer and fx, and saves `project` 300 ms after the last change. Dispatch with `meta.save === false` to skip the save (for changes that came from the server).
+- `meta.from === "wave"` marks a slice change made by dragging a waveform region, so the view does not redraw the regions.
+- `window.choppad.song.session` exposes the open session for tests and debugging.
+
+## 10. Agent control (W1)
+- `POST /api/songs/<id>/actions` body `{ actions: [action, …] }` → applies §8 actions to the saved project with the server reducer, writes `project.json`, returns `{ project, applied: n }`. View-only actions (`pad.select`, `bank.set`, `settings.set`) are accepted and forwarded but not saved.
+- `GET /api/songs/<id>/events` → `text/event-stream`. One message per applied batch: `event: actions`, `data: { origin, actions }`. Other events: `chops` (`data` = §3 after a regrid), `job` (import progress), `transport` (`{ command: "play-pattern"|"stop"|"play-song"|"hit", … }`).
+- Each browser tab sends a random `origin` id with its own writes (`X-ChopPad-Origin` header) and ignores messages carrying it. Messages from elsewhere are dispatched with `{ remote: true, save: false }`.
+- CLI verbs and MCP tools are thin clients of these two endpoints plus the existing ones (`/api/songs`, `/regrid`, `/reanalyze`, `/sections`, `/advise`, `/export`).
+- The server keeps binding to `127.0.0.1` only.
+
+## 11. DAW bridge (W2) — `components/daw/`
+```python
+class Bridge(Protocol):                       # one per DAW: HydrogenBridge, ArdourBridge
+    name: str
+    def available(self) -> bool               # binary present
+    def launch(self, project: DawProject) -> None      # start or attach, load kit/session
+    def push(self, project: DawProject) -> None        # send the current kit + pattern + tempo again
+    def transport(self, command: Literal["play", "stop"], *, bpm: float | None = None) -> None
+    def close(self) -> None
+
+@dataclass
+class DawProject: song_id: str; title: str; bpm: float; beats_per_bar: int; bank: int
+                  chops: list[Chop]           # 16 slots, None = empty: path to a rendered WAV, pad, midi_note (36 + pad)
+                  pattern: dict               # §8 pattern
+```
+- `components/daw/midi_port.py`: `open_port(name="ChopPad") -> Port` with `note_on(note, vel)`, `note_off(note)`, `clock(bpm)` (24 pulses per quarter note, absolute-deadline scheduling), `start()`, `stop()`, `close()`.
+- Server: `POST /api/songs/<id>/daw` body `{ daw: "hydrogen"|"ardour", command: "open"|"sync"|"play"|"stop" }`. CLI: `choppad station [--daw hydrogen|ardour] [song]`.
+- A bridge never edits the user's own DAW config in place: Hydrogen runs with a copied config (`--config`) and its own OSC port.
+- Mechanism per DAW: PRD §6 and `docs/daw-bridge-research.md`. The five spikes listed there come first.
+
+## 12. Stems (W3) — `components/stems/`
+```python
+def separate(media_dir: str, *, backend: str | None = None) -> dict[str, str]   # {"drums": path, "bass": …, "vocals": …, "other": …}
+```
+- Backends: `none` (default; raises `StemsUnavailable`), `remote` (POSTs `audio.wav` to `CHOPPAD_STEMS_URL`, expects a zip of the four WAVs; same length and sample rate as `audio.wav`). No local model in v4.
+- Results cached in `media/<id>/stems/`. `meta.json` gains optional `"stems": ["drums", …]`. A chop may name its source: `overrides["b:p"] = { start, end, stem? }`.

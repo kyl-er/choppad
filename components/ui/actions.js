@@ -1,0 +1,159 @@
+// actions: every change to a song's state, as a pure reducer. No DOM, no WebAudio, no network.
+// The same action objects are what an agent or the server sends (contracts/README.md §8), and
+// contracts/fixtures/actions.json holds the cases any other implementation must reproduce.
+//
+// State:
+//   project  { pads[16], overrides{"bank:pad": {start,end}}, pattern{bars, events[]}, fx{} }   saved per song
+//   chops    the chop table from the server (replaced on regrid)
+//   sections [{label, letter, start_s, end_s, start_bar, end_bar}]
+//   bank, selected                                                                            what the player is looking at
+//   settings { mode, choke, fullLevel, quant, swing, metronome, repeat, repeatRate, follow }   not saved
+
+import { DEFAULT_PAD } from "./engine.js";
+import { DEFAULT_FX } from "./fx.js";
+
+export { DEFAULT_PAD, DEFAULT_FX };
+export const DEFAULT_SETTINGS = Object.freeze({
+  mode: "oneshot", choke: true, fullLevel: true,
+  quant: "1/16", swing: 0, metronome: true,
+  repeat: false, repeatRate: 0.25, follow: true,
+});
+export const PADS = 16;
+
+const PAD_KEYS = Object.keys(DEFAULT_PAD);
+const FX_KEYS = Object.keys(DEFAULT_FX);
+const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
+const isPad = (p) => Number.isInteger(p) && p >= 0 && p < PADS;
+const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => obj && k in obj).map((k) => [k, obj[k]]));
+const same = (a, b) => Object.keys(b).every((k) => a[k] === b[k]);
+
+/** Build the starting state from what the server returns for a song. */
+export function initialState({ project = {}, chops, sections = [] } = {}) {
+  const pattern = project?.pattern;
+  return {
+    project: {
+      pads: Array.from({ length: PADS }, (_, p) => ({ ...DEFAULT_PAD, ...pick(project?.pads?.[p], PAD_KEYS) })),
+      overrides: { ...(project?.overrides ?? {}) },
+      pattern: { bars: pattern?.bars ?? 2, events: [...(pattern?.events ?? [])] },
+      fx: { ...DEFAULT_FX, ...pick(project?.fx, FX_KEYS) },
+    },
+    chops,
+    sections,
+    bank: 0,
+    selected: 0,
+    settings: { ...DEFAULT_SETTINGS },
+  };
+}
+
+/** The part of the state that is written to project.json. */
+export const projectDoc = (state) => state.project;
+
+/** Step index (1/16 notes from the loop start) of a pattern event. */
+export const stepOf = (event) => Math.round(event.beat * 4);
+
+const withProject = (state, patch) => ({ ...state, project: { ...state.project, ...patch } });
+const clampBank = (state, n) => Math.max(0, Math.min((state.chops?.banks?.length ?? 1) - 1, n));
+
+/** Pure reducer. Unknown or invalid actions return the same state object (so nothing re-renders or saves). */
+export function reduce(state, action) {
+  const a = action ?? {};
+  switch (a.type) {
+    case "pad.set": {
+      if (!isPad(a.pad)) return state;
+      const params = pick(a.params, PAD_KEYS);
+      if (same(state.project.pads[a.pad], params)) return state;
+      const pads = state.project.pads.map((P, p) => (p === a.pad ? { ...P, ...params } : P));
+      return withProject(state, { pads });
+    }
+    case "pad.reset": {
+      if (!isPad(a.pad)) return state;
+      return withProject(state, { pads: state.project.pads.map((P, p) => (p === a.pad ? { ...DEFAULT_PAD } : P)) });
+    }
+    case "pad.copyToAll": {
+      if (!isPad(a.pad)) return state;
+      const src = state.project.pads[a.pad];
+      return withProject(state, { pads: state.project.pads.map(() => ({ ...src })) });
+    }
+    case "pad.select":
+      return isPad(a.pad) && a.pad !== state.selected ? { ...state, selected: a.pad } : state;
+
+    case "slice.set": {
+      if (!isPad(a.pad) || !(a.end > a.start)) return state;
+      return withProject(state, { overrides: { ...state.project.overrides, [`${a.bank}:${a.pad}`]: { start: a.start, end: a.end } } });
+    }
+    case "slice.clear": {
+      const key = `${a.bank}:${a.pad}`;
+      if (!(key in state.project.overrides)) return state;
+      const { [key]: _gone, ...overrides } = state.project.overrides;
+      return withProject(state, { overrides });
+    }
+    case "slice.setMany": {
+      const overrides = { ...state.project.overrides };
+      for (const s of a.slices ?? []) {
+        if (isPad(s.pad) && s.end > s.start) overrides[`${a.bank}:${s.pad}`] = { start: s.start, end: s.end };
+      }
+      return withProject(state, { overrides });
+    }
+
+    case "fx.set": {
+      const params = pick(a.params, FX_KEYS);
+      if (same(state.project.fx, params)) return state;
+      return withProject(state, { fx: { ...state.project.fx, ...params } });
+    }
+
+    case "pattern.toggleStep": {
+      if (!isPad(a.pad) || !(a.step >= 0)) return state;
+      const { pattern } = state.project;
+      const i = pattern.events.findIndex((e) => e.pad === a.pad && stepOf(e) === a.step);
+      const events = i >= 0
+        ? pattern.events.filter((_, k) => k !== i)
+        // pass -1: drawn by hand, not recorded, so "undo last take" leaves it alone
+        : [...pattern.events, { beat: a.step / 4, pad: a.pad, bank: a.bank ?? state.bank, vel: a.vel ?? 1, pass: -1 }];
+      return withProject(state, { pattern: { ...pattern, events } });
+    }
+    case "pattern.addEvent": {
+      const e = a.event;
+      if (!e || !isPad(e.pad)) return state;
+      const { pattern } = state.project;
+      return withProject(state, { pattern: { ...pattern, events: [...pattern.events, { ...e }] } });
+    }
+    case "pattern.undo": {
+      const { pattern } = state.project;
+      const last = Math.max(0, ...pattern.events.map((e) => e.pass));
+      const events = pattern.events.filter((e) => e.pass !== last);
+      return events.length === pattern.events.length ? state : withProject(state, { pattern: { ...pattern, events } });
+    }
+    case "pattern.clear": {
+      const { pattern } = state.project;
+      return pattern.events.length ? withProject(state, { pattern: { ...pattern, events: [] } }) : state;
+    }
+    case "pattern.setBars": {
+      const bars = Number(a.bars);
+      if (!(bars >= 1)) return state;
+      const loopBeats = bars * (a.beatsPerBar ?? state.chops?.beats_per_bar ?? 4);
+      const events = state.project.pattern.events.filter((e) => e.beat < loopBeats);
+      return withProject(state, { pattern: { bars, events } });
+    }
+    case "pattern.load": {
+      const p = a.pattern ?? {};
+      return withProject(state, { pattern: { bars: p.bars ?? state.project.pattern.bars, events: [...(p.events ?? [])] } });
+    }
+
+    case "bank.set": {
+      const bank = clampBank(state, Number(a.bank));
+      return bank === state.bank ? state : { ...state, bank };
+    }
+    case "chops.replace":
+      return a.chops ? { ...state, chops: a.chops, bank: 0 } : state;
+    case "sections.set":
+      return { ...state, sections: [...(a.sections ?? [])] };
+
+    case "settings.set": {
+      const params = pick(a.params, SETTING_KEYS);
+      if (same(state.settings, params)) return state;
+      return { ...state, settings: { ...state.settings, ...params } };
+    }
+    default:
+      return state;
+  }
+}

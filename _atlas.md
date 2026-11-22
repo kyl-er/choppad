@@ -20,3 +20,4 @@ Browser MPC sampler for YouTube songs. Paste a URL, get tempo-aligned chops on a
 
 ## Log (append-only — session-end hooks add one line per session)
 - 2026-11-02 created by `atlas new`
+- 2026-11-21 [claude:4be15e40-c601-4521-bd53-0fd11f6e79a1] rename this meida ops clean up my messy input chaos keep all request and word <linked_cont

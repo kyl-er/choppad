@@ -1,28 +1,24 @@
-// Song screen: LCD + master volume/meter, video, 4x4 pads, bank strip (navigate the song), waveform,
-// song transport (play the original, pads follow), regrid, modes, MIDI.
-import { DEFAULT_PAD, createEngine } from "/engine.js";
+// Song screen (view only): LCD + master volume/meter, video, 4x4 pads, bank strip, waveform, transport,
+// step grid, panels. All state lives in the session's store (actions.js); this file draws it and turns
+// clicks and keys into `session` calls or dispatched actions. It can be replaced without touching the sound.
 import { cellToPad } from "/layout.js";
 import { createWaveform } from "/waveform.js";
-import { createSequencer, encodeWav, patternToMidi } from "/sequencer.js";
-import { DEFAULT_FX, PRESETS, createFx } from "/fx.js";
+import { DEFAULT_FX, PRESETS } from "/fx.js";
+import { PADS, stepOf } from "/actions.js";
+import { openSong } from "/session.js";
 
-const STEPS = { "1/4": 1, "1/8": 2, "1/16": 4 };
-const MULTS = [0.5, 1, 2];
 const BAR_HUES = [140, 210, 35, 300];
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-/** Returns { destroy() }. Throws if the song can't be loaded. */
+/** Returns { destroy(), state, session }. Throws if the song can't be loaded. */
 export async function mountSong(root, { id, audio, input }) {
-  const { ctx, master, analyser, fx } = audio;
+  const { ctx, master, analyser } = audio;
   root.innerHTML = `<p class="loading">Loading song…</p>`;
-  const res = await fetch(`/api/songs/${id}`);
-  if (!res.ok) throw new Error(`song ${id}: HTTP ${res.status}`);
-  const data = await res.json();
-  const { meta, analysis, peaks } = data;
-  let chops = data.chops;
-  root.querySelector(".loading").textContent = "Decoding audio…";
-  const buffer = await fetch(`/media/${id}/audio.wav`).then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b));
+  const session = await openSong({ id, audio, onProgress: (t) => { const el = root.querySelector(".loading"); if (el) el.textContent = t; } });
+  const { meta, analysis, peaks, store, engine, seq, video } = session;
+  const dispatch = (action, m) => store.dispatch(action, m);
+  const st = () => store.get();
 
   root.innerHTML = `
   <section class="song-view">
@@ -34,7 +30,7 @@ export async function mountSong(root, { id, audio, input }) {
         <div class="vu"><i></i></div></div>
     </header>
     <div class="stage">
-      <div class="video-wrap"><video class="video" muted playsinline preload="auto"></video></div>
+      <div class="video-wrap"></div>
       <div class="pads-wrap">
         <div class="pads"></div>
         <div class="bank-nav"><button class="bank-prev" title="[">◂</button><span class="bank-label"></span><button class="bank-next" title="]">▸</button></div>
@@ -107,51 +103,16 @@ export async function mountSong(root, { id, audio, input }) {
   </section>`;
   const $ = (s) => root.querySelector(s);
 
-  // ---- media + engine ----
-  const video = $(".video");
-  video.src = `/media/${id}/video.mp4`;
-  const engine = createEngine({ ctx, buffer, chops, video, output: master });
-  let bank = 0;
-  let chopToBank = [];
-  let lastChop = null;
-  let selected = 0;
-  let meterOverride = null;
+  $(".video-wrap").append(video);
 
-  // ---- song transport (the original audio, pads choke it) ----
-  let song = null; // { src, gain, startCtx, startPos }
-  const position = () => (song ? Math.min(meta.duration_s, song.startPos + (ctx.currentTime - song.startCtx)) : video.currentTime);
-  function stopSong() {
-    if (!song) return;
-    const { src, gain } = song;
-    gain.gain.setTargetAtTime(0, ctx.currentTime, 0.005);
-    src.stop(ctx.currentTime + 0.03);
-    song = null;
-    video.pause();
-    $(".play").textContent = "▶ Play song";
-  }
-  function playSong(from = video.currentTime) {
-    stopSong();
-    engine.stopAll();
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    const gain = ctx.createGain();
-    src.connect(gain).connect(master);
-    src.start(ctx.currentTime, from);
-    src.onended = () => { if (song?.src === src) stopSong(); };
-    song = { src, gain, startCtx: ctx.currentTime, startPos: from };
-    video.currentTime = from;
-    video.play().catch(() => {});
-    $(".play").textContent = "❚❚ Pause";
-  }
-  $(".play").addEventListener("click", () => (song ? stopSong() : playSong()));
-  $(".stop").addEventListener("click", () => { stopSong(); engine.stopAll(); });
+  // ---- song transport ----
+  $(".play").addEventListener("click", () => (session.songPlaying ? session.stopSong() : session.playSong()));
+  $(".stop").addEventListener("click", () => { session.stopSong(); engine.stopAll(); });
+  const onSong = (e) => { $(".play").textContent = e.detail.playing ? "❚❚ Pause" : "▶ Play song"; };
+  session.on("song", onSong);
 
   // ---- banks / pads ----
-  const steps = () => STEPS[chops.grid];
-  const padLabel = (c) => {
-    const beat = Math.floor(c.beat / steps()) + 1;
-    return `${c.bar + 1}.${beat}${steps() > 1 ? "." + ((c.beat % steps()) + 1) : ""}`;
-  };
+  const padLabel = session.chopLabel;
   const padEls = [];
   for (let row = 0; row < 4; row++) {
     for (let col = 0; col < 4; col++) {
@@ -160,7 +121,7 @@ export async function mountSong(root, { id, audio, input }) {
       el.className = "pad";
       el.dataset.pad = p;
       el.innerHTML = `<span class="pad-no">${p + 1}</span><span class="pad-label"></span><span class="pad-time"></span>`;
-      el.addEventListener("pointerdown", (e) => { e.preventDefault(); hit(p, 1); });
+      el.addEventListener("pointerdown", (e) => { e.preventDefault(); session.hit(p, 1); });
       el.addEventListener("pointerup", () => engine.release(p));
       el.addEventListener("pointerleave", () => engine.release(p));
       padEls[p] = el;
@@ -169,19 +130,17 @@ export async function mountSong(root, { id, audio, input }) {
   }
   const wave = createWaveform($(".wave"), {
     peaks: peaks.peaks, duration: peaks.duration_s, media: video,
-    onPadClick: (p) => hit(p, 1),
+    onPadClick: (p) => session.hit(p, 1),
+    // the region is already where the user dragged it, so the view must not redraw the regions for this change
     onSliceEdit: (p, start, end) => {
-      engine.setOverride(bank, p, { start, end });
-      select(p);
-      renderPads();
-      saveProject();
+      dispatch({ type: "slice.set", bank: st().bank, pad: p, start, end }, { from: "wave" });
+      dispatch({ type: "pad.select", pad: p });
     },
-    onUserSeek: (t) => { if (song) playSong(t); else if ($(".follow").checked) followTo(t); },
+    onUserSeek: (t) => { if (session.songPlaying) session.playSong(t); else if (st().settings.follow) session.followTo(t); },
   });
 
-  function indexBanks() {
-    chopToBank = [];
-    chops.banks.forEach((b, n) => b.forEach((i) => { chopToBank[i] = n; }));
+  function renderBankStrip() {
+    const { chops } = st();
     const track = $(".banks-track");
     track.innerHTML = "";
     chops.banks.forEach((b, n) => {
@@ -192,12 +151,13 @@ export async function mountSong(root, { id, audio, input }) {
       seg.style.width = `${((e - s) / meta.duration_s) * 100}%`;
       seg.title = `Bank ${n + 1}: bars ${chops.chops[b[0]].bar + 1}–${chops.chops[b.at(-1)].bar + 1} (${fmt(s)})`;
       seg.textContent = n + 1;
-      seg.addEventListener("click", () => setBank(n, true));
+      seg.addEventListener("click", () => session.setBank(n, true));
       track.append(seg);
     });
   }
   function renderPads() {
-    for (let p = 0; p < 16; p++) {
+    const { bank, selected } = st();
+    for (let p = 0; p < PADS; p++) {
       const c = engine.getSlice(bank, p);
       const el = padEls[p];
       el.classList.toggle("empty", !c);
@@ -208,7 +168,9 @@ export async function mountSong(root, { id, audio, input }) {
       el.style.setProperty("--hue", c ? (c.custom ? 48 : BAR_HUES[c.bar % 4]) : 0);
     }
   }
-  function renderBank() {
+  // redrawRegions=false when the change came from dragging a region on the waveform
+  function renderBank(redrawRegions = true) {
+    const { chops, bank } = st();
     const ids = chops.banks[bank] ?? [];
     renderPads();
     const first = chops.chops[ids[0]], last = chops.chops[ids.at(-1)];
@@ -219,68 +181,28 @@ export async function mountSong(root, { id, audio, input }) {
       const c = engine.getSlice(bank, p);
       if (c) slices.push({ pad: p, start: c.start, end: c.end, bar: c.bar, custom: !!c.custom });
     }
-    wave.showSlices(slices);
-    fitZoom(first.start, last.end);
+    if (redrawRegions) {
+      wave.showSlices(slices);
+      fitZoom(first.start, last.end);
+    }
     renderInspector();
     renderSteps();
   }
-  function setBank(n, seekVideo) {
-    bank = Math.max(0, Math.min(chops.banks.length - 1, n));
-    engine.setBank(bank);
-    if (seekVideo && !song) video.currentTime = chops.chops[chops.banks[bank][0]].start;
-    renderBank();
-  }
-  function followTo(t) {
-    const i = chops.chops.findIndex((c) => c.start <= t && t < c.end);
-    if (i >= 0 && chopToBank[i] !== bank) setBank(chopToBank[i], false);
-  }
-  function hit(p, velocity) {
-    const c = engine.getSlice(bank, p);
-    if (!c) return;
-    stopSong();
-    engine.trigger(p, velocity);
-    if (seq.record(p, bank, velocity)) { renderSteps(); saveProject(); }
-    lastChop = c;
-    select(p);
+  function flashPad(p) {
     const el = padEls[p];
     el.classList.remove("hit");
     void el.offsetWidth;
     el.classList.add("hit");
-    wave.flash(p);
   }
-  $(".bank-prev").addEventListener("click", () => setBank(bank - 1, true));
-  $(".bank-next").addEventListener("click", () => setBank(bank + 1, true));
+  const onHit = (e) => { flashPad(e.detail.pad); wave.flash(e.detail.pad); };
+  const onFlash = (e) => flashPad(e.detail.pad);
+  session.on("hit", onHit);
+  session.on("flash", onFlash);
+  $(".bank-prev").addEventListener("click", () => session.setBank(st().bank - 1, true));
+  $(".bank-next").addEventListener("click", () => session.setBank(st().bank + 1, true));
 
   // ---- regrid ----
-  async function regrid(change) {
-    let beat_offset = chops.beat_offset ?? 0;
-    let bpm_mult = chops.bpm_mult ?? 1;
-    let grid = chops.grid;
-    if (change.grid) grid = change.grid;
-    if (change.meter !== undefined) meterOverride = change.meter;
-    if (change.mult) bpm_mult = MULTS.reduce((a, b) => (Math.abs(b - bpm_mult * change.mult) < Math.abs(a - bpm_mult * change.mult) ? b : a));
-    if (change.shift) beat_offset += change.shift;
-    if (change.bar1) {
-      if (!lastChop) return;
-      beat_offset += Math.floor(lastChop.beat / steps());
-    }
-    const bpb = meterOverride ? Number(meterOverride.split("/")[0]) : chops.beats_per_bar;
-    beat_offset = ((beat_offset % bpb) + bpb) % bpb;
-    if (beat_offset > 3) beat_offset -= bpb;
-    const r = await fetch(`/api/songs/${id}/regrid`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ grid, meter: meterOverride, beat_offset, bpm_mult }),
-    });
-    if (!r.ok) return;
-    const t = position();
-    chops = await r.json();
-    engine.setChops(chops);
-    indexBanks();
-    bank = 0;
-    followTo(t);
-    setBank(bank, false);
-    renderLcd();
-  }
+  const regrid = (change) => session.regrid(change);
   const btn = (parent, label, fn, cls = "") => {
     const b = document.createElement("button");
     b.textContent = label;
@@ -299,6 +221,7 @@ export async function mountSong(root, { id, audio, input }) {
 
   // ---- LCD, volume, meter ----
   function renderLcd() {
+    const { chops } = st();
     $(".bpm").textContent = chops.bpm.toFixed(1);
     $(".meter").textContent = `${chops.beats_per_bar}/4`;
     root.querySelectorAll(".grid-btns button").forEach((b) => b.classList.toggle("on", b.textContent === chops.grid));
@@ -326,14 +249,13 @@ export async function mountSong(root, { id, audio, input }) {
     for (const v of tbuf) peak = Math.max(peak, Math.abs(v));
     $(".vu i").style.width = `${Math.min(100, peak * 100)}%`;
     $(".vu").classList.toggle("clip", peak >= 0.99);
-    const t = position();
+    const { chops } = st();
+    const t = session.position();
     $(".clock").textContent = fmt(t);
-    let k = 0;
-    while (k + 1 < analysis.beats.length && analysis.beats[k + 1] <= t) k++;
     const c = chops.chops.find((x) => x.start <= t && t < x.end);
     $(".pos").textContent = c ? `bar ${padLabel(c)}` : "—";
     $(".banks-head").style.left = `${(t / meta.duration_s) * 100}%`;
-    if (song && $(".follow").checked) followTo(t);
+    if (session.songPlaying && st().settings.follow) session.followTo(t);
     markSection(t);
     if (seq.state.playing) {
       const cell = Math.floor(seq.position() * 4);
@@ -347,16 +269,10 @@ export async function mountSong(root, { id, audio, input }) {
   }
 
   // ---- pad inspector (MPC program edit) ----
-  function select(p) {
-    if (p === selected) return;
-    selected = p;
-    renderPads();
-    renderInspector();
-    renderSteps();
-  }
   const insp = $(".inspector");
   function renderInspector() {
-    const P = engine.getPadParams(selected);
+    const { bank, selected, project } = st();
+    const P = project.pads[selected];
     const c = engine.getSlice(bank, selected);
     insp.querySelector(".insp-title").textContent = `Pad ${selected + 1}` + (c ? ` · ${c.custom ? "custom slice" : "bar " + padLabel(c)} · ${fmt(c.start)}–${fmt(c.end)}` : " · empty");
     for (const [k, el] of Object.entries(inspInputs)) {
@@ -376,42 +292,19 @@ export async function mountSong(root, { id, audio, input }) {
     el.addEventListener(k === "reverse" || k === "mode" ? "change" : "input", () => {
       const v = k === "reverse" ? el.checked : k === "mode" ? (el.value || null)
         : k === "attack" || k === "release" ? Number(el.value) / 1000 : Number(el.value);
-      engine.setPadParams(selected, { [k]: v });
-      renderInspector();
-      saveProject();
+      dispatch({ type: "pad.set", pad: st().selected, params: { [k]: v } });
     });
   }
   insp.querySelector(".grab").addEventListener("click", () => {
-    const t = position();
+    const { bank, selected, chops } = st();
+    const t = session.position();
     const c = engine.getSlice(bank, selected);
     const len = c ? c.end - c.start : 60 / chops.bpm;
-    engine.setOverride(bank, selected, { start: t, end: Math.min(meta.duration_s, t + len) });
-    renderBank();
-    saveProject();
+    dispatch({ type: "slice.set", bank, pad: selected, start: t, end: Math.min(meta.duration_s, t + len) });
   });
-  insp.querySelector(".unslice").addEventListener("click", () => { engine.setOverride(bank, selected, null); renderBank(); saveProject(); });
-  insp.querySelector(".all").addEventListener("click", () => {
-    const P = engine.getPadParams(selected);
-    for (let p = 0; p < 16; p++) engine.setPadParams(p, { ...P });
-    saveProject();
-  });
-  insp.querySelector(".resetpad").addEventListener("click", () => { engine.setPadParams(selected, { ...DEFAULT_PAD }); renderInspector(); saveProject(); });
-
-  // ---- project persistence (pad params + custom slices) ----
-  for (let p = 0; p < 16; p++) engine.setPadParams(p, { ...DEFAULT_PAD, ...(data.project?.pads?.[p] ?? {}) });
-  for (const [k, sl] of Object.entries(data.project?.overrides ?? {})) {
-    const [b, p] = k.split(":").map(Number);
-    engine.setOverride(b, p, sl);
-  }
-  let saveTimer = 0;
-  function saveProject() {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      const pads = Array.from({ length: 16 }, (_, p) => engine.getPadParams(p));
-      fetch(`/api/songs/${id}/project`, { method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pads, overrides: engine.getOverrides(), pattern: seq.state.pattern, fx: fx.get() }) }).catch(() => {});
-    }, 300);
-  }
+  insp.querySelector(".unslice").addEventListener("click", () => dispatch({ type: "slice.clear", bank: st().bank, pad: st().selected }));
+  insp.querySelector(".all").addEventListener("click", () => dispatch({ type: "pad.copyToAll", pad: st().selected }));
+  insp.querySelector(".resetpad").addEventListener("click", () => dispatch({ type: "pad.reset", pad: st().selected }));
 
   // ---- tap tempo ----
   let taps = [];
@@ -432,20 +325,8 @@ export async function mountSong(root, { id, audio, input }) {
     const bpm = Number($(".tap-bpm").dataset.bpm);
     if (!bpm) return;
     $(".tap-bpm").textContent = "re-analyzing…";
-    const r = await fetch(`/api/songs/${id}/reanalyze`, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bpm, meter: meterOverride }) });
-    if (!r.ok) { $(".tap-bpm").textContent = "failed"; return; }
-    const out = await r.json();
-    Object.assign(analysis, out.analysis);
-    const t = position();
-    chops = out.chops;
-    engine.setChops(chops);
-    indexBanks();
-    bank = 0;
-    followTo(t);
-    setBank(bank, false);
-    renderLcd();
-    $(".tap-bpm").textContent = `now ${chops.bpm.toFixed(1)} BPM`;
+    if (!(await session.reanalyze(bpm))) { $(".tap-bpm").textContent = "failed"; return; }
+    $(".tap-bpm").textContent = `now ${st().chops.bpm.toFixed(1)} BPM`;
   });
 
   // ---- sound: tone / reverb up front, size / filter / EQ under "more" ----
@@ -459,7 +340,7 @@ export async function mountSong(root, { id, audio, input }) {
     low: (v) => `${v > 0 ? "+" : ""}${v} dB`, mid: (v) => `${v > 0 ? "+" : ""}${v} dB`, high: (v) => `${v > 0 ? "+" : ""}${v} dB`,
   };
   function renderFx() {
-    const P = fx.get();
+    const P = st().project.fx;
     for (const [k, el] of Object.entries(fxInputs)) {
       el.value = P[k];
       fxEl.querySelector(`[data-fx="${k}"]`).textContent = fxText[k](P[k]);
@@ -468,50 +349,27 @@ export async function mountSong(root, { id, audio, input }) {
     fxEl.querySelectorAll(".fx-presets button").forEach((b) => b.classList.toggle("on", b.dataset.preset === match?.[0]));
   }
   for (const [k, el] of Object.entries(fxInputs)) {
-    el.addEventListener("input", () => { fx.set({ [k]: Number(el.value) }); renderFx(); saveProject(); });
-    el.addEventListener("dblclick", () => { fx.set({ [k]: DEFAULT_FX[k] }); renderFx(); saveProject(); });
+    el.addEventListener("input", () => dispatch({ type: "fx.set", params: { [k]: Number(el.value) } }));
+    el.addEventListener("dblclick", () => dispatch({ type: "fx.set", params: { [k]: DEFAULT_FX[k] } }));
   }
   for (const name of Object.keys(PRESETS)) {
     const b = document.createElement("button");
     b.textContent = name;
     b.dataset.preset = name;
-    b.addEventListener("click", () => { fx.set(PRESETS[name]); renderFx(); saveProject(); });
+    b.addEventListener("click", () => dispatch({ type: "fx.set", params: PRESETS[name] }));
     fxEl.querySelector(".fx-presets").append(b);
   }
-  fx.set({ ...DEFAULT_FX, ...(data.project?.fx ?? {}) });
   renderFx();
 
   // ---- sequencer (record / loop / quantize / swing / note repeat / export) ----
-  function clickAt(when, accent) {
-    const o = ctx.createOscillator(), g = ctx.createGain();
-    o.frequency.value = accent ? 1600 : 1000;
-    g.gain.setValueAtTime(0, when);
-    g.gain.linearRampToValueAtTime(accent ? 0.35 : 0.2, when + 0.002);
-    g.gain.exponentialRampToValueAtTime(1e-4, when + 0.05);
-    o.connect(g).connect(master);
-    o.start(when);
-    o.stop(when + 0.06);
-  }
-  function flashPadAt(when, p, b) {
-    setTimeout(() => {
-      if (b !== bank) return;
-      const el = padEls[p];
-      el.classList.remove("hit");
-      void el.offsetWidth;
-      el.classList.add("hit");
-    }, Math.max(0, (when - ctx.currentTime) * 1000));
-  }
-  const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b) => { engine.trigger(p, vel, when, b); flashPadAt(when, p, b); } });
-  const syncSeqTempo = () => { seq.state.bpm = chops.bpm; seq.state.beatsPerBar = chops.beats_per_bar; };
-  syncSeqTempo();
-  if (data.project?.pattern) seq.load(data.project.pattern);
-  $(".seq-bars").value = String(seq.state.bars);
+  $(".seq-bars").value = String(st().project.pattern.bars);
   // Step grid: 16 pad rows x 1/16 steps. Click toggles a hit for that pad on the current bank.
   const stepsEl = $(".stepgrid");
   let nowCell = -1;
-  const stepOf = (e) => Math.round(e.beat * 4);
+  const stepCount = () => st().project.pattern.bars * st().chops.beats_per_bar * 4;
   function buildStepGrid() {
-    const n = seq.loopBeats() * 4;
+    const { chops } = st();
+    const n = stepCount();
     stepsEl.style.setProperty("--steps", n);
     let html = "";
     for (let p = 15; p >= 0; p--) { // pad 16 on top, like the pad grid
@@ -523,10 +381,11 @@ export async function mountSong(root, { id, audio, input }) {
     nowCell = -1;
   }
   function renderSteps() {
-    const n = seq.loopBeats() * 4;
+    const { chops, bank, selected, project } = st();
+    const n = stepCount();
     if (Number(stepsEl.dataset.n) !== n) buildStepGrid();
     const at = new Map(); // "pad:step" -> event
-    for (const e of seq.state.pattern.events) at.set(`${e.pad}:${stepOf(e)}`, e);
+    for (const e of project.pattern.events) at.set(`${e.pad}:${stepOf(e)}`, e);
     for (const c of stepsEl.querySelectorAll("i")) {
       const e = at.get(`${c.dataset.pad}:${c.dataset.step}`);
       c.classList.toggle("on", !!e);
@@ -539,44 +398,34 @@ export async function mountSong(root, { id, audio, input }) {
       r.classList.toggle("empty", !engine.getSlice(bank, p));
       r.classList.toggle("selected", p === selected);
     }
-    $(".seq-info").textContent = `${seq.state.pattern.events.length} hits · ${chops.bpm.toFixed(1)} BPM`;
+    $(".seq-info").textContent = `${project.pattern.events.length} hits · ${chops.bpm.toFixed(1)} BPM`;
   }
   stepsEl.addEventListener("click", (e) => {
     const t = e.target;
-    if (t.classList.contains("row-name")) { hit(Number(t.dataset.pad), 1); return; }
+    if (t.classList.contains("row-name")) { session.hit(Number(t.dataset.pad), 1); return; }
     if (t.tagName !== "I") return;
     const pad = Number(t.dataset.pad), step = Number(t.dataset.step);
-    const ev = seq.state.pattern.events;
-    const i = ev.findIndex((x) => x.pad === pad && stepOf(x) === step);
-    if (i >= 0) ev.splice(i, 1);
-    else {
-      ev.push({ beat: step / 4, pad, bank, vel: e.shiftKey ? 0.55 : 1, pass: -1 }); // pass -1: drawn, not recorded (undo skips it)
-      if (!seq.state.playing) engine.trigger(pad, 1); // audition the new hit
-    }
-    renderSteps();
-    saveProject();
+    const existed = st().project.pattern.events.some((x) => x.pad === pad && stepOf(x) === step);
+    dispatch({ type: "pattern.toggleStep", pad, step, bank: st().bank, vel: e.shiftKey ? 0.55 : 1 });
+    if (!existed && !seq.state.playing) engine.trigger(pad, 1); // audition the new hit
   });
   function seqButtons() {
     $(".rec").classList.toggle("on", seq.state.recording);
     $(".seq-play").textContent = seq.state.playing ? "■ pattern" : "▶ pattern";
   }
-  $(".rec").addEventListener("click", () => { stopSong(); syncSeqTempo(); seq.toggleRecord(); seqButtons(); });
-  $(".seq-play").addEventListener("click", () => {
-    if (seq.state.playing) seq.stop(); else { stopSong(); syncSeqTempo(); seq.start(); }
-    seqButtons();
-    saveProject();
-  });
-  $(".metro").addEventListener("change", (e) => { seq.state.metronome = e.target.checked; });
-  $(".seq-bars").addEventListener("change", (e) => {
-    seq.state.bars = Number(e.target.value);
-    seq.state.pattern.bars = seq.state.bars;
-    seq.state.pattern.events = seq.state.pattern.events.filter((x) => x.beat < seq.loopBeats());
-    renderSteps(); saveProject();
-  });
-  $(".seq-q").addEventListener("change", (e) => { seq.state.quant = e.target.value; });
-  $(".seq-swing").addEventListener("input", (e) => { seq.state.swing = Number(e.target.value); });
-  $(".seq-undo").addEventListener("click", () => { seq.undo(); renderSteps(); saveProject(); });
-  $(".seq-clear").addEventListener("click", () => { seq.clear(); renderSteps(); saveProject(); });
+  $(".rec").addEventListener("click", () => session.toggleRecord());
+  $(".seq-play").addEventListener("click", () => session.togglePattern());
+  session.on("seq", seqButtons);
+  const setting = (params) => dispatch({ type: "settings.set", params });
+  $(".metro").addEventListener("change", (e) => setting({ metronome: e.target.checked }));
+  $(".seq-bars").addEventListener("change", (e) => dispatch({ type: "pattern.setBars", bars: Number(e.target.value), beatsPerBar: st().chops.beats_per_bar }));
+  $(".seq-q").addEventListener("change", (e) => setting({ quant: e.target.value }));
+  $(".seq-swing").addEventListener("input", (e) => setting({ swing: Number(e.target.value) }));
+  $(".seq-undo").addEventListener("click", () => dispatch({ type: "pattern.undo" }));
+  $(".seq-clear").addEventListener("click", () => dispatch({ type: "pattern.clear" }));
+  $(".repeat").addEventListener("change", (e) => setting({ repeat: e.target.checked }));
+  $(".repeat-rate").addEventListener("change", (e) => setting({ repeatRate: Number(e.target.value) }));
+  $(".follow").addEventListener("change", (e) => setting({ follow: e.target.checked }));
   const download = (bytes, name, type) => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([bytes], { type }));
@@ -585,43 +434,20 @@ export async function mountSong(root, { id, audio, input }) {
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   };
   const baseName = () => meta.title.replace(/[^\w-]+/g, "_").slice(0, 40);
-  $(".seq-midi").addEventListener("click", () => download(patternToMidi(seq.state.pattern, { bpm: chops.bpm, beatsPerBar: chops.beats_per_bar }), `${baseName()}-pattern.mid`, "audio/midi"));
+  $(".seq-midi").addEventListener("click", () => download(session.patternMidi(), `${baseName()}-pattern.mid`, "audio/midi"));
   $(".seq-wav").addEventListener("click", async () => {
-    const pat = seq.state.pattern;
-    if (!pat.events.length) return;
-    const seconds = (pat.bars * chops.beats_per_bar * 60) / chops.bpm + 2 + (fx.get().reverb > 0 ? 0.4 + fx.get().size * 5.6 : 0);
-    const off = new OfflineAudioContext(2, Math.ceil(seconds * buffer.sampleRate), buffer.sampleRate);
-    const ofx = createFx(off, fx.get());
-    ofx.output.connect(off.destination);
-    const oe = createEngine({ ctx: off, buffer, chops, output: ofx.input });
-    for (let p = 0; p < 16; p++) oe.setPadParams(p, engine.getPadParams(p));
-    for (const [k, sl] of Object.entries(engine.getOverrides())) { const [b, p] = k.split(":").map(Number); oe.setOverride(b, p, sl); }
-    const q = { off: 0, "1/8": 0.5, "1/16": 0.25 }[seq.state.quant];
-    for (const e of pat.events) {
-      const step = q ? Math.round(e.beat / q) : 0;
-      const beat = q && step % 2 === 1 ? e.beat + seq.state.swing * q : e.beat;
-      oe.trigger(e.pad, e.vel, (beat * 60) / chops.bpm, e.bank);
-    }
+    if (!st().project.pattern.events.length) return;
     $(".seq-info").textContent = "rendering…";
-    download(encodeWav(await off.startRendering()), `${baseName()}-pattern.wav`, "audio/wav");
+    download(await session.renderPatternWav(), `${baseName()}-pattern.wav`, "audio/wav");
     renderSteps();
   });
-  // note repeat: held pads retrigger at the chosen rate (synced to tempo)
-  const held = new Map(); // pad -> interval handle
-  function startRepeat(p, vel) {
-    if (!$(".repeat").checked || held.has(p)) return;
-    const ms = (Number($(".repeat-rate").value) * 60000) / chops.bpm;
-    held.set(p, setInterval(() => hit(p, vel), ms));
-  }
-  function stopRepeat(p) { clearInterval(held.get(p)); held.delete(p); }
 
   // ---- sections (offline structure; AI can relabel) ----
   const SECTION_HUES = { intro: 200, verse: 140, chorus: 35, bridge: 280, outro: 200 };
-  let sectionList = [];
   function renderSections() {
     const el = $(".sections");
     el.innerHTML = "";
-    for (const sc of sectionList) {
+    for (const sc of st().sections) {
       const b = document.createElement("button");
       b.className = "section-seg";
       b.style.left = `${(sc.start_s / meta.duration_s) * 100}%`;
@@ -630,33 +456,27 @@ export async function mountSong(root, { id, audio, input }) {
       b.textContent = sc.label;
       b.title = `${sc.label} (${sc.letter}) · bars ${sc.start_bar + 1}–${sc.end_bar} · ${fmt(sc.start_s)}`;
       b.addEventListener("click", () => {
-        if (song) playSong(sc.start_s); else { video.currentTime = sc.start_s; followTo(sc.start_s + 1e-3); }
+        if (session.songPlaying) session.playSong(sc.start_s); else { video.currentTime = sc.start_s; session.followTo(sc.start_s + 1e-3); }
       });
       el.append(b);
     }
   }
   function markSection(t) {
-    root.querySelectorAll(".section-seg").forEach((b, i) => b.classList.toggle("active", sectionList[i] && sectionList[i].start_s <= t && t < sectionList[i].end_s));
+    const list = st().sections;
+    root.querySelectorAll(".section-seg").forEach((b, i) => b.classList.toggle("active", list[i] && list[i].start_s <= t && t < list[i].end_s));
   }
-  fetch(`/api/songs/${id}/sections`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
-    .then((r) => (r.ok ? r.json() : null)).then((d) => { if (d) { sectionList = d.sections; renderSections(); } }).catch(() => {});
+  session.loadSections();
 
   // ---- AI assist ----
-  let ai = null;
   async function runAI() {
     const out = $(".ai-out");
     out.textContent = "Listening to the song with an audio model…";
     $(".ai-run").disabled = true;
     try {
-      const r = await fetch(`/api/songs/${id}/advise`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const body = await r.json();
-      if (!r.ok) throw new Error(body.error || r.status);
-      ai = body;
+      const ai = await session.advise();
       const chk = ai.bpm_meter_check || {};
       out.innerHTML = `<b>${esc(ai.model)}</b>: ${ai.sections.length} sections · felt ${esc(chk.felt_bpm)} BPM (${esc(chk.meter_hint)})` +
         (chk.bpm_mult_hint && chk.bpm_mult_hint !== 1 ? ` — suggests ${chk.bpm_mult_hint === 2 ? "×2" : "÷2"}` : "") + `<br>${esc(chk.notes || "")}`;
-      sectionList = ai.sections.map((sc, i) => ({ ...sc, letter: sc.letter ?? String.fromCharCode(65 + i) }));
-      renderSections();
       $(".ai-bank").disabled = false;
     } catch (err) {
       const msg = String(err.message || err);
@@ -667,31 +487,24 @@ export async function mountSong(root, { id, audio, input }) {
   }
   $(".ai-run").addEventListener("click", runAI);
   $(".ai-bank").addEventListener("click", () => {
-    if (!ai) return;
-    ai.suggested_bank.slice(0, 16).forEach((ci, p) => {
-      const c = chops.chops[ci];
-      if (c) engine.setOverride(bank, p, { start: c.start, end: c.end });
-    });
-    renderBank();
-    saveProject();
-    $(".ai-out").insertAdjacentHTML("beforeend", `<br>Loaded on bank ${bank + 1}: ${ai.pad_labels.slice(0, 16).map(esc).join(", ")}`);
+    const labels = session.loadAiBank();
+    if (labels) $(".ai-out").insertAdjacentHTML("beforeend", `<br>Loaded on bank ${st().bank + 1}: ${labels.map(esc).join(", ")}`);
   });
 
   // ---- export ----
   async function doExport(kind) {
     const out = $(".exp-out");
     out.textContent = "exporting…";
-    const r = await fetch(`/api/songs/${id}/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind, bank, fx: fx.get() }) });
-    const body = await r.json().catch(() => ({}));
-    out.innerHTML = r.ok ? `✓ ${esc(body.path)}${body.note ? "<br>" + esc(body.note) : ""}` : `<span class="error">${esc(body.error || r.status)}</span>`;
+    const r = await session.exportBank(kind);
+    out.innerHTML = r.ok ? `✓ ${esc(r.path)}${r.note ? "<br>" + esc(r.note) : ""}` : `<span class="error">${esc(r.error)}</span>`;
   }
   $(".exp-h2").addEventListener("click", () => doExport("hydrogen"));
   $(".exp-sfz").addEventListener("click", () => doExport("sfz"));
 
   // ---- modes ----
-  $(".mode").addEventListener("change", (e) => engine.setMode(e.target.value));
-  $(".choke").addEventListener("change", (e) => engine.setChoke(e.target.checked));
-  $(".full").addEventListener("change", (e) => engine.setFullLevel(e.target.checked));
+  $(".mode").addEventListener("change", (e) => setting({ mode: e.target.value }));
+  $(".choke").addEventListener("change", (e) => setting({ choke: e.target.checked }));
+  $(".full").addEventListener("change", (e) => setting({ fullLevel: e.target.checked }));
 
   // ---- MIDI / keyboard ----
   const renderDevices = (devs) => {
@@ -700,10 +513,10 @@ export async function mountSong(root, { id, audio, input }) {
   };
   renderDevices(input.getDevices());
   const handlers = {
-    "pad-on": (e) => { hit(e.detail.pad, e.detail.velocity); startRepeat(e.detail.pad, e.detail.velocity); },
-    "pad-off": (e) => { engine.release(e.detail.pad); stopRepeat(e.detail.pad); },
-    bank: (e) => setBank(bank + e.detail.delta, true),
-    panic: () => { stopSong(); engine.stopAll(); seq.stop(); seqButtons(); for (const p of [...held.keys()]) stopRepeat(p); },
+    "pad-on": (e) => { session.hit(e.detail.pad, e.detail.velocity); session.startRepeat(e.detail.pad, e.detail.velocity); },
+    "pad-off": (e) => { session.release(e.detail.pad); session.stopRepeat(e.detail.pad); },
+    bank: (e) => session.setBank(st().bank + e.detail.delta, true),
+    panic: () => session.panic(),
     devices: (e) => renderDevices(e.detail.devices),
     "learn-state": (e) => {
       $(".learn-state").textContent = e.detail.active ? `Learning: tap pad ${e.detail.nextPad + 1} on your controller…` : "Pad map saved.";
@@ -714,33 +527,66 @@ export async function mountSong(root, { id, audio, input }) {
   $(".reset").addEventListener("click", () => { input.resetMap(); $(".learn-state").textContent = "Default map (notes 36–51)."; });
   const onKey = (e) => {
     if (/INPUT|TEXTAREA|SELECT/.test(e.target?.tagName ?? "")) return;
-    if (e.code === "Enter") { e.preventDefault(); song ? stopSong() : playSong(); }
+    if (e.code === "Enter") { e.preventDefault(); session.songPlaying ? session.stopSong() : session.playSong(); }
     if (e.code === "KeyT" && !e.repeat) tap();
     if (e.code === "KeyP" && !e.repeat) $(".seq-play").click();
     if (e.code === "KeyB" && !e.repeat) $(".rec").click();
   };
   document.addEventListener("keydown", onKey);
 
-  indexBanks();
-  setBank(0, true);
+  // ---- redraw on state changes ----
+  function syncControls() {
+    const S = st().settings;
+    $(".mode").value = S.mode;
+    $(".choke").checked = S.choke;
+    $(".full").checked = S.fullLevel;
+    $(".metro").checked = S.metronome;
+    $(".seq-q").value = S.quant;
+    $(".seq-swing").value = S.swing;
+    $(".repeat").checked = S.repeat;
+    $(".repeat-rate").value = String(S.repeatRate);
+    $(".follow").checked = S.follow;
+    $(".seq-bars").value = String(st().project.pattern.bars);
+  }
+  const unsubscribe = store.subscribe((s, prev, _action, m) => {
+    const P = s.project, Q = prev.project;
+    if (s.chops !== prev.chops) { renderBankStrip(); renderLcd(); }
+    if (s.chops !== prev.chops || s.bank !== prev.bank || P.overrides !== Q.overrides) renderBank(m.from !== "wave");
+    else {
+      if (s.selected !== prev.selected) { renderPads(); renderInspector(); renderSteps(); }
+      else {
+        if (P.pads !== Q.pads) renderInspector();
+        if (P.pattern !== Q.pattern) renderSteps();
+      }
+    }
+    if (P.fx !== Q.fx) renderFx();
+    if (s.sections !== prev.sections) renderSections();
+    if (s.settings !== prev.settings || P.pattern.bars !== Q.pattern.bars) syncControls();
+  });
+
+  renderBankStrip();
+  session.setBank(0, true);
+  renderBank();
   renderLcd();
-  renderSteps();
+  renderFx();
+  syncControls();
+  seqButtons();
   tick();
 
   return {
+    session,
     destroy() {
       cancelAnimationFrame(raf);
+      unsubscribe();
       for (const [t, h] of Object.entries(handlers)) input.removeEventListener(t, h);
       document.removeEventListener("keydown", onKey);
-      stopSong();
-      seq.stop();
-      for (const p of [...held.keys()]) stopRepeat(p);
-      engine.stopAll();
       wave.destroy();
-      video.removeAttribute("src");
-      video.load();
+      session.destroy();
       root.innerHTML = "";
     },
-    get state() { return { bank, banks: chops.banks.length, grid: chops.grid, bpm: chops.bpm, playing: !!song, lastChop }; },
+    get state() {
+      const { bank, chops } = st();
+      return { bank, banks: chops.banks.length, grid: chops.grid, bpm: chops.bpm, playing: session.songPlaying, lastChop: session.lastChop };
+    },
   };
 }
