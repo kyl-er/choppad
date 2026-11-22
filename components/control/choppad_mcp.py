@@ -117,6 +117,14 @@ def build_tools(client):
               {"id": _ID, "bpm": _N("20-400", minimum=20, maximum=400), "song": {"type": "boolean"},
                "follow": {"type": "boolean"}, "fit": _S("pattern or bank", enum=["pattern", "bank"])}, ["id"],
               lambda a: c.tempo(a["id"], a.get("bpm"), bool(a.get("song")), a.get("follow"), a.get("fit"))),
+        _tool("stems", "Split the song into drums, bass, vocals and other (needs a stems backend set up on the server: "
+              "CHOPPAD_STEMS_BACKEND=remote and CHOPPAD_STEMS_URL; otherwise the error says so). With pad and stem, that pad then plays "
+              "its slice from the stem ('mix' = back to the full song). Can take minutes.",
+              {"id": _ID, "force": {"type": "boolean"}, "pad": _PAD, "bank": _BANK,
+               "stem": _S("drums, bass, vocals, other or mix", enum=["drums", "bass", "vocals", "other", "mix"])}, ["id"],
+              lambda a: {**c.stems(a["id"], bool(a.get("force"))), **({"pad": _watch(c.pad_stem(
+                  a["id"], a["bank"] if a.get("bank") is not None else c.current_bank(a["id"]), a["pad"],
+                  None if a.get("stem") == "mix" else (a.get("stem") or "drums")))} if a.get("pad") is not None else {})}),
         _tool("song", "Song mode: several step patterns and a chain that plays them (the arrangement). op 'show' reads it; 'add' makes a new "
               "pattern (name, bars, copy=true starts from the edited one) and selects it for editing; 'select', 'rename', 'remove' work on "
               "a pattern id; 'chain' sets the order as 'p1:2 p2:1' (pattern:repeats); 'mode' is 'pattern' (loop the edited pattern) or "

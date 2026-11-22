@@ -300,6 +300,18 @@ class Client:
             raise ControlError("song op must be add, select, rename, remove, chain or mode")
         return self.actions(sid, [act])
 
+    # ---- W3b: stems ----
+    def stems(self, sid, force=False):
+        """Split the song into stems with the server's stems backend (CHOPPAD_STEMS_BACKEND=remote + CHOPPAD_STEMS_URL on the
+        server). Can take minutes. Returns {stems: [...], urls: {...}}; without a backend the server's message is the error."""
+        return self.post(f"/api/songs/{_sid(sid)}/stems", {"force": True} if force else {}, timeout=1800)
+
+    def pad_stem(self, sid, bank, pad, stem):
+        """Make a pad play its slice from a stem ("drums", "bass", "vocals", "other"), or from the full mix again with stem=None."""
+        if stem is not None and stem not in ("drums", "bass", "vocals", "other"):
+            raise ControlError("stem must be drums, bass, vocals or other")
+        return self.actions(sid, [{"type": "slice.stem", "bank": bank, "pad": pad, "stem": stem}])
+
     # ---- W3b: resample ----
     def resample(self, sid, pad, bars=None, seconds=None, source="pattern", bank=None, wait_s=120):
         """Ask the browser that has the song open to resample into a new sound on `pad` (the browser renders or records, so

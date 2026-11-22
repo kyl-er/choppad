@@ -41,6 +41,64 @@ def library_songs(n=2):
     return out[:n]
 
 
+def shortest_song():
+    """The shortest library song (stems for it are quick to make in a test)."""
+    best = None
+    for sid in library_songs(99):
+        try:
+            d = json.load(open(os.path.join(MEDIA, sid, "meta.json"))).get("duration_s") or 1e9
+        except (OSError, ValueError):
+            continue
+        if best is None or d < best[0]:
+            best = (d, sid)
+    return best[1] if best else None
+
+
+class FakeStemsService:
+    """A stems service for the test: answers a POST of audio.wav with a zip of four quieter copies of it (gains 1/2, 1/4, 1/8, 1/16)."""
+    def __init__(self):
+        import io
+        import threading
+        import wave
+        import zipfile
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import numpy as np
+        self.requests = 0
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                outer.requests += 1
+                with wave.open(io.BytesIO(body)) as w:
+                    ch, sw, sr, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.readframes(w.getnframes())
+                x = np.frombuffer(frames, dtype="<i2")
+                out = io.BytesIO()
+                with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as z:
+                    for name, gain in (("drums", 0.5), ("bass", 0.25), ("vocals", 0.125), ("other", 0.0625)):
+                        b = io.BytesIO()
+                        with wave.open(b, "wb") as o:
+                            o.setnchannels(ch); o.setsampwidth(sw); o.setframerate(sr)
+                            o.writeframes((x * gain).astype("<i2").tobytes())
+                        z.writestr(f"{name}.wav", b.getvalue())
+                data = out.getvalue()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/zip")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/separate"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
 def chrome_path():
     for c in [os.environ.get("CHOPPAD_CHROME"), *sorted(glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome")), reverse=True),
               "/usr/bin/chromium", "/usr/bin/google-chrome-stable"]:
@@ -103,6 +161,9 @@ class Core2(unittest.TestCase):
     def setUpClass(cls):
         cls.sids = library_songs()
         cls.sid = cls.sids[0]
+        cls.short = shortest_song()
+        if cls.short not in cls.sids:
+            cls.sids = cls.sids + [cls.short]
         cls.tmp = tempfile.mkdtemp(prefix="choppad-core2-")
         cls.addClassCleanup(shutil.rmtree, cls.tmp, ignore_errors=True)
         cls.pristine = {}
@@ -116,12 +177,15 @@ class Core2(unittest.TestCase):
                 elif f.endswith(".json") and f not in ("project.json", "onsets.json"):
                     shutil.copy(os.path.join(src, f), dst)
             cls.pristine[sid] = open(os.path.join(dst, "chops.json")).read()
+        cls.stems_service = FakeStemsService()
+        cls.addClassCleanup(cls.stems_service.close)
         cls.port = free_port()
         cls.base = f"http://127.0.0.1:{cls.port}"
         cls.server = subprocess.Popen(
             [os.path.join(REPO, ".venv", "bin", "python"), os.path.join(REPO, "components", "integrate", "choppad.py"),
              "--serve", "--port", str(cls.port)],
-            env={**os.environ, "CHOPPAD_REPO": cls.tmp}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            env={**os.environ, "CHOPPAD_REPO": cls.tmp, "CHOPPAD_STEMS_BACKEND": "remote", "CHOPPAD_STEMS_URL": cls.stems_service.url},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cls.addClassCleanup(cls.server.wait, 10)
         cls.addClassCleanup(cls.server.terminate)
         for _ in range(100):
@@ -598,6 +662,78 @@ class Core2(unittest.TestCase):
         # and a pattern edit in one tab shows in the other, inside the pattern the song holds
         page.evaluate(f"{S}.store.dispatch({{ type: 'pattern.addEvent', event: {{ beat: 0.5, pad: 9, bank: 0, vel: 1, pass: 5 }} }})")
         page2.wait_for_function(f"{S}.store.get().project.song.patterns[1].events.some((e) => e.pad === 9)", timeout=10000)
+        self.assertEqual(errors + errors2, [], str(errors + errors2))
+
+    # ------------------------------------------------------------------ 7. stems
+    def test_stems_through_a_remote_backend_onto_pads(self):
+        sid = self.short
+        page, errors = self.open_song(sid)
+        S = self.S
+        self.assertFalse(page.evaluate(f"!!{S}.meta.stems"), "no stems yet")
+        res = page.evaluate(f"{S}.separateStems()")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["stems"], ["drums", "bass", "vocals", "other"])
+        self.assertEqual(page.evaluate(f"{S}.meta.stems"), ["drums", "bass", "vocals", "other"])
+        for n in ("drums", "bass"):
+            self.assertEqual(urllib.request.urlopen(f"{self.base}/media/{sid}/stems/{n}.wav").status, 200)
+        again = page.evaluate(f"{S}.separateStems()")     # cached: the service is not asked a second time
+        self.assertTrue(again["ok"])
+        self.assertEqual(self.stems_service.requests, 1)
+        self.assertEqual(api(self.base, f"/api/songs/{sid}")[1]["meta"]["stems"], ["drums", "bass", "vocals", "other"])
+
+        # pad 3 plays its slice from the drums stem (half as loud as the mix), pad 4 is the same slice of the mix
+        page.evaluate(f"""() => {{ const d = (a) => {S}.store.dispatch(a);
+            d({{ type: 'slice.set', bank: 0, pad: 3, start: 10, end: 10.5 }}); d({{ type: 'slice.set', bank: 0, pad: 4, start: 10, end: 10.5 }}); }}""")
+        ok = page.evaluate(f"{S}.setStem(0, 3, 'drums')")
+        self.assertTrue(ok["ok"], ok)
+        self.assertEqual(page.evaluate(f"{S}.store.get().project.overrides['0:3']"), {"start": 10, "end": 10.5, "stem": "drums"})
+        peaks = page.evaluate(f"""() => {{
+            const s = {S}, sr = s.buffer.sampleRate, a = Math.round(10 * sr), b = Math.round(10.5 * sr);
+            const peak = (buf) => {{ const x = buf.getChannelData(0); let m = 0; for (let i = a; i < b; i++) m = Math.max(m, Math.abs(x[i])); return m; }};
+            return {{ mix: peak(s.buffer), stem: peak(s.engine.getPadBuffer(0, 3)), whole: s.engine.getPadBuffer(0, 3).duration > s.buffer.duration - 0.1,
+                     none: s.engine.getPadBuffer(0, 4) }};
+        }}""")
+        self.assertAlmostEqual(peaks["stem"] / peaks["mix"], 0.5, delta=0.02, msg=str(peaks))
+        self.assertTrue(peaks["whole"], "the stem buffer is the whole stem, played from the slice start")
+        self.assertIsNone(peaks["none"])
+        lvl = page.evaluate(f"""async () => {{
+            const s = {S}, T = window.__t;
+            const peak = async (pad) => {{
+                s.store.dispatch({{ type: 'pattern.load', pattern: {{ bars: 1, events: [{{ beat: 0, pad, bank: 0, vel: 1, pass: -1 }}] }} }});
+                const x = (await T.decode(Array.from(await s.renderPatternWav()))).getChannelData(0); let m = 0;
+                for (let i = 0; i < x.length; i++) m = Math.max(m, Math.abs(x[i])); return m; }};
+            return {{ stem: await peak(3), mix: await peak(4) }};
+        }}""")
+        self.assertLess(lvl["stem"], 0.65 * lvl["mix"], lvl)
+        self.assertGreater(lvl["stem"], 0.3 * lvl["mix"], lvl)
+
+        # fitting to a tempo stretches the stem's slice, not the mix's, and keeps the stem
+        page.evaluate(f"{S}.store.dispatch({{ type: 'tempo.set', bpm: {page.evaluate(f'{S}.store.get().chops.bpm') * 0.8} }})")
+        fit = page.evaluate(f"{S}.fitToTempo({{ scope: 'bank' }})")
+        self.assertTrue(fit["ok"], fit)
+        ov3 = page.evaluate(f"{S}.store.get().project.overrides['0:3']")
+        ov4 = page.evaluate(f"{S}.store.get().project.overrides['0:4']")
+        self.assertEqual(ov3["stem"], "drums")
+        self.assertIn("fit", ov3["stretch"])
+        self.assertNotEqual(ov3["stretch"]["url"], ov4["stretch"]["url"])
+        amp = page.evaluate(f"""() => {{ const s = {S}, p = (b) => {{ const x = s.engine.getPadBuffer(0, b).getChannelData(0); let m = 0; for (const v of x) m = Math.max(m, Math.abs(v)); return m; }};
+            return [p(3), p(4)]; }}""")
+        self.assertAlmostEqual(amp[0] / amp[1], 0.5, delta=0.05, msg=str(amp))
+        # taking the stem off puts the pad back on the mix and drops the stretch that was made from the stem
+        page.evaluate(f"{S}.setStem(0, 3, null)")
+        self.assertEqual(page.evaluate(f"{S}.store.get().project.overrides['0:3']"), {"start": 10, "end": 10.5})
+        page.evaluate(f"{S}.setStem(0, 3, 'bass')")
+
+        # saved, exported, shown by a second tab
+        page.evaluate(f"{S}.remote.flush()")
+        self.assertEqual(self.project_on_disk(sid)["overrides"]["0:3"]["stem"], "bass")
+        st, out = api(self.base, f"/api/songs/{sid}/export", {"kind": "sfz", "bank": 0})
+        self.assertEqual(st, 200, out)
+        line = [l for l in open(out["path"]).read().splitlines() if "key=39 " in l][0]
+        self.assertIn("sample=stems/bass.wav", line)
+        page2, errors2 = self.open_song(sid)
+        self.assertEqual(page2.evaluate(f"{S}.store.get().project.overrides['0:3'].stem"), "bass")
+        self.assertEqual(page2.evaluate(f"{S}.engine.getPadBuffer(0, 3) !== null"), True)
         self.assertEqual(errors + errors2, [], str(errors + errors2))
 
 

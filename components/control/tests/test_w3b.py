@@ -7,6 +7,7 @@ import choppad_actions as A  # noqa: E402
 import choppad_client as cc  # noqa: E402
 import choppad_mcp  # noqa: E402
 import choppad  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "stems"))  # noqa: E402
 
 
 def fake_stretch(media_dir, body):
@@ -185,6 +186,49 @@ class SongMode(Rig):
         self.assertEqual((shown["mode"], len(shown["patterns"]), shown["chain"]), ("pattern", 1, []))
         self.assertEqual(cc.parse_chain("p1:2 p2;p3,p4:3"), [{"pattern": "p1", "repeats": 2}, {"pattern": "p2", "repeats": 1},
                                                               {"pattern": "p3", "repeats": 1}, {"pattern": "p4", "repeats": 3}])
+
+
+class StemsVerbs(Rig):
+    def setUp(self):
+        super().setUp()
+        self.srv.shutdown()
+        self.srv.server_close()
+        names = ["drums", "bass", "vocals", "other"]
+        self.srv, port = start_server(self.root, actions={"stretch": fake_stretch, "stems": lambda d, body: {
+            "stems": names, "urls": {n: f"/media/song1/stems/{n}.wav" for n in names}, "backend": "remote"}})
+        self.c = cc.Client(f"http://127.0.0.1:{port}")
+
+    def test_cli_separates_and_puts_a_stem_on_a_pad(self):
+        out = []
+        rc = choppad.run_verb(["stems", "song1", "--pad", "4", "--stem", "bass", "--bank", "1"], client=self.c, out=out.append, err=lambda s: None)
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out[0])["stems"], ["drums", "bass", "vocals", "other"])
+        self.assertEqual(self.project()["overrides"]["1:4"]["stem"], "bass")
+        self.assertEqual(choppad.run_verb(["stems", "song1", "--pad", "4", "--stem", "mix", "--bank", "1"], client=self.c, out=out.append, err=lambda s: None), 0)
+        self.assertNotIn("stem", self.project()["overrides"]["1:4"])
+
+    def test_checks(self):
+        errs = []
+        self.assertEqual(choppad.run_verb(["stems", "song1", "--stem", "drums"], client=self.c, out=lambda s: None, err=errs.append), 1)
+        self.assertIn("--stem needs --pad", errs[0])
+        with self.assertRaises(cc.ControlError):
+            self.c.pad_stem("song1", 0, 0, "guitar")
+        tools = choppad_mcp.build_tools(self.c)
+        r = tools["stems"]["_fn"]({"id": "song1", "pad": 2, "bank": 0, "stem": "vocals"})
+        self.assertEqual(r["stems"][0], "drums")
+        self.assertEqual(self.project()["overrides"]["0:2"]["stem"], "vocals")
+
+    def test_a_server_without_a_backend_says_so(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        from choppad_stems import StemsUnavailable
+
+        def none(d, body):
+            raise StemsUnavailable("stem separation is off")
+        self.srv, port = start_server(self.root, actions={"stems": none})
+        c = cc.Client(f"http://127.0.0.1:{port}")
+        with self.assertRaisesRegex(cc.ControlError, "HTTP 501: stem separation is off"):
+            c.stems("song1")
 
 
 class Resample(Rig):

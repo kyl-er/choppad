@@ -439,6 +439,29 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     return encodeWav(await renderEvents(pat.events, { beats: pat.bars * chops.beats_per_bar }));
   }
 
+  // ---- stems (components/stems): drums, bass, vocals and other of the song, from a backend the server is set up with ----
+  /** Split the song into stems (the server asks its backend, which can take minutes; cached after the first time). Resolves
+   *  { ok, stems: ["drums", ...] } and puts the list in session.meta.stems, or { ok: false, status, error } (501 = no backend set up). */
+  async function separateStems({ force = false } = {}) {
+    try {
+      const r = await postJson(`/api/songs/${id}/stems`, force ? { force: true } : {});
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, status: r.status, error: body.error || `HTTP ${r.status}` };
+      meta.stems = body.stems;
+      emit("stems", { stems: body.stems });
+      return { ok: true, stems: body.stems };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
+  /** Make (bank, pad) play its slice from a stem of the song ("drums" | "bass" | "vocals" | "other"), or from the full mix again
+   *  with null. Resolves when the stem is loaded. */
+  async function setStem(bank, pad, stem) {
+    store.dispatch({ type: "slice.stem", bank, pad, stem });
+    await Promise.all([...pending]);
+    return { ok: stem === null ? !store.get().project.overrides[`${bank}:${pad}`]?.stem : store.get().project.overrides[`${bank}:${pad}`]?.stem === stem };
+  }
+
   // ---- resample: a new sound from what the pad machine plays ----
   let workletReady = null;
   /** Record `secs` seconds of the master bus (after the fx) with an AudioWorklet; sample-accurate, no ScriptProcessor.
@@ -767,7 +790,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     release: (pad) => engine.release(store.get().settings.sixteen?.pad ?? pad),
     startRepeat, stopRepeat,
     regrid, reanalyze,
-    toggleRecord, togglePattern, patternMidi, renderPatternWav, resample, songMidi, renderSongWav,
+    toggleRecord, togglePattern, patternMidi, renderPatternWav, resample, songMidi, renderSongWav, separateStems, setStem,
     /** Where the play head is: { beat, index, id, inPattern } (beats in the whole loop / the chain entry / its pattern). */
     songPosition: () => seq.locate(),
     loadSections, advise, loadAiBank, exportBank,

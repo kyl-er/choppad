@@ -159,5 +159,99 @@ class PadsWithResample(Rig):
         self.assertEqual(code, 200, r)
 
 
+class StemsApi(Rig):
+    """POST /api/songs/<id>/stems against a fake stems service, stems on pads (stretch, exports, kits)."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        sys.path.insert(0, os.path.join(ROOT, "components", "stems", "tests"))  # noqa: F405
+        from test_stems import FakeService, make_zip, wav_bytes as stem_wav
+        import soundfile as sf
+        data, sr = sf.read(os.path.join(cls.dir, "audio.wav"), dtype="float32", always_2d=True)
+        cls.svc = FakeService()
+        cls.svc.reply = (200, make_zip({f"{n}.wav": stem_wav(data * g, sr=sr) for n, g in
+                                        (("drums", 0.5), ("bass", 0.4), ("vocals", 0.3), ("other", 0.2))}), "application/zip")
+        cls.addClassCleanup(cls.svc.close)
+        cls.saved_env = {k: os.environ.get(k) for k in ("CHOPPAD_STEMS_BACKEND", "CHOPPAD_STEMS_URL")}
+
+        def restore():
+            for k, v in cls.saved_env.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        cls.addClassCleanup(restore)
+        cls.addClassCleanup(shutil.rmtree, os.path.join(cls.dir, "stems"), True)
+
+    def test_a_song_without_a_backend_answers_501_with_the_steps(self):
+        os.environ.pop("CHOPPAD_STEMS_BACKEND", None)
+        shutil.rmtree(os.path.join(self.dir, "stems"), ignore_errors=True)
+        code, r = self.jcall(f"/api/songs/{self.sid}/stems", {})
+        self.assertEqual(code, 501)
+        self.assertIn("CHOPPAD_STEMS_BACKEND=remote", r["error"])
+        self.assertEqual(self.jcall("/api/songs/nope/stems", {})[0], 404)
+
+    def test_separate_serves_and_records_the_stems(self):
+        shutil.rmtree(os.path.join(self.dir, "stems"), ignore_errors=True)
+        os.environ.update(CHOPPAD_STEMS_BACKEND="remote", CHOPPAD_STEMS_URL=self.svc.url)
+        code, r = self.jcall(f"/api/songs/{self.sid}/stems", {})
+        self.assertEqual(code, 200, r)
+        self.assertEqual(r["stems"], ["drums", "bass", "vocals", "other"])
+        self.assertEqual(r["urls"]["drums"], f"/media/{self.sid}/stems/drums.wav")
+        code, body = self.call(r["urls"]["drums"])
+        self.assertEqual((code, body[:4]), (200, b"RIFF"))
+        with open(os.path.join(self.dir, "meta.json")) as f:
+            self.assertEqual(json.load(f)["stems"], ["drums", "bass", "vocals", "other"])
+        n = len(self.svc.requests)
+        self.assertEqual(self.jcall(f"/api/songs/{self.sid}/stems", {})[0], 200)
+        self.assertEqual(len(self.svc.requests), n, "cached: the service is not asked again")
+
+    def test_a_service_that_fails_is_a_502(self):
+        shutil.rmtree(os.path.join(self.dir, "stems"), ignore_errors=True)
+        os.environ.update(CHOPPAD_STEMS_BACKEND="remote", CHOPPAD_STEMS_URL="http://127.0.0.1:9/x")
+        code, r = self.jcall(f"/api/songs/{self.sid}/stems", {})
+        self.assertEqual(code, 502)
+        self.assertIn("could not reach", r["error"])
+
+    def test_stems_on_pads(self):
+        os.environ.update(CHOPPAD_STEMS_BACKEND="remote", CHOPPAD_STEMS_URL=self.svc.url)
+        self.assertEqual(self.jcall(f"/api/songs/{self.sid}/stems", {"force": True})[0], 200)
+        ov = {"0:2": {"start": 1.0, "end": 1.5, "stem": "drums"}}
+        # stretch a slice of the stem: cached by stem, from the stem's audio
+        code, a = self.jcall(f"/api/songs/{self.sid}/stretch", {"start": 1.0, "end": 1.5, "ratio": 2.0, "stem": "drums"})
+        self.assertEqual(code, 200, a)
+        code, b = self.jcall(f"/api/songs/{self.sid}/stretch", {"start": 1.0, "end": 1.5, "ratio": 2.0})
+        self.assertNotEqual(a["url"], b["url"], "the same slice of the mix is a different rendering")
+        self.assertAlmostEqual(a["duration"], 1.0, delta=0.01)
+        self.assertEqual(self.jcall(f"/api/songs/{self.sid}/stretch", {"start": 1.0, "end": 1.5, "ratio": 2.0, "stem": "guitar"})[0], 400)
+        # exports play the stem file
+        code, r = self.jcall(f"/api/songs/{self.sid}/export", {"kind": "sfz", "bank": 0, "overrides": ov})
+        self.assertEqual(code, 200, r)
+        with open(r["path"]) as f:
+            line = [l for l in f.read().splitlines() if "key=38 " in l][0]
+        self.assertIn("sample=stems/drums.wav", line)
+        self.assertIn("offset=44100", line)
+        import zipfile
+
+        def pad3(overrides):
+            r = self.jcall(f"/api/songs/{self.sid}/export", {"kind": "zip", "bank": 0, "overrides": overrides})[1]
+            with zipfile.ZipFile(r["path"]) as z, wave.open(io.BytesIO(z.read("pad03.wav"))) as w:
+                return w.getnframes() / w.getframerate(), np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+        dur, quiet = pad3(ov)
+        self.assertAlmostEqual(dur, 0.5, delta=0.001)
+        _, mix = pad3({"0:2": {"start": 1.0, "end": 1.5}})
+        self.assertLess(np.abs(quiet).max(), 0.6 * np.abs(mix).max() + 1, "the drums stem was exported, not the mix")
+        # kits keep the stem
+        pads = [None] * 16
+        pads[0] = {"song_id": self.sid, "start": 1.0, "end": 1.5, "stem": "bass"}
+        code, kit = self.jcall("/api/kits", {"name": "Stem Kit", "pads": pads})
+        self.addCleanup(self.call, f"/api/kits/{kit.get('id', 'x')}", None, "DELETE")
+        self.assertEqual((code, kit["pads"][0]["stem"]), (201, "bass"))
+        self.assertEqual(self.jcall(f"/api/kits/{kit['id']}/export", {"kind": "zip"})[0], 200)
+        # a stem the song does not have is refused clearly
+        shutil.rmtree(os.path.join(self.dir, "stems"))
+        code, r = self.jcall(f"/api/songs/{self.sid}/export", {"kind": "zip", "bank": 0, "overrides": ov})
+        self.assertEqual(code, 400)
+        self.assertIn("stem of 'song1' is missing", r["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

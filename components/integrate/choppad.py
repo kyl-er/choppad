@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 # Sibling components are plain modules (no package install); make them importable when run as a CLI.
 _COMPONENTS = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-for _c in ("ingest", "rhythm", "chop", "advisor", "export", "control", "daw"):
+for _c in ("ingest", "rhythm", "chop", "advisor", "export", "control", "daw", "stems"):
     _p = os.path.join(_COMPONENTS, _c)
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -183,6 +183,7 @@ def _stretch(media_dir, body):
     """POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]}
     Renders the pad's slice at `ratio` x its length (same pitch) into media/<id>/stretch/<hash>.wav (cached).
     target_bpm: the slice is fitted so the song's tempo (or source_bpm) becomes target_bpm.
+    `stem` (W3b): cut the slice from that stem of the song instead of the full mix.
     Returns {url, duration, ratio, hash, start, end}."""
     sid = os.path.basename(media_dir)
     try:
@@ -197,11 +198,25 @@ def _stretch(media_dir, body):
             ratio = _ratio_for_tempo(src, float(body["target_bpm"]))
         else:
             raise _StretchError("ratio or target_bpm required")
-        r = _stretch_slice(media_dir, start, end, ratio)
+        stem = body.get("stem")
+        if stem is not None and stem not in ("drums", "bass", "vocals", "other"):
+            raise _StretchError("stem must be drums, bass, vocals or other")
+        r = _stretch_slice(media_dir, start, end, ratio, f"stems/{stem}.wav" if stem else "audio.wav")
     except (_StretchError, ValueError) as e:
         raise ValueError(str(e))
     return {"url": f"/media/{sid}/stretch/{r['file']}", "duration": r["duration"], "ratio": r["ratio"], "hash": r["hash"],
             "start": start, "end": end}
+
+
+# ---- W3b: stems ----
+def _stems(media_dir, body):
+    """POST /api/songs/<id>/stems {force?} -> {stems: [...], urls: {name: url}, backend}. Needs a stems backend (components/stems:
+    CHOPPAD_STEMS_BACKEND=remote and CHOPPAD_STEMS_URL); without one it answers 501 with the steps. Cached in media/<id>/stems/."""
+    from choppad_stems import separate
+    paths = separate(media_dir, force=bool(body.get("force")))
+    sid = os.path.basename(media_dir)
+    return {"stems": list(paths), "urls": {n: f"/media/{sid}/stems/{n}.wav" for n in paths},
+            "backend": (os.environ.get("CHOPPAD_STEMS_BACKEND") or "none").lower()}
 
 
 # ---- W3: kits ----
@@ -227,7 +242,7 @@ def make_server(media_root: str, port: int = 8960):
         return daw.command(os.path.basename(media_dir), media_dir, body)
     srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
                 actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
-                         "savekit": _savekit, "key": _key, "daw": _daw},
+                         "savekit": _savekit, "key": _key, "daw": _daw, "stems": _stems},
                 on_transport=daw.on_transport)
     srv.daw = daw
     _shutdown = srv.shutdown
@@ -244,7 +259,7 @@ def make_server(media_root: str, port: int = 8960):
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
 VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
-         "tempo", "resample", "song")
+         "tempo", "resample", "song", "stems")
 
 
 def build_verb_parser():
@@ -335,6 +350,12 @@ def build_verb_parser():
     s.add_argument("--name", help="add: name of the new pattern")
     s.add_argument("--bars", type=float, help="add: its length in bars (default: the edited pattern's)")
     s.add_argument("--copy", action="store_true", help="add: start from a copy of the edited pattern")
+    s = add("stems", "split the song into drums, bass, vocals and other (needs a stems backend on the server), optionally put a stem on a pad")
+    s.add_argument("id")
+    s.add_argument("--force", action="store_true", help="ask the backend again even when the stems are cached")
+    s.add_argument("--pad", type=int, help="pad (0-15) that should play its slice from a stem")
+    s.add_argument("--bank", type=int, help="bank of that pad (default: the bank on screen)")
+    s.add_argument("--stem", choices=["drums", "bass", "vocals", "other", "mix"], help="the stem for --pad ('mix' = the full song again)")
     s = add("resample", "render the pattern (or record the master bus) into a new sound on a pad; the open browser does the work")
     s.add_argument("id")
     s.add_argument("--pad", type=int, required=True, help="pad (0-15) that gets the new sound")
@@ -480,6 +501,14 @@ def run_verb(argv, client=None, out=None, err=None):
                 err("note: no browser has this song open, so nothing is playing")
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
+        elif a.verb == "stems":
+            if a.stem is not None and a.pad is None:
+                raise cc.ControlError("--stem needs --pad")
+            r = c.stems(a.id, a.force)
+            j(r)
+            if a.pad is not None:
+                bank = a.bank if a.bank is not None else c.current_bank(a.id)
+                reply(c.pad_stem(a.id, bank, a.pad, None if a.stem == "mix" else (a.stem or "drums")))
         elif a.verb == "song":
             if a.op == "show":
                 j(c.song_show(a.id))
