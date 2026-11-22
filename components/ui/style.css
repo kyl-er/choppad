@@ -291,3 +291,64 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
   .ph-keys { grid-column: 2; flex-direction: column; justify-content: center; } .ph-banks { flex-direction: column; flex: none; }
 }
 @media (max-width: 1279px) { .welcome-sheet { min-width: 0; } }
+
+/* ---------- CHOP-12: second sampler-core slice (tempo, envelope, filter, mute groups, 16 levels, resample, song mode, stems, DAW) ---------- */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* header: DAW bridge and tab role */
+.hd-st { display: flex; gap: 6px; align-items: center; flex: none; }
+.hd-st span { font: 700 10px var(--font-mono); letter-spacing: .06em; padding: 2px 7px; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); white-space: nowrap; }
+.hd-st .role-st { border-style: dashed; text-transform: uppercase; background: transparent; color: var(--muted); }
+.hd-st span[hidden] { display: none; }
+/* LCD: two-column sub-pages with room for an extra element under the rows */
+.lcd-body.cols2 { display: grid; grid-template-columns: 1fr 1fr; column-gap: 16px; align-content: start; }
+.lcd-body.cols2 > .lcd-extra, .lcd-body.cols2 > .lcd-info { grid-column: 1 / -1; }
+.lcd-body.cols2 .lcd-row.e { flex-wrap: wrap; }
+.lcd-extra { font-size: 10.5px; line-height: 1.3; min-height: 0; max-height: 44px; overflow-y: auto; margin-top: 3px; padding: 1px 2px; border-top: 1px dotted color-mix(in srgb, var(--lcd-ink) 55%, transparent); }
+.lcd-extra:focus-visible { outline-offset: -2px; }
+.lcd-extra .dim { opacity: .65; } .lcd-extra code { font: inherit; font-weight: 700; text-transform: none; background: color-mix(in srgb, var(--lcd-ink) 14%, transparent); padding: 0 3px; }
+.lcd-body.cols2 .lcd-info { margin-top: 1px; font-size: 9.5px; max-height: 2.6em; overflow: hidden; }
+.lcd-body.cols2 .lcd-line.lcd-info b { font-weight: 700; }
+.lcd-line[hidden] { display: none; }
+.statusline { font-weight: 700; letter-spacing: .02em; }
+/* ADSR drawing */
+.lcd-extra.adsr { max-height: none; border-top: 0; padding: 0; margin-top: 2px; }
+.adsr-svg { display: block; width: 100%; height: 46px; color: var(--lcd-ink); }
+.adsr-base { stroke: currentColor; stroke-width: .6; opacity: .5; vector-effect: non-scaling-stroke; }
+.adsr-fill { fill: currentColor; opacity: .16; } .adsr-line { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.adsr-t { font: 700 8px var(--font-mono); fill: currentColor; text-anchor: middle; opacity: .8; }
+/* results: fit, resample, stems */
+.fit-out b.fit-n { font-weight: 700; } .fit-bad { text-decoration: underline wavy; } .fit-skip { opacity: .85; }
+.rs-out .bar { height: 5px; border: 1px solid currentColor; margin: 1px 0 3px; background: transparent; } .rs-out .bar i { display: block; height: 100%; width: 0; background: currentColor; transition: width .12s linear; }
+.rs-rec { color: inherit; animation: blink 1s steps(2) infinite; } .rs-link { color: inherit; font-weight: 700; }
+.stem-out b { font-weight: 700; }
+/* song mode: pattern list and chain editor */
+.pat-list { display: flex; flex-wrap: wrap; gap: 3px; } .lcd-extra.pat-list { max-height: 46px; } .lcd-extra.chain { max-height: 52px; }
+.pat { font: 600 10px/14px var(--font-mono); padding: 0 6px; border: 1px solid currentColor; color: inherit; white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.pat b { font-weight: 700; } .pat small { opacity: .75; font-size: 9px; }
+.pat.cur { background: var(--lcd-ink); color: var(--lcd-bg); box-shadow: inset 3px 0 0 var(--acc-b); }
+.pat.playing { box-shadow: inset 0 -3px 0 var(--acc-o); } .pat.cur.playing { box-shadow: inset 3px 0 0 var(--acc-b), inset 0 -3px 0 var(--acc-o); }
+.chain-row { display: flex; align-items: center; gap: 3px; padding: 0 2px 0 4px; font: 10.5px/16px var(--font-mono); }
+.chain-row .mk { width: 9px; visibility: hidden; font-size: 8px; color: var(--acc-o); } .chain-row .no { width: 14px; text-align: right; opacity: .7; }
+.chain-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; } .chain-row .x { opacity: .6; }
+.chain-row button { width: 17px; height: 14px; border: 1px solid currentColor; font: 700 10px/1 var(--font-mono); color: inherit; }
+.chain-row button:disabled { opacity: .3; } .chain-row button:focus-visible { outline-offset: -2px; }
+.chain-row input { width: 4ch; font: inherit; font-weight: 700; color: inherit; background: transparent; border: 0; border-bottom: 1px solid currentColor; text-align: right; padding: 0; height: 14px; }
+.chain-row.playing { box-shadow: inset 3px 0 0 var(--acc-o); background: color-mix(in srgb, var(--lcd-ink) 14%, transparent); }
+.chain-row.playing .mk { visibility: visible; } .chain-row.playing::after { content: "×" attr(data-rep); font-weight: 700; font-size: 9.5px; }
+.chain-empty { padding: 2px; }
+/* pads: mute group, fitted / resample / stem tags, 16 levels */
+.pad-mg, .pad-tag { position: absolute; bottom: 2px; font: 700 8px/1 var(--font-mono); letter-spacing: .04em; padding: 1px 3px; pointer-events: none; }
+.pad-mg { left: 3px; border: 1px solid currentColor; } .pad-tag { right: 3px; background: var(--key-on); color: var(--key-on-ink); }
+.pad-mg[hidden], .pad-tag[hidden] { display: none; }
+.pad.tagged { padding-bottom: 14px; }
+.pad.handstretched .pad-time::before { content: "≈ "; }
+.pad.resampled .pad-tag { background: transparent; color: inherit; border: 1px solid currentColor; }
+.pad.hit .pad-tag { background: var(--on-o); color: var(--acc-o); }
+.pad.levels { border-style: dashed; } .pad.levels .pad-label { font-size: 15px; } .pad.levels .pad-time { text-transform: uppercase; font-size: 8.5px; }
+.padkeys { display: flex; align-items: center; gap: 6px; min-height: 20px; } .padkeys .bank-label { flex: 1; min-width: 0; text-align: left; }
+.lvl-key { display: flex; flex: none; align-items: center; gap: 5px; padding: 2px 7px; white-space: nowrap; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); font: 600 10px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
+.lvl-key i { font-style: normal; font-size: 12px; } .lvl-key.on { background: var(--acc-b); color: var(--on-b); border-color: var(--acc-b); }
+/* transport: PLAY shows a playing state; song mode is marked */
+.tkey.seq-play.on i { letter-spacing: -.12em; } .tkey.seq-play.song-mode:not(.on) { box-shadow: inset 0 -3px 0 var(--acc-b); }
+/* library: import jobs */
+.job[data-state="running"] .bar i, .job[data-state="queued"] .bar i { background: var(--acc-o); } .job .job-stage { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -722,7 +722,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   // The server tells us on the stream (`daw` event, first message of every stream) whether one is open and which bank its
   // kit holds. Reports are `local: true` transport posts: the server hands them to the bridge and does NOT rebroadcast
   // them, so other tabs do not play them too. Nothing here waits for the network or can fail the audio trigger.
-  const daw = { open: false, bank: null, tokens: 40, t: 0 };
+  const daw = { open: false, name: null, bank: null, tokens: 40, t: 0 };
   // Roles: with several tabs on one song only the primary one (the first to connect; the server says so with a `role` event)
   // executes transport commands, so an agent's `hit` or `play` sounds once, not once per tab. Others only display.
   let primary = true;
@@ -764,7 +764,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     const r = await fetch(`/api/songs/${id}`);
     if (!r.ok) return;
     const d = await r.json();
-    if (d.daw) { daw.open = !!d.daw.open; daw.bank = Number.isInteger(d.daw.bank) ? d.daw.bank : null; } // CHOP-11
+    if (d.daw) { daw.open = !!d.daw.open; daw.name = d.daw.daw ?? null; daw.bank = Number.isInteger(d.daw.bank) ? d.daw.bank : null; } // CHOP-11
     const want = initialState({ project: d.project, chops: d.chops }).project;
     const have = store.get().project;
     const apply = (a) => store.dispatch(a, remoteMeta);
@@ -787,6 +787,21 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     apply({ type: "pattern.load", pattern: want.pattern });
     if (JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
   }
+  /** The DAW bridge endpoint (POST /api/songs/<id>/daw): command "open" | "sync" | "play" | "stop" for "hydrogen" | "ardour".
+   *  open and sync take the bank on screen and this tab's swing / quant / choke. Resolves { ok, ...server answer } or { ok: false, error }. */
+  async function dawCommand(name, command, { bank } = {}) {
+    try {
+      const { settings, bank: shown } = store.get();
+      const body = { daw: name, command };
+      if (command === "open" || command === "sync") Object.assign(body, { bank: bank ?? shown, swing: settings.swing, quant: settings.quant, choke: settings.choke });
+      const r = await postJson(`/api/songs/${id}/daw`, body);
+      const out = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, status: r.status, error: out.error || `HTTP ${r.status}` };
+      return { ok: out.ok !== false, ...out };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }
   let stream = null;
   let streamDropped = false;
   if (typeof EventSource !== "undefined") {
@@ -805,12 +820,12 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     onMessage("chops", (d) => adoptChops(d.chops));
     onMessage("transport", runTransport);
     onMessage("role", (d) => { primary = !!d.primary; });
-    onMessage("daw", (d) => { daw.open = !!d.open; daw.bank = Number.isInteger(d.bank) ? d.bank : null; });
+    onMessage("daw", (d) => { daw.open = !!d.open; daw.name = d.daw ?? null; daw.bank = Number.isInteger(d.bank) ? d.bank : null; });
   }
 
   return {
     id, meta, analysis, peaks, buffer, video, store, engine, seq,
-    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, get primary() { return primary; }, flush },
+    remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, daw: daw.name, bank: daw.bank }; }, get primary() { return primary; }, flush },
     on: (type, fn) => events.addEventListener(type, fn),
     off: (type, fn) => events.removeEventListener(type, fn),
     position, playSong, stopSong,
@@ -826,7 +841,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     songPosition: () => seq.locate(),
     loadSections, advise, loadAiBank, exportBank,
     stretchPad, stretchBank, stretchPattern, clearStretch, saveBankAsKit, loadKit, detectKey,
-    setTempo, fitToTempo, refitAll, whenFitted, get tempoBpm() { return projectBpm(store.get()); },
+    dawCommand, setTempo, fitToTempo, refitAll, whenFitted, get tempoBpm() { return projectBpm(store.get()); },
     panic,
     destroy() {
       unsubscribeOutbox();

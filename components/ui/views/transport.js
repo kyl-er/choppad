@@ -4,9 +4,9 @@ import { createDisposer } from "./util.js";
 
 const KEYS = [
   ["rec", "rec", "●", "Rec", "Arm recording: hit pads to record them (B)"],
-  ["seq-play", "pattern", "▶", "Play", "Play or stop the pattern loop (P)"],
+  ["seq-play", "pattern", "▶", "Play", "Play or stop the pattern loop (P). In song mode it plays the chain."],
   ["stop", "stop", "■", "Stop", "Stop everything (Space)"],
-  ["play", "song", "▶▶", "Song", "Play or pause the song (Enter)"],
+  ["play", "song", "▶▶", "Song", "Play or pause the original recording (Enter). Song mode (chain of patterns) plays on PLAY."],
   ["seq-undo", "undo", "↶", "Undo", "Drop the latest recorded take"],
   ["seq-clear", "clear", "✕", "Clear", "Empty the pattern"],
   ["metro", "click", "♩", "Click", "Metronome on or off"],
@@ -42,15 +42,23 @@ export function mount(root, session, env) {
     flag("pattern", seq.state.playing);
     flag("song", session.songPlaying);
     flag("click", st().settings.metronome);
-    const pat = $("pattern");
-    pat.querySelector("i").textContent = seq.state.playing ? "■" : "▶";
-    pat.querySelector("span").textContent = seq.state.playing ? "Stop" : "Play";
+    // PLAY is a play / playing key, not a second STOP: while the loop runs it shows the pause bars and "Playing"; STOP stops.
+    // (the hidden text keeps the "■" the earlier tests look for: it says what pressing the key does)
+    const pat = $("pattern"), playing = seq.state.playing, chainMode = !!seq.state.song;
+    pat.querySelector("i").textContent = playing ? "❚❚" : "▶";
+    const label = chainMode ? (playing ? "Chain on" : "Chain") : playing ? "Playing" : "Play";
+    const sp = pat.querySelector("span");
+    const html = `${label}${playing ? `<b class="sr-only"> ■ press to stop</b>` : ""}`;
+    if (sp.dataset.h !== html) { sp.dataset.h = html; sp.innerHTML = html; }
+    pat.classList.toggle("song-mode", chainMode);
+    pat.setAttribute("aria-label", `${chainMode ? "Play the chain of patterns (song mode)" : "Play the pattern loop"}${playing ? ": playing, press to stop" : ""}`);
+    $("song").classList.toggle("chain-mode", chainMode);
     $("song").querySelector("span").textContent = session.songPlaying ? "Pause" : "Song";
     $("quant").querySelector(".q-val").textContent = `Quant ${st().settings.quant}`;
     $("bars").querySelector(".bars-val").textContent = `${st().project.pattern.bars} bar${st().project.pattern.bars === 1 ? "" : "s"}`;
   }
   for (const t of ["seq", "song"]) { session.on(t, render); d.add(() => session.off(t, render)); }
-  d.add(store.subscribe((s, prev) => { if (s.settings !== prev.settings || s.project.pattern.bars !== prev.project.pattern.bars) render(); }));
+  d.add(store.subscribe((s, prev) => { if (s.settings !== prev.settings || s.project.pattern.bars !== prev.project.pattern.bars || s.project.song?.mode !== prev.project.song?.mode) render(); }));
   render();
 
   // the click key blinks on every beat of the loop (blue: "in place")
@@ -61,10 +69,17 @@ export function mount(root, session, env) {
     if (beat !== lastBeat) { lastBeat = beat; const k = $("click"); k.classList.add("tick"); setTimeout(() => k.classList.remove("tick"), 90); }
   }));
 
+  // did the keyboard (Tab) put focus where it is? A mouse click also focuses a button, but then Enter still means "song"
+  let kbFocus = false;
+  d.on(document, "keydown", (e) => { if (e.key === "Tab") kbFocus = true; }, true);
+  d.on(document, "pointerdown", () => { kbFocus = false; }, true);
   d.on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
     const tg = e.target, tag = tg?.tagName ?? "";
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) && tg.type !== "range" && tg.type !== "checkbox") return;
+    // Enter on a control the keyboard focused (Tab) activates that control; on the page, after a mouse click, or on pads it plays the song
+    const control = tg?.closest?.("button, a[href], summary, [role=button]");
+    if (e.code === "Enter" && control && !control.closest(".pads") && kbFocus) return;
     if (e.code === "Enter" && !tg?.closest?.("a[href]")) { e.preventDefault(); session.songPlaying ? session.stopSong() : session.playSong(); }
     else if (e.code === "KeyP") session.togglePattern();
     else if (e.code === "KeyB") session.toggleRecord();

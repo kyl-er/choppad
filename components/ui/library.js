@@ -70,35 +70,60 @@ export function mountLibrary(root, { onOpen }) {
     }
   }
 
-  function addJob(jobId, url) {
-    const row = document.createElement("div");
-    row.className = "job";
-    row.innerHTML = `<div class="job-url">${esc(url)}</div><div class="bar"><i></i></div><div class="job-stage">queued…</div>`;
-    jobsEl.prepend(row);
-    const fill = row.querySelector(".bar i");
-    const stage = row.querySelector(".job-stage");
+  // ---- import jobs: every job the server runs is shown from the library stream (GET /api/events, `job` events {job, state, step,
+  // progress, song?, error?}); polling GET /api/jobs/<id> is the fallback when there is no stream or it goes quiet ----
+  const rows = new Map();    // job id -> { row, fill, stage, finished }
+  const mine = new Map();    // jobs this tab started -> label; only those open the song when done
+  const seen = new Map();    // job id -> time of the last news (event or poll)
+  const last = new Map();    // job id -> latest normalized state
+  const norm = (j) => ({ job: j.job, state: j.state, step: j.step ?? j.stage, progress: j.progress ?? 0, song: j.song ?? j.id, error: j.error });
+  async function onJob(j) {
+    seen.set(j.job, Date.now()); last.set(j.job, j);
+    let r = rows.get(j.job);
+    const over = j.state === "done" || j.state === "error";
+    if (!r) {
+      if (over && !mine.has(j.job)) { if (j.state === "done") refresh(); return; }   // somebody else's old news
+      const row = document.createElement("div");
+      row.className = "job"; row.dataset.job = j.job;
+      row.innerHTML = `<div class="job-url"></div><div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i></i></div><div class="job-stage"></div>`;
+      jobsEl.prepend(row);
+      r = { row, fill: row.querySelector(".bar i"), bar: row.querySelector(".bar"), stage: row.querySelector(".job-stage"), url: row.querySelector(".job-url"), finished: false };
+      rows.set(j.job, r);
+    }
+    r.url.textContent = mine.get(j.job) ?? "import";
+    const pct = Math.round((j.progress ?? 0) * 100);
+    r.fill.style.width = `${pct}%`;
+    r.bar.setAttribute("aria-valuenow", String(pct));
+    r.stage.textContent = j.state === "error" ? j.error : `${j.step ?? j.state} · ${pct}%`;
+    r.row.dataset.state = j.state;
+    if (r.finished) return;
+    if (j.state === "done") {
+      r.finished = true;
+      r.row.classList.add("done");
+      setTimeout(() => { r.row.remove(); rows.delete(j.job); }, 4000);
+      await refresh();
+      if (mine.has(j.job) && j.song) onOpen(j.song);
+    } else if (j.state === "error") { r.finished = true; r.row.classList.add("error"); }
+  }
+  let es = null;
+  if (typeof EventSource !== "undefined") {
+    es = new EventSource("/api/events");
+    es.addEventListener("job", (e) => { try { onJob(norm(JSON.parse(e.data))); } catch { /* a malformed event is skipped */ } });
+  }
+  function addJob(jobId, label) {
+    mine.set(jobId, label);
+    seen.set(jobId, Date.now());
+    if (last.has(jobId)) onJob(last.get(jobId));        // the stream was faster than the POST answer
+    else onJob({ job: jobId, state: "queued", step: "queued", progress: 0 });
     const poll = async () => {
-      let j;
-      try {
-        j = await fetch(`/api/jobs/${jobId}`).then((r) => r.json());
-      } catch {
-        setTimeout(poll, 1500);
-        return;
+      const r = rows.get(jobId);
+      if (r?.finished) return;
+      if (Date.now() - (seen.get(jobId) ?? 0) > 3000) {   // no news from the stream: ask
+        try { onJob(norm(await fetch(`/api/jobs/${jobId}`).then((x) => x.json()))); } catch { /* try again */ }
       }
-      fill.style.width = `${Math.round((j.progress ?? 0) * 100)}%`;
-      stage.textContent = j.state === "error" ? j.error : j.stage;
-      if (j.state === "done") {
-        row.classList.add("done");
-        setTimeout(() => row.remove(), 4000);
-        await refresh();
-        onOpen(j.id);
-      } else if (j.state === "error") {
-        row.classList.add("error");
-      } else {
-        setTimeout(poll, 700);
-      }
+      setTimeout(poll, 1000);
     };
-    poll();
+    setTimeout(poll, 1000);
   }
 
   form.addEventListener("submit", async (e) => {

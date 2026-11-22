@@ -24,7 +24,7 @@ export function mount(root, session, env) {
   ctx.out.devices = devicesText(env.input.getDevices());
   const PAGES = buildPages(ctx);
   env.pages = PAGES;   // other views (and tests) can read the page list; append fields there to extend the LCD
-  let fields = [], rows = [], mainBody = null;
+  let fields = [], rows = [], mainBody = null, extraBody = null;
 
   root.innerHTML = `<span class="fignum tag">FIG. 4 — CONTROL SURFACE · FRONT ELEVATION</span>
     <div class="lcdu" data-c="1">
@@ -87,15 +87,18 @@ export function mount(root, session, env) {
     rows = [];
     apis.length = 0;
     mainBody = null;
+    extraBody?.destroy?.();
+    extraBody = null;
     fields = s.fields(ctx);
     // a page with its own body (MAIN) still gets rows for its fields, kept off screen: soft keys and the wheel drive them
     fields.forEach((f, i) => { if (f.t !== "x") { const r = makeRow(f, i); rows[i] = r; if (!s.body) bodyEl.append(r.el); } });
     if (s.body) { mainBody = s.body(ctx); bodyEl.append(mainBody.el); }
+    if (s.extra) { extraBody = s.extra(ctx); extraBody.el.classList.add("lcd-extra"); bodyEl.append(extraBody.el); }
     if (s.info) { const info = document.createElement("div"); info.className = `lcd-line lcd-info ${s.info.cls ?? ""}`; bodyEl.append(info); rows.info = { el: info, html: s.info.html }; }
     lcdSofts.innerHTML = fields.map((f, i) => `<span class="ls${f.t === "x" ? " nil" : ""}" data-i="${i}"></span>`).join("");
     modesEl.querySelectorAll(".mode").forEach((b) => { const on = b.dataset.mode === L.page; b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); });
     pgEl.textContent = page.title;
-    subEl.textContent = `${(L.sub % page.subs.length) + 1}/${page.subs.length}`;
+    subEl.textContent = `${(L.sub % page.subs.length) + 1}/${page.subs.length}${s.name ? " " + s.name.toUpperCase() : ""}`;
     refresh(true);
   }
 
@@ -106,36 +109,41 @@ export function mount(root, session, env) {
     const select = () => { if (L.field !== i) { L.field = i; markSel(); } };
     if (f.t === "n" || f.t === "i") {
       const range = f.t === "n";
+      // f.scale = { fwd: value -> 0..1, inv: 0..1 -> value, round?: value -> value }: a curved (log) range. The input then holds a
+      // position 0..1000 while the wheel, keypad, scrub and f.get/f.set all speak real units (Hz, Q ...).
+      const sc = range ? f.scale : null;
+      const toIn = (v) => (sc ? Math.round(clamp(sc.fwd(v), 0, 1) * 1000) : v);
+      const fromIn = (x) => (sc ? clamp((sc.round ?? ((q) => q))(sc.inv(x / 1000)), f.min, f.max) : x);
       el = document.createElement("label");
       el.className = `lcd-row ${range ? "n" : "i"}`;
-      el.innerHTML = `<span class="lb">${lab()}</span><i></i>${range ? `<output data-out="${f.name}"></output>` : ""}<input name="${f.name}" class="${f.cls ?? ""}" aria-label="${esc(labelOf(f))}" type="${range ? "range" : "number"}" min="${f.min}" max="${f.max}" step="${range ? f.step : "any"}">`;
+      el.innerHTML = `<span class="lb">${lab()}</span><i></i>${range ? `<output data-out="${f.name}"></output>` : ""}<input name="${f.name}" class="${f.cls ?? ""}" aria-label="${esc(labelOf(f))}" type="${range ? "range" : "number"}" min="${sc ? 0 : f.min}" max="${sc ? 1000 : f.max}" step="${range ? (sc ? 1 : f.step) : "any"}">`;
       const input = el.querySelector("input"), out = el.querySelector("output");
       let timer = 0, pending = null;
-      const show = (v) => { if (out) out.textContent = f.fmt ? f.fmt(v) : String(v); if (range) el.style.setProperty("--fill", `${((v - f.min) / (f.max - f.min)) * 100}%`); };
+      const show = (v) => { if (out) out.textContent = f.fmt ? f.fmt(v) : String(v); if (range) el.style.setProperty("--fill", `${(sc ? sc.fwd(v) : (v - f.min) / (f.max - f.min)) * 100}%`); };
       const commit = () => { clearTimeout(timer); timer = 0; if (pending !== null) { const v = pending; pending = null; f.set(v); } };
       // set(v): the one path wheel, keypad, drag, keys and the native input all use
       const setValue = (v, immediate = false) => {
-        v = range ? snap(v, f) : clamp(v, f.min ?? -Infinity, f.max ?? Infinity);
-        input.value = String(v);
+        v = range ? (sc ? clamp((sc.round ?? ((q) => q))(v), f.min, f.max) : snap(v, f)) : clamp(v, f.min ?? -Infinity, f.max ?? Infinity);
+        input.value = String(toIn(v));
         show(v);
         if (f.deferred) { pending = v; if (immediate) commit(); else if (range) { clearTimeout(timer); timer = setTimeout(commit, 300); } }
         else f.set(v);
       };
-      row_api(i, { setValue, step: (dir) => setValue(Number(input.value || f.get()) + dir * (f.step ?? 1)), el, input });
-      input.addEventListener("input", () => { const v = Number(input.value); if (Number.isFinite(v) && input.value !== "") setValue(v, false); });
-      input.addEventListener("change", () => { const v = Number(input.value); if (Number.isFinite(v)) setValue(v, true); });
+      row_api(i, { setValue, step: (dir) => setValue(sc ? fromIn(toIn(f.get()) + dir * (f.wheel ?? 12)) : Number(input.value || f.get()) + dir * (f.step ?? 1)), el, input });
+      input.addEventListener("input", () => { const v = Number(input.value); if (Number.isFinite(v) && input.value !== "") setValue(fromIn(v), false); });
+      input.addEventListener("change", () => { const v = Number(input.value); if (Number.isFinite(v)) setValue(fromIn(v), true); });
       input.addEventListener("keydown", (e) => { if (!range && e.key === "Enter") { setValue(Number(input.value), true); e.preventDefault(); } });
       if (range) {
         // drag across the row = scrub; a plain click only selects the field
         let x0 = null, v0 = 0;
         el.addEventListener("pointerdown", (e) => { select(); x0 = e.clientX; v0 = Number(input.value); try { el.setPointerCapture(e.pointerId); } catch { /* touch */ } });
-        el.addEventListener("pointermove", (e) => { if (x0 === null || !el.hasPointerCapture?.(e.pointerId)) return; const w = el.getBoundingClientRect().width || 300; if (Math.abs(e.clientX - x0) > 3) setValue(v0 + ((e.clientX - x0) / w) * (f.max - f.min)); });
+        el.addEventListener("pointermove", (e) => { if (x0 === null || !el.hasPointerCapture?.(e.pointerId)) return; const w = el.getBoundingClientRect().width || 300; if (Math.abs(e.clientX - x0) > 3) setValue(fromIn(v0 + ((e.clientX - x0) / w) * (sc ? 1000 : f.max - f.min))); });
         el.addEventListener("pointerup", () => { x0 = null; });
         el.addEventListener("click", (e) => { if (e.target === el || e.target.closest(".lb,output,i")) { e.preventDefault(); input.focus(); } });
       }
       upd = () => {
         const v = f.get();
-        if (pending === null && document.activeElement !== input) input.value = String(range ? v : +v.toFixed(3));
+        if (pending === null && document.activeElement !== input) input.value = String(range ? toIn(v) : +v.toFixed(3));
         if (pending === null) show(v);
         const ov = el.querySelector("output"); if (ov && pending === null) ov.textContent = f.fmt ? f.fmt(v) : String(v);
       };
@@ -208,6 +216,7 @@ export function mount(root, session, env) {
       rows[k].upd();
     }
     mainBody?.update();
+    extraBody?.update();
     lcdSofts.querySelectorAll(".ls").forEach((s, i) => {
       const f = fields[i]; if (!f || f.t === "x") return;
       const t = labelOf(f); if (s.textContent !== t) s.textContent = t;
@@ -270,7 +279,7 @@ export function mount(root, session, env) {
   wh.querySelector(".dec").addEventListener("click", () => { turn(-14); wheel(-1); });
   wh.querySelector(".inc").addEventListener("click", () => { turn(14); wheel(1); });
   // the LCD itself also takes the mouse wheel (turns the focused field)
-  d.on($(".lcd"), "wheel", (e) => { if (L.field < 0 && L.page !== "MAIN") return; e.preventDefault(); wheel(-Math.sign(e.deltaY)); }, { passive: false });
+  d.on($(".lcd"), "wheel", (e) => { const ex = e.target.closest?.(".lcd-extra"); if (ex && ex.scrollHeight > ex.clientHeight + 1) return; if (L.field < 0 && L.page !== "MAIN") return; e.preventDefault(); wheel(-Math.sign(e.deltaY)); }, { passive: false });
 
   d.on(document, "keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -290,7 +299,7 @@ export function mount(root, session, env) {
   env.input.addEventListener("learn-state", onLearn);
   d.add(() => { env.input.removeEventListener("devices", onDevices); env.input.removeEventListener("learn-state", onLearn); });
   build();
-  return { destroy() { d.run(); root.innerHTML = ""; } };
+  return { destroy() { d.run(); extraBody?.destroy?.(); root.innerHTML = ""; } };
 }
 
 function devicesText(devs) {

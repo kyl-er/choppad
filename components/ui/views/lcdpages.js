@@ -10,10 +10,14 @@
 //   act   { fn, val, disabled }                        a button; `label`, `val`, `disabled` may be functions
 //   txt   { get, set }                                 text input (typed on the real keyboard)
 //   blank {}                                           an empty soft key
-// A sub-page is { name, fields: (ctx) => field[], info?: { cls, html: (ctx) => string }, body?: (ctx) => { el, update() } }.
+//   num/inp also take `scale: { fwd, inv, round? }` (a curved range: Hz, Q ...) and `wheel` (range positions per wheel click, of 1000)
+// A sub-page is { name, cls?, fields: (ctx) => field[], info?: { cls, html: (ctx) => string }, body?: (ctx) => { el, update() },
+//   extra?: (ctx) => { el, update(), destroy?() } }. `body` replaces the rows (MAIN); `extra` sits under them (lists, curves, results);
+//   cls "cols2" lays the rows out in two columns, leaving room for an extra. The new sub-pages of CHOP-12 are in lcdpages2.js.
 // `ctx` = { session, st(), dispatch, setting(params), fxSet(params), toast, env, out, refresh(), tapState }.
 import { PRESETS, DEFAULT_FX } from "/fx.js";
 import { esc, fmt } from "./util.js";
+import { moreSubpages } from "./lcdpages2.js";
 
 export const num = (label, o) => ({ t: "n", label, ...o });
 export const inp = (label, o) => ({ t: "i", label, ...o });
@@ -25,7 +29,7 @@ export const blank = () => ({ t: "x", label: "" });
 
 const sgn = (v, u = "") => `${v > 0 ? "+" : ""}${v}${u}`;
 const db = (v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB`;
-const download = (bytes, name, type) => {
+export const download = (bytes, name, type) => {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([bytes], { type }));
   a.download = name;
@@ -95,7 +99,7 @@ export function buildPages(ctx) {
   };
   const keyText = (k) => (k ? `${k.tonic} ${k.mode === "minor" ? "min" : "maj"}` : "—");
 
-  return {
+  const pages = {
     MAIN: { title: "SONG", cls: "page-main", subs: [{ name: "song", body: mainBody, fields: () => [
       act(() => (session.songPlaying ? "Pause" : "Play"), { cls: "lcd-play", fn: () => (session.songPlaying ? session.stopSong() : session.playSong()) }),
       act("Stop", { fn: () => session.panic() }),
@@ -260,6 +264,10 @@ export function buildPages(ctx) {
     ] },
   };
 
+  // CHOP-12: the second sampler-core slice appends its sub-pages (after the existing ones, whose numbers tests and habits rely on)
+  for (const [key, subs] of Object.entries(moreSubpages(ctx))) pages[key].subs.push(...subs);
+  return pages;
+
   // MAIN: title, the big numbers, the bank line and three mini pattern rows. update() is called ~12x/s and on state changes.
   function mainBody() {
     const el = document.createElement("div");
@@ -269,13 +277,15 @@ export function buildPages(ctx) {
       <div class="lcd-big"><div><small>BPM</small><b class="bpm"></b></div><div><small>METER</small><b class="meter"></b></div>
         <div><small>KEY</small><b class="key"></b></div><div><small>BAR</small><b class="pos">1.1</b></div><div><small>TIME</small><b class="clock">0:00.0</b></div></div>
       <div class="lcd-line bankline"></div>
+      <div class="lcd-line statusline"></div>
       <div class="lcd-pat"></div>`;
     const q = (s) => el.querySelector(s);
     const set = (node, v) => { if (node.textContent !== v) node.textContent = v; };
-    const bpm = q(".bpm"), meter = q(".meter"), key = q(".key"), pos = q(".pos"), clock = q(".clock"), line = q(".bankline"), pat = q(".lcd-pat");
+    const bpm = q(".bpm"), meter = q(".meter"), key = q(".key"), pos = q(".pos"), clock = q(".clock"), line = q(".bankline"), status = q(".statusline"), pat = q(".lcd-pat");
     const update = () => {
       const { chops, bank, selected, project } = st();
-      set(bpm, chops.bpm.toFixed(1));
+      const T = session.tempoBpm;
+      set(bpm, T.toFixed(1));
       set(meter, `${chops.beats_per_bar}/4`);
       const k = analysis.key;
       set(key, keyText(k));
@@ -290,6 +300,18 @@ export function buildPages(ctx) {
       const sc = engine.getSlice(bank, selected);
       const text = `BANK ${bank + 1}/${chops.banks.length} · BARS ${a ? a.bar + 1 : "—"}–${b ? b.bar + 1 : "—"}${sec ? " · " + sec.label.toUpperCase() : ""} · PAD ${selected + 1}${sc ? "=" + (sc.custom ? "★" : session.chopLabel(sc)) : ""}${seq.state.recording ? " · REC" : ""}`;
       if (line.textContent !== text) line.textContent = text;
+      // what is different from the plain song: project tempo, 16 levels, a chain that is playing
+      const bits = [];
+      if (Math.abs(T - chops.bpm) > 0.005) bits.push(`${T.toFixed(1)} BPM (SONG ${chops.bpm.toFixed(1)})`);
+      const sx = session.sixteen;
+      if (sx) bits.push(`16 LEVELS: PAD ${sx.pad + 1} · ${sx.mode.toUpperCase()}`);
+      const sg = project.song;
+      if (sg?.mode === "song") {
+        const cp = ctx.chainPos?.();
+        bits.push(cp ? `SONG ▶ ${cp.entry + 1}/${sg.chain.length} ${(sg.patterns.find((x) => x.id === cp.id)?.name ?? "").toUpperCase()} ×${cp.rep + 1}/${sg.chain[cp.entry]?.repeats ?? 1}` : `SONG MODE · ${sg.chain.length} ENTRIES`);
+      }
+      const stText = bits.join(" · ");
+      if (status.textContent !== stText) { status.textContent = stText; status.hidden = !stText; }
       // three busiest pad rows of the pattern
       const n = project.pattern.bars * chops.beats_per_bar * 4;
       const counts = new Map();
