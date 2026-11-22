@@ -10,12 +10,19 @@ Routes
   POST /api/upload               raw file body + X-Filename header (drag & drop) -> import job {job}
   GET  /api/jobs/<job>           {state: queued|running|done|error, stage, progress 0..1, id?, error?}
   POST /api/regrid {id, grid, meter, beat_offset, bpm_mult}   (also /api/songs/<id>/regrid)
+  PUT  /api/songs/<id>/project   whole-document save (kept for compatibility; also broadcast as actions)
+  POST /api/songs/<id>/actions   {actions:[...]} -> contracts §8 reducer -> project.json -> {project, applied, ...}
+  GET  /api/songs/<id>/events    server-sent events: actions | chops | transport (contracts §10)
+  POST /api/songs/<id>/transport {command: play-pattern|stop|play-song|hit, pad?, velocity?, bank?, from?} -> events
+Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -23,6 +30,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "components", "control"))
+import choppad_actions as A  # noqa: E402  (server-side twin of components/ui/actions.js)
 UI_DIR = os.path.join(REPO, "components", "ui")
 MIDI_JS = os.path.join(REPO, "components", "midi", "midi.js")
 CHUNK = 256 * 1024
@@ -58,8 +67,100 @@ def compute_peaks(media_dir: str, points: int = PEAK_POINTS) -> dict:
 def load_project(media_dir: str) -> dict:
     path = os.path.join(media_dir, "project.json")
     if os.path.isfile(path):
-        return json.load(open(path))
+        return read_json(path)
     return {"pads": [{} for _ in range(16)], "overrides": {}}
+
+
+def read_json(path: str):
+    with open(path) as f:
+        return json.load(f)
+
+
+def write_json_atomic(path: str, doc) -> None:
+    """Write JSON so a reader (or a crash) never sees a half-written file: temp file in the same folder, then rename."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+TRANSPORT_COMMANDS = ("play-pattern", "stop", "play-song", "hit")
+KEEPALIVE_S = 10.0
+
+
+class Client:
+    """One open event stream."""
+    def __init__(self, origin: str = ""):
+        self.origin = origin
+        self.q = queue.Queue(maxsize=1000)
+
+
+class Hub:
+    """Fan-out of server-sent events, per song. publish() never blocks: a client whose queue is full is dropped."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.subs = {}  # song id -> set[Client]
+        self.closed = False
+
+    def subscribe(self, sid, origin=""):
+        c = Client(origin)
+        with self.lock:
+            if self.closed:
+                c.q.put(None)
+            self.subs.setdefault(sid, set()).add(c)
+        return c
+
+    def unsubscribe(self, sid, c):
+        with self.lock:
+            self.subs.get(sid, set()).discard(c)
+
+    def listeners(self, sid):
+        with self.lock:
+            return len(self.subs.get(sid, ()))
+
+    def publish(self, sid, event, data):
+        """Send one event to every stream of song `sid` except the one that caused it. Returns how many got it."""
+        msg = f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+        n = 0
+        with self.lock:
+            for c in list(self.subs.get(sid, ())):
+                if c.origin and c.origin == data.get("origin"):
+                    continue
+                try:
+                    c.q.put_nowait(msg)
+                    n += 1
+                except queue.Full:  # a stuck client must not stall the others
+                    self.subs[sid].discard(c)
+        return n
+
+    def close_all(self):
+        with self.lock:
+            self.closed = True
+            for subs in self.subs.values():
+                for c in subs:
+                    try:
+                        c.q.put_nowait(None)
+                    except queue.Full:
+                        pass
+
+
+class ChopPadServer(ThreadingHTTPServer):
+    daemon_threads = True  # long-lived event streams must never keep the process alive
+
+    def __init__(self, addr, handler, hub):
+        super().__init__(addr, handler)
+        self.hub = hub
+
+    def shutdown(self):
+        self.hub.close_all()  # wake every event stream so its thread ends
+        super().shutdown()
 
 
 class Jobs:
@@ -99,6 +200,13 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
     actions = actions or {}  # name -> fn(media_dir, body) -> json-able; POST /api/songs/<id>/<name>
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
+    hub = Hub()
+    view_state = {}  # song id -> {bank, selected, settings, sections}: what the player looks at (never saved)
+    locks, locks_guard = {}, threading.Lock()
+
+    def song_lock(sid):
+        with locks_guard:
+            return locks.setdefault(sid, threading.Lock())
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -177,6 +285,86 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     self.wfile.write(buf)
                     left -= len(buf)
 
+        def _origin(self):
+            return (self.headers.get("X-ChopPad-Origin") or "")[:64]
+
+        def _events(self, sid):
+            """Server-sent events: stays open until the client goes away or the server shuts down."""
+            origin = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("origin", [""])[0][:64]
+            client = hub.subscribe(sid, origin)
+            self.close_connection = True
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Connection", "close")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
+                self.wfile.write(b"retry: 1500\n: connected\n\n")
+                self.wfile.flush()
+                while True:
+                    try:
+                        msg = client.q.get(timeout=KEEPALIVE_S)
+                    except queue.Empty:
+                        msg = ": ping\n\n"  # also how a vanished client is noticed
+                    if msg is None:
+                        break
+                    self.wfile.write(msg.encode())
+                    self.wfile.flush()
+            except OSError:
+                pass  # BrokenPipe, ConnectionReset: the tab closed
+            finally:
+                hub.unsubscribe(sid, client)
+
+        def _apply_actions(self, sid, d):
+            body = self._body()
+            acts = body.get("actions") if isinstance(body, dict) else None
+            if not isinstance(acts, list) or not all(isinstance(a, dict) for a in acts):
+                return self._err(400, "body must be {actions: [action, ...]}")
+            with song_lock(sid):
+                with open(os.path.join(d, "chops.json")) as f:
+                    chops = json.load(f)
+                view = view_state.get(sid) or {}
+                state = A.initial_state(load_project(d), chops, view.get("sections"))
+                state.update({k: view[k] for k in ("bank", "selected", "settings") if k in view})
+                before = state["project"]
+                taken = []
+                for a in acts:
+                    if a.get("type") not in A.ACTION_TYPES or a.get("type") == "chops.replace":
+                        continue  # unknown; chops change through /regrid
+                    nxt = A.reduce(state, a)
+                    if nxt is not state or a["type"] in A.VIEW_ACTIONS:
+                        taken.append(a)
+                    state = nxt
+                view_state[sid] = {k: state[k] for k in ("bank", "selected", "settings", "sections")}
+                if state["project"] is not before:
+                    write_json_atomic(os.path.join(d, "project.json"), A.project_doc(state))
+                if taken:
+                    hub.publish(sid, "actions", {"origin": self._origin(), "actions": taken})
+                listeners = hub.listeners(sid)
+            return self._json({"project": A.project_doc(state), "applied": len(taken), "ignored": len(acts) - len(taken),
+                               "view": {"bank": state["bank"], "selected": state["selected"]}, "listeners": listeners})
+
+        def _transport(self, sid):
+            body = self._body()
+            cmd = body.get("command") if isinstance(body, dict) else None
+            if cmd not in TRANSPORT_COMMANDS:
+                return self._err(400, f"command must be one of {', '.join(TRANSPORT_COMMANDS)}")
+            msg = {"origin": self._origin(), "command": cmd}
+            if cmd == "hit":
+                pad = body.get("pad")
+                vel = body.get("velocity", 1)
+                if not isinstance(pad, int) or isinstance(pad, bool) or not 0 <= pad < 16:
+                    return self._err(400, "hit needs pad 0..15")
+                if not isinstance(vel, (int, float)) or isinstance(vel, bool) or not 0 <= vel <= 1:
+                    return self._err(400, "velocity must be 0..1")
+                msg.update(pad=pad, velocity=vel)
+                if isinstance(body.get("bank"), int) and not isinstance(body["bank"], bool):
+                    msg["bank"] = body["bank"]
+            if cmd == "play-song" and isinstance(body.get("from"), (int, float)):
+                msg["from"] = body["from"]
+            return self._json({"ok": True, "listeners": hub.publish(sid, "transport", msg)})
+
         def _song_dir(self, sid):
             if not ID_RE.match(sid or ""):
                 return None
@@ -207,7 +395,13 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     doc["pattern"] = proj["pattern"]
                 if isinstance(proj.get("fx"), dict):
                     doc["fx"] = {k: float(v) for k, v in proj["fx"].items() if isinstance(v, (int, float))}
-                json.dump(doc, open(os.path.join(d, "project.json"), "w"))
+                with song_lock(m.group(1)):
+                    old = A.initial_state(load_project(d))["project"]
+                    write_json_atomic(os.path.join(d, "project.json"), doc)
+                    # other tabs learn about a whole-document save as ordinary §8 actions
+                    changes = A.diff_project(old, A.initial_state(doc)["project"])
+                    if changes:
+                        hub.publish(m.group(1), "actions", {"origin": self._origin(), "actions": changes})
                 return self._json({"ok": True})
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -235,14 +429,22 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._media(os.path.join(media_root, parts[0], parts[1]))
             if p == "/api/songs":
                 return self._json(self._library())
+            m = re.match(r"^/api/songs/([^/]+)/events$", p)
+            if m:
+                if not self._song_dir(m.group(1)):
+                    return self._err(404, "unknown song")
+                if self.command == "HEAD":
+                    return self._err(405, "GET only")
+                return self._events(m.group(1))
             m = re.match(r"^/api/songs/([^/]+)$", p)
             if m:
                 d = self._song_dir(m.group(1))
                 if not d:
                     return self._err(404, "unknown song")
-                load = lambda n: json.load(open(os.path.join(d, n)))  # noqa: E731
+                load = lambda n: read_json(os.path.join(d, n))  # noqa: E731
                 return self._json({"meta": load("meta.json"), "analysis": load("analysis.json"),
-                                   "chops": load("chops.json"), "peaks": compute_peaks(d), "project": load_project(d)})
+                                   "chops": load("chops.json"), "peaks": compute_peaks(d), "project": load_project(d),
+                                   "view": {k: (view_state.get(m.group(1)) or {}).get(k) for k in ("bank", "selected")}})
             m = re.match(r"^/api/jobs/([0-9a-f]+)$", p)
             if m:
                 j = jobs.get(m.group(1))
@@ -264,6 +466,13 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._json({"job": jobs.start(media_root, url, pipeline)}, 202)
             if p == "/api/upload":
                 return self._upload()
+            m = re.match(r"^/api/songs/([^/]+)/(actions|transport)$", p)
+            if m:
+                d = self._song_dir(m.group(1))
+                if not d:
+                    self.rfile.read(int(self.headers.get("Content-Length") or 0))  # keep the connection in step
+                    return self._err(404, "unknown song")
+                return self._apply_actions(m.group(1), d) if m.group(2) == "actions" else self._transport(m.group(1))
             m = re.match(r"^/api/songs/([^/]+)/regrid$", p)
             if p == "/api/regrid" or m:
                 body = self._body()
@@ -276,6 +485,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                                    beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1)
                 except (ValueError, KeyError) as e:
                     return self._err(400, str(e))
+                hub.publish(sid, "chops", {"origin": self._origin(), "chops": chops})
                 return self._json(chops)
             m = re.match(r"^/api/songs/([^/]+)/([a-z]+)$", p)
             if m and m.group(2) in actions:
@@ -294,6 +504,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 body = self._body()
                 bpm = body.get("bpm")
                 analysis, chops = reanalyze(d, bpm=float(bpm) if bpm else None, meter=body.get("meter"))
+                hub.publish(m.group(1), "chops", {"origin": self._origin(), "chops": chops})
                 return self._json({"analysis": analysis, "chops": chops})
             return self._err(404, "not found")
 
@@ -337,11 +548,11 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 d = self._song_dir(sid)
                 if not d or not os.path.isfile(os.path.join(d, "chops.json")):
                     continue
-                meta = json.load(open(os.path.join(d, "meta.json")))
-                ch = json.load(open(os.path.join(d, "chops.json")))
+                meta = read_json(os.path.join(d, "meta.json"))
+                ch = read_json(os.path.join(d, "chops.json"))
                 out.append({"id": sid, "title": meta.get("title"), "duration_s": meta.get("duration_s"),
                             "bpm": ch.get("bpm"), "meter": f"{ch.get('beats_per_bar')}/4", "chops": len(ch["chops"]),
                             "banks": len(ch["banks"]), "added": os.path.getmtime(os.path.join(d, "meta.json"))})
             return sorted(out, key=lambda s: -s["added"])
 
-    return ThreadingHTTPServer((host, port), Handler)
+    return ChopPadServer((host, port), Handler, hub)
