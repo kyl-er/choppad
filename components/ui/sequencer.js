@@ -41,17 +41,17 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
     const q = QUANT[s.quant];
     // metronome
     if (s.metronome) {
-      for (let b = Math.ceil(fromAbs - 1e-9); b < toAbs; b++) {
+      for (let b = Math.ceil(fromAbs); b < toAbs; b++) {   // [from, to) is half-open, so no beat is skipped or doubled
         click(startTime + b * spb(), b % s.beatsPerBar === 0);
       }
     }
     // pattern events, possibly across a loop wrap
     const firstLoop = Math.floor(fromAbs / L);
-    const lastLoop = Math.floor((toAbs - 1e-9) / L);
+    const lastLoop = Math.floor(toAbs / L);
     for (let loop = firstLoop; loop <= lastLoop; loop++) {
       for (const e of s.pattern.events) {
         const abs = loop * L + swungBeat(e.beat, q, s.swing);
-        if (abs >= fromAbs && abs < toAbs) play(e.pad, e.vel, startTime + abs * spb(), e.bank);
+        if (abs >= fromAbs && abs < toAbs) play(e.pad, e.vel, startTime + abs * spb(), e.bank, e);
       }
     }
   }
@@ -117,6 +117,15 @@ export function createSequencer({ ctx, play, click, lookahead = 0.12, interval =
       pass = Math.max(0, ...s.pattern.events.map((e) => e.pass ?? 0));
     },
     tick,
+    /** Change the tempo, also while playing: the loop keeps its place (beats are what is scheduled). */
+    setBpm(bpm) {
+      if (!(bpm > 0) || bpm === s.bpm) return;
+      if (s.playing) {
+        const abs = absBeatAt(ctx.currentTime);
+        s.bpm = bpm;
+        startTime = ctx.currentTime - abs * spb();
+      } else s.bpm = bpm;
+    },
   };
 }
 

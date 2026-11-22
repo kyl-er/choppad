@@ -98,6 +98,37 @@
       "expect": { "project": { "overrides": {} } } },
     { "name": "unknown action is ignored",
       "actions": [{ "type": "nope" }, {}],
-      "unchanged": true }
+      "unchanged": true },
+    { "name": "W3b tempo.set sets the project tempo, then clears it back to the song's own",
+      "actions": [{ "type": "tempo.set", "bpm": 92 }],
+      "expect": { "project": { "tempo": { "bpm": 92, "follow": true } } } },
+    { "name": "W3b tempo.set with bpm null keeps the key and means the song's own tempo",
+      "project": { "tempo": { "bpm": 120, "follow": false } },
+      "actions": [{ "type": "tempo.set", "bpm": null }],
+      "expect": { "project": { "tempo": { "bpm": null, "follow": false } } } },
+    { "name": "W3b tempo.set without bpm only changes follow",
+      "actions": [{ "type": "tempo.set", "bpm": 100 }, { "type": "tempo.set", "follow": false }],
+      "expect": { "project": { "tempo": { "bpm": 100, "follow": false } } } },
+    { "name": "W3b tempo.set ignores out-of-range and non-numeric tempos, and no-ops leave the state alone",
+      "actions": [{ "type": "tempo.set", "bpm": 5 }, { "type": "tempo.set", "bpm": 1000 }, { "type": "tempo.set", "bpm": "fast" },
+        { "type": "tempo.set", "bpm": null }, { "type": "tempo.set", "follow": true }],
+      "unchanged": true },
+    { "name": "W3b an old project has no tempo key and a saved tempo loads",
+      "project": { "tempo": { "bpm": 88.5 } },
+      "actions": [{ "type": "pad.select", "pad": 0 }],
+      "unchanged": true,
+      "expect": { "project": { "tempo": { "bpm": 88.5, "follow": true } } } },
+    { "name": "W3b slice.stretch keeps `fit` (the project tempo a rendering was made for) and drops a bad one",
+      "actions": [{ "type": "slice.set", "bank": 0, "pad": 1, "start": 2, "end": 3 },
+        { "type": "slice.stretch", "bank": 0, "pad": 1, "stretch": { "ratio": 1.25, "url": "/media/x/stretch/dddddddddddddddd.wav", "fit": 80.8 } },
+        { "type": "slice.set", "bank": 0, "pad": 2, "start": 2, "end": 3 },
+        { "type": "slice.stretch", "bank": 0, "pad": 2, "stretch": { "ratio": 1.1, "url": "/media/x/stretch/eeeeeeeeeeeeeeee.wav", "fit": -3 } }],
+      "expect": { "project": { "overrides": {
+        "0:1": { "start": 2, "end": 3, "stretch": { "ratio": 1.25, "url": "/media/x/stretch/dddddddddddddddd.wav", "fit": 80.8 } },
+        "0:2": { "start": 2, "end": 3, "stretch": { "ratio": 1.1, "url": "/media/x/stretch/eeeeeeeeeeeeeeee.wav" } } } } } },
+    { "name": "W3b kit.load carries a stretch's `fit`",
+      "actions": [{ "type": "kit.load", "bank": 0, "song": "me", "pads": [
+        { "song_id": "me", "start": 1, "end": 2, "stretch": { "ratio": 0.9, "url": "/media/me/stretch/ffffffffffffffff.wav", "fit": 112 } }] }],
+      "expect": { "project": { "overrides": { "0:0": { "start": 1, "end": 2, "stretch": { "ratio": 0.9, "url": "/media/me/stretch/ffffffffffffffff.wav", "fit": 112 } } } } } }
   ]
 }

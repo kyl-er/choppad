@@ -70,7 +70,8 @@ def normalize(doc, media_root, *, partial=None):
             m = re.match(r"^/media/([A-Za-z0-9_-]{1,64})/stretch/[0-9a-f]{16}\.wav$", str(st.get("url") or ""))
             if not m or m.group(1) != sid or not _num(st.get("ratio")) or st["ratio"] <= 0:
                 raise ValueError(f"pad {i + 1}: stretch needs a positive ratio and a /media/{sid}/stretch/<hash>.wav url")
-            out["stretch"] = {"ratio": st["ratio"], "url": st["url"]}
+            out["stretch"] = {"ratio": st["ratio"], "url": st["url"],
+                              **({"fit": st["fit"]} if _num(st.get("fit")) and st["fit"] > 0 else {})}
         pads.append(out)
     fx = base.get("fx") or {}
     if not isinstance(fx, dict):

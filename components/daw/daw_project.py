@@ -133,7 +133,8 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None)
             shutil.rmtree(tmp, ignore_errors=True)
     n = len(chops["banks"][bank])
     slots = [Chop(p, os.path.join(kit_dir, f"chop_{p:02d}.wav"), 36 + p) if p < n else None for p in range(PADS)]
-    bpm = float(chops.get("bpm") or 120.0)
+    # W3b: the project tempo (project.json "tempo": {bpm, follow}) wins over the song's own tempo
+    bpm = float(((proj.get("tempo") or {}).get("bpm")) or chops.get("bpm") or 120.0)
     return DawProject(song_id=sid, title=title, bpm=bpm, beats_per_bar=int(chops.get("beats_per_bar") or 4), bank=bank,
                       chops=slots, pattern=pattern, kit_name=kit_name, kit_dir=kit_dir, key=key)
 

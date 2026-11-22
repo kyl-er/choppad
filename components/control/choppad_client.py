@@ -158,6 +158,105 @@ class Client:
                 use_bars = cur.get("bars", 2)
         return self.actions(sid, [{"type": "pattern.load", "pattern": {"bars": use_bars, "events": events}}])
 
+    # ---- W3b: project tempo ----
+    def _slice_of(self, d, bank, pad):
+        """(source song id, start, end) of the slice on (bank, pad), or None when the pad is empty."""
+        o = ((d.get("project") or {}).get("overrides") or {}).get(f"{bank}:{pad}")
+        if o and o.get("end", 0) > o.get("start", 0):
+            return (o.get("song") or d["meta"]["id"], o["start"], o["end"])
+        chops = d["chops"]
+        try:
+            ch = chops["chops"][chops["banks"][bank][pad]]
+        except (IndexError, TypeError):
+            return None
+        return (d["meta"]["id"], ch["start"], ch["end"])
+
+    def fit_tempo(self, sid, scope="pattern", refit=False):
+        """Stretch the pads of `scope` ("pattern": the pads the pattern plays; "bank": the bank on screen) to the project
+        tempo with the server's stretch endpoint, mark them `fit`, and save it as slice.stretch actions. `refit`: instead
+        every pad that was fitted before. Pads stretched by hand and resample pads are left alone.
+        Returns {tempo, fitted: [{bank, pad, ratio}], skipped: [{bank, pad, reason}]}."""
+        d = self.song(sid)
+        proj = d.get("project") or {}
+        T = (proj.get("tempo") or {}).get("bpm")
+        ov = proj.get("overrides") or {}
+        if refit:
+            keys = [k for k, o in ov.items() if (o.get("stretch") or {}).get("fit") is not None]
+        elif scope == "bank":
+            bank = (d.get("view") or {}).get("bank") or 0
+            keys = [f"{bank}:{p}" for p in range(PADS)]
+        elif scope == "pattern":
+            keys = sorted({f"{e.get('bank', 0)}:{e['pad']}" for e in (proj.get("pattern") or {}).get("events", [])})
+        else:
+            raise ControlError("scope must be pattern or bank")
+        if not refit and T is None:
+            raise ControlError("set a project tempo first (choppad tempo ID --bpm N)")
+        acts, fitted, skipped = [], [], []
+        for k in keys:
+            bank, pad = (int(x) for x in k.split(":"))
+            o = ov.get(k) or {}
+            st = o.get("stretch")
+            if T is None:
+                if st and st.get("fit") is not None:
+                    acts.append({"type": "slice.stretch", "bank": bank, "pad": pad, "stretch": None})
+                    fitted.append({"bank": bank, "pad": pad, "ratio": 1})
+                continue
+            if st and st.get("fit") is None:
+                skipped.append({"bank": bank, "pad": pad, "reason": "stretched by hand"})
+                continue
+            if o.get("src"):
+                skipped.append({"bank": bank, "pad": pad, "reason": "resample (already at the project tempo)"})
+                continue
+            sl = self._slice_of(d, bank, pad)
+            if not sl:
+                continue
+            if st and st.get("fit") == T:
+                skipped.append({"bank": bank, "pad": pad, "reason": "already fitted"})
+                continue
+            body = {"bank": bank, "pad": pad, "start": sl[1], "end": sl[2], "target_bpm": T}
+            if o.get("stem"):  # a pad that plays a stem is stretched from that stem
+                body["stem"] = o["stem"]
+            r = self.post(f"/api/songs/{_sid(sl[0])}/stretch", body, timeout=300)
+            if abs(r["ratio"] - 1) < 0.002:
+                if st:
+                    acts.append({"type": "slice.stretch", "bank": bank, "pad": pad, "stretch": None})
+            else:
+                acts.append({"type": "slice.stretch", "bank": bank, "pad": pad,
+                             "stretch": {"ratio": r["ratio"], "url": r["url"], "fit": T}})
+            fitted.append({"bank": bank, "pad": pad, "ratio": round(r["ratio"], 4)})
+        if acts:
+            self.actions(sid, acts)
+        return {"tempo": T, "fitted": fitted, "skipped": skipped}
+
+    def tempo(self, sid, bpm=None, song=False, follow=None, fit=None):
+        """Show or change the project tempo. `bpm` sets it, `song=True` goes back to the song's own tempo, `follow`
+        (bool) = fitted pads follow tempo changes, `fit` = "pattern" | "bank" fits those pads now. When follow is on,
+        pads fitted earlier are re-fitted to a new tempo."""
+        if bpm is not None and not 20 <= bpm <= 400:
+            raise ControlError("tempo must be between 20 and 400 BPM")
+        d = self.song(sid)
+        cur = (d.get("project") or {}).get("tempo") or {"bpm": None, "follow": True}
+        act = {"type": "tempo.set"}
+        if song:
+            act["bpm"] = None
+        elif bpm is not None:
+            act["bpm"] = bpm
+        if follow is not None:
+            act["follow"] = follow
+        out = {"tempo": cur["bpm"], "follow": cur["follow"], "song_bpm": round(d["chops"]["bpm"], 3)}
+        if len(act) > 1:
+            r = self.actions(sid, [act])
+            out.update(applied=r.get("applied"), listeners=r.get("listeners"))
+            t = r["project"].get("tempo") or {"bpm": None, "follow": True}
+            out.update(tempo=t["bpm"], follow=t["follow"])
+            if t["follow"] and (bpm is not None or song):
+                fit_r = self.fit_tempo(sid, refit=True)
+                if fit_r["fitted"]:
+                    out["refitted"] = len(fit_r["fitted"])
+        if fit:
+            out["fit"] = self.fit_tempo(sid, fit)
+        return out
+
     def pattern_clear(self, sid):
         return self.actions(sid, [{"type": "pattern.clear"}])
 
@@ -215,6 +314,8 @@ def song_summary(d):
     key = ana.get("key") or meta.get("key")
     if key:
         out["key"] = key
+    if (proj.get("tempo") or {}).get("bpm"):  # W3b: the project tempo, when one is set
+        out["project_tempo"] = proj["tempo"]["bpm"]
     bank = (d.get("view") or {}).get("bank")
     if bank is not None:
         out["current_bank"] = bank

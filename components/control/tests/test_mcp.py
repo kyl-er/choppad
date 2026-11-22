@@ -8,6 +8,7 @@ import choppad_mcp as M  # noqa: E402
 MCP_PY = os.path.join(ROOT, "components", "control", "choppad_mcp.py")
 EXPECTED = {"library", "song_summary", "chop_table", "pattern_text", "import_song", "regrid", "assign", "pad", "pattern_set",
             "pattern_clear", "fx", "play", "hit", "export", "daw_open", "daw_sync", "daw_transport"}
+EXPECTED |= {"tempo"}  # W3b additions (the set above is unchanged)
 
 
 class McpTest(unittest.TestCase):

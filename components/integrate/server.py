@@ -417,6 +417,9 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     doc["pattern"] = proj["pattern"]
                 if isinstance(proj.get("fx"), dict):
                     doc["fx"] = {k: float(v) for k, v in proj["fx"].items() if isinstance(v, (int, float))}
+                for k in ("tempo", "song"):  # W3b: optional project keys
+                    if isinstance(proj.get(k), dict):
+                        doc[k] = proj[k]
                 with song_lock(m.group(1)):
                     old = A.initial_state(load_project(d))["project"]
                     write_json_atomic(os.path.join(d, "project.json"), doc)

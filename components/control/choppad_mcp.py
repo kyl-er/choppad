@@ -100,6 +100,13 @@ def build_tools(client):
               "reverb, size. Only the given fields change.",
               {"id": _ID, "preset": _S("preset name", enum=list(cc.PRESETS)), **{k: _N(k) for k in cc.FX_KEYS}}, ["id"],
               lambda a: _watch(c.fx(a["id"], a.get("preset"), **{k: a.get(k) for k in cc.FX_KEYS}))),
+        _tool("tempo", "Project tempo: the sequencer, metronome, MIDI export and renders play at it instead of the song's own "
+              "tempo. Give bpm to set it, song=true to go back to the song's tempo, follow=false to stop fitted pads "
+              "re-fitting on tempo changes, fit='pattern' or 'bank' to stretch those pads to it now (rubberband, pitch kept; "
+              "pads stretched by hand are never touched). With nothing given it just reports.",
+              {"id": _ID, "bpm": _N("20-400", minimum=20, maximum=400), "song": {"type": "boolean"},
+               "follow": {"type": "boolean"}, "fit": _S("pattern or bank", enum=["pattern", "bank"])}, ["id"],
+              lambda a: c.tempo(a["id"], a.get("bpm"), bool(a.get("song")), a.get("follow"), a.get("fit"))),
         _tool("play", "Start or stop playback in the open browser: pattern, song or stop.",
               {"id": _ID, "what": _S("pattern, song or stop", enum=["pattern", "song", "stop"]), "from": _N("song start, seconds")},
               ["id", "what"], lambda a: hit_text(c.play(a["id"], a["what"], a.get("from")))),

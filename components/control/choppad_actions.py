@@ -13,6 +13,8 @@ import copy
 import math
 
 PADS = 16
+DEFAULT_TEMPO = {"bpm": None, "follow": True}
+TEMPO_MIN, TEMPO_MAX = 20, 400
 DEFAULT_PAD = {"gainDb": 0, "pitch": 0, "attack": 0.0025, "release": 0.003, "reverse": False, "mode": None}
 DEFAULT_FX = {"tone": 0, "low": 0, "mid": 0, "high": 0, "filter": 0, "reverb": 0, "size": 0.5}
 DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant": "1/16", "swing": 0,
@@ -21,6 +23,7 @@ DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant"
 # Actions that change the saved project. The rest only change what the player looks at (not written to project.json).
 PROJECT_ACTIONS = frozenset({
     "pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set",
+    "tempo.set",
     "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load"})
 VIEW_ACTIONS = frozenset({"pad.select", "bank.set", "chops.replace", "sections.set", "settings.set"})
 ACTION_TYPES = PROJECT_ACTIONS | VIEW_ACTIONS
@@ -28,6 +31,32 @@ ACTION_TYPES = PROJECT_ACTIONS | VIEW_ACTIONS
 
 def _is_num(x):
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def project_bpm(state):
+    """Tempo the sequencer and every render use: the project tempo when set, else the song's own."""
+    t = state["project"].get("tempo")
+    if t and t.get("bpm") is not None:
+        return t["bpm"]
+    return (state.get("chops") or {}).get("bpm")
+
+
+def _clean_tempo(t):
+    """A clean {bpm, follow} from a saved or sent tempo, or None when it is not one."""
+    if not isinstance(t, dict):
+        return None
+    bpm = t.get("bpm")
+    if bpm is not None and not (_is_num(bpm) and TEMPO_MIN <= bpm <= TEMPO_MAX):
+        return None
+    return {"bpm": bpm, "follow": t["follow"] if isinstance(t.get("follow"), bool) else True}
+
+
+def _clean_stretch(st):
+    """{ratio, url[, fit]}: `fit` = the project tempo this rendering was made for (absent = stretched by hand)."""
+    out = {"ratio": st["ratio"], "url": st["url"]}
+    if _is_num(st.get("fit")) and st["fit"] > 0:
+        out["fit"] = st["fit"]
+    return out
 
 
 def _pad(p):
@@ -74,6 +103,8 @@ def initial_state(project=None, chops=None, sections=None):
             "pattern": {"bars": pattern.get("bars") if pattern.get("bars") is not None else 2,
                         "events": copy.deepcopy(list(pattern.get("events") or []))},
             "fx": {**DEFAULT_FX, **_pick(project.get("fx"), DEFAULT_FX)},
+            # optional keys: absent in old projects (and until first used), which then mean the defaults
+            **({"tempo": _clean_tempo(project.get("tempo"))} if _clean_tempo(project.get("tempo")) else {}),
         },
         "chops": chops,
         "sections": list(sections or []),
@@ -170,7 +201,7 @@ def reduce(state, action):
             except (KeyError, IndexError, TypeError):
                 return state
             base = {"start": ch["start"], "end": ch["end"]}
-        return _with_project(state, overrides={**proj["overrides"], key: {**base, "stretch": {"ratio": ratio, "url": url}}})
+        return _with_project(state, overrides={**proj["overrides"], key: {**base, "stretch": _clean_stretch(st)}})
     if t == "kit.load":  # put a kit's pads (16 entries or null) on a bank; null = leave the pad alone
         bank = a.get("bank")
         if not (isinstance(bank, int) and not isinstance(bank, bool) and bank >= 0) or not isinstance(a.get("pads"), list):
@@ -188,12 +219,22 @@ def reduce(state, action):
                 o["song"] = k["song_id"]
             ks = k.get("stretch")
             if isinstance(ks, dict) and ks.get("url") and _is_num(ks.get("ratio")) and ks["ratio"] > 0:
-                o["stretch"] = {"ratio": ks["ratio"], "url": ks["url"]}
+                o["stretch"] = _clean_stretch(ks)
             overrides[f"{bank}:{pad}"] = o
             params = _pick(k.get("params"), DEFAULT_PAD)
             if params:
                 pads = [{**P, **params} if i == pad else P for i, P in enumerate(pads)]
         return _with_project(state, overrides=overrides, pads=pads)
+
+    if t == "tempo.set":  # W3b: project tempo; bpm null = the song's own tempo
+        cur = proj.get("tempo") or DEFAULT_TEMPO
+        bpm = a["bpm"] if "bpm" in a else cur["bpm"]  # bpm omitted = keep it (set only `follow`)
+        if bpm is not None and not (_is_num(bpm) and TEMPO_MIN <= bpm <= TEMPO_MAX):
+            return state
+        follow = a["follow"] if isinstance(a.get("follow"), bool) else cur["follow"]
+        if bpm == cur["bpm"] and follow == cur["follow"] and (bpm is None) == (cur["bpm"] is None):
+            return state
+        return _with_project(state, tempo={"bpm": bpm, "follow": follow})
 
     if t == "fx.set":
         params = _pick(a.get("params"), DEFAULT_FX)
@@ -298,6 +339,9 @@ def diff_project(old, new):
     fx = {k: v for k, v in new["fx"].items() if old["fx"].get(k) != v}
     if fx:
         out.append({"type": "fx.set", "params": fx})
+    if old.get("tempo") != new.get("tempo"):
+        t = new.get("tempo") or DEFAULT_TEMPO
+        out.append({"type": "tempo.set", "bpm": t["bpm"], "follow": t["follow"]})
     if old["pattern"] != new["pattern"]:
         out.append({"type": "pattern.load", "pattern": new["pattern"]})
     return out

@@ -243,7 +243,8 @@ def make_server(media_root: str, port: int = 8960):
 # Agent verbs: `choppad songs|show|import|regrid|assign|pad|pattern|fx|play|hit|export|daw ...`
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
-VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station")
+VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
+         "tempo")
 
 
 def build_verb_parser():
@@ -311,6 +312,14 @@ def build_verb_parser():
     s.add_argument("id")
     s.add_argument("kind", choices=["hydrogen", "sfz"])
     s.add_argument("--bank", type=int, default=0)
+    # --- W3b sampler core ---
+    s = add("tempo", "project tempo: show it, set it (--bpm), go back to the song's tempo (--song), fit pads to it (--fit)")
+    s.add_argument("id")
+    s.add_argument("--bpm", type=float, help="project tempo in BPM (20-400)")
+    s.add_argument("--song", action="store_true", help="use the song's own tempo again (fitted pads go back to plain slices)")
+    s.add_argument("--follow", action=argparse.BooleanOptionalAction, default=None,
+                   help="pads fitted earlier are re-fitted when the tempo changes (default on)")
+    s.add_argument("--fit", choices=["pattern", "bank"], help="stretch the pads of the pattern, or of the bank on screen, to the tempo now")
     # --- W2 DAW bridge (components/daw) ---
     s = add("daw", "DAW bridge: open a song in Hydrogen or Ardour, re-sync it after edits, drive its transport")
     s.add_argument("op", choices=["open", "sync", "play", "stop"])
@@ -446,6 +455,8 @@ def run_verb(argv, client=None, out=None, err=None):
                 err("note: no browser has this song open, so nothing is playing")
         elif a.verb == "export":
             j(c.export(a.id, a.kind, a.bank))
+        elif a.verb == "tempo":
+            j(c.tempo(a.id, a.bpm, a.song, a.follow, a.fit))
         elif a.verb == "daw":
             r = c.daw(a.id, a.daw, a.op, a.bank)
             j(r)

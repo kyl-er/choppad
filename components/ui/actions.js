@@ -19,6 +19,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   repeat: false, repeatRate: 0.25, follow: true,
 });
 export const PADS = 16;
+export const DEFAULT_TEMPO = Object.freeze({ bpm: null, follow: true });
+export const TEMPO_MIN = 20, TEMPO_MAX = 400;
 
 const PAD_KEYS = Object.keys(DEFAULT_PAD);
 const FX_KEYS = Object.keys(DEFAULT_FX);
@@ -26,6 +28,18 @@ const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS);
 const isPad = (p) => Number.isInteger(p) && p >= 0 && p < PADS;
 const pick = (obj, keys) => Object.fromEntries(keys.filter((k) => obj && k in obj).map((k) => [k, obj[k]]));
 const same = (a, b) => Object.keys(b).every((k) => a[k] === b[k]);
+const isNum = (x) => typeof x === "number" && Number.isFinite(x);
+
+/** Tempo the sequencer, metronome, note repeat and every render use: the project tempo when set, else the song's own. */
+export const projectBpm = (state) => state.project.tempo?.bpm ?? state.chops?.bpm;
+
+/** Pure: a clean {bpm, follow} from a saved or sent tempo, or null when it is not one. */
+function cleanTempo(t) {
+  if (!t || typeof t !== "object") return null;
+  const bpm = t.bpm === null || t.bpm === undefined ? null : isNum(t.bpm) && t.bpm >= TEMPO_MIN && t.bpm <= TEMPO_MAX ? t.bpm : undefined;
+  if (bpm === undefined) return null;
+  return { bpm, follow: typeof t.follow === "boolean" ? t.follow : true };
+}
 
 /** Build the starting state from what the server returns for a song. */
 export function initialState({ project = {}, chops, sections = [] } = {}) {
@@ -36,6 +50,8 @@ export function initialState({ project = {}, chops, sections = [] } = {}) {
       overrides: { ...(project?.overrides ?? {}) },
       pattern: { bars: pattern?.bars ?? 2, events: [...(pattern?.events ?? [])] },
       fx: { ...DEFAULT_FX, ...pick(project?.fx, FX_KEYS) },
+      // optional keys: absent in old projects (and until first used), which then mean the defaults
+      ...(cleanTempo(project?.tempo) ? { tempo: cleanTempo(project.tempo) } : {}),
     },
     chops,
     sections,
@@ -50,6 +66,9 @@ export const projectDoc = (state) => state.project;
 
 /** Step index (1/16 notes from the loop start) of a pattern event. */
 export const stepOf = (event) => Math.round(event.beat * 4);
+
+/** {ratio, url[, fit]}: `fit` = the project tempo this rendering was made for (absent = stretched by hand). */
+const cleanStretch = (st) => ({ ratio: Number(st.ratio), url: st.url, ...(isNum(st.fit) && st.fit > 0 ? { fit: st.fit } : {}) });
 
 const withProject = (state, patch) => ({ ...state, project: { ...state.project, ...patch } });
 const clampBank = (state, n) => Math.max(0, Math.min((state.chops?.banks?.length ?? 1) - 1, n));
@@ -112,7 +131,7 @@ export function reduce(state, action) {
         if (!ch) return state;
         base = { start: ch.start, end: ch.end };
       }
-      return withProject(state, { overrides: { ...state.project.overrides, [key]: { ...base, stretch: { ratio, url: a.stretch.url } } } });
+      return withProject(state, { overrides: { ...state.project.overrides, [key]: { ...base, stretch: cleanStretch(a.stretch) } } });
     }
 
     case "kit.load": {   // W3: put a kit's pads (kit.json `pads`, 16 entries or null) on a bank; null = leave the pad alone
@@ -124,12 +143,21 @@ export function reduce(state, action) {
         if (!k || typeof k.song_id !== "string" || !(k.end > k.start) || !(k.start >= 0)) return;
         const o = { start: k.start, end: k.end };
         if (k.song_id !== a.song) o.song = k.song_id;   // `song` = the open song's id: its own slices need no source
-        if (k.stretch && k.stretch.url && Number(k.stretch.ratio) > 0) o.stretch = { ratio: Number(k.stretch.ratio), url: k.stretch.url };
+        if (k.stretch && k.stretch.url && Number(k.stretch.ratio) > 0) o.stretch = cleanStretch(k.stretch);
         overrides[`${bank}:${pad}`] = o;
         const params = pick(k.params, PAD_KEYS);
         if (Object.keys(params).length) pads = pads.map((P, i) => (i === pad ? { ...P, ...params } : P));
       });
       return withProject(state, { overrides, pads });
+    }
+
+    case "tempo.set": {   // W3b: project tempo; bpm null = the song's own tempo
+      const cur = state.project.tempo ?? DEFAULT_TEMPO;
+      const bpm = a.bpm === undefined ? cur.bpm : a.bpm;   // bpm omitted = keep it (set only `follow`)
+      if (bpm !== null && !(isNum(bpm) && bpm >= TEMPO_MIN && bpm <= TEMPO_MAX)) return state;
+      const follow = typeof a.follow === "boolean" ? a.follow : cur.follow;
+      if (bpm === cur.bpm && follow === cur.follow) return state;
+      return withProject(state, { tempo: { bpm, follow } });
     }
 
     case "fx.set": {

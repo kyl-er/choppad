@@ -6,7 +6,7 @@ import { createEngine } from "./engine.js";
 import { createSequencer, encodeWav, patternToMidi } from "./sequencer.js";
 import { createFx } from "./fx.js";
 import { createStore } from "./store.js";
-import { PADS, initialState, projectDoc, reduce } from "./actions.js";
+import { PADS, initialState, projectBpm, projectDoc, reduce } from "./actions.js";
 
 const STEPS = { "1/4": 1, "1/8": 2, "1/16": 4 };
 const MULTS = [0.5, 1, 2];
@@ -15,7 +15,7 @@ const SAVE_DELAY_MS = 80; // local edits are sent to the server in batches this 
 const ORIGIN = globalThis.crypto?.randomUUID?.() ?? `tab-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const ORIGIN_HEADER = "X-ChopPad-Origin";
 // Local actions that are saved on the server and shown by other tabs. Selection, settings and sections stay per tab.
-const FORWARDED = new Set(["pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set",
+const FORWARDED = new Set(["pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set", "tempo.set",
   "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load", "bank.set"]);
 
 const postJson = (url, body = {}) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [ORIGIN_HEADER]: ORIGIN }, body: JSON.stringify(body) });
@@ -78,10 +78,10 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     timers.add(t);
   }
   const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b) => { engine.trigger(p, vel, when, b); flashAt(when, p, b); } });
-  const syncSeqTempo = () => {
-    const { chops } = store.get();
-    seq.state.bpm = chops.bpm;
-    seq.state.beatsPerBar = chops.beats_per_bar;
+  const syncSeqTempo = () => {   // the project tempo when set, else the song's own
+    const st = store.get();
+    seq.setBpm(projectBpm(st));
+    seq.state.beatsPerBar = st.chops.beats_per_bar;
   };
 
   // ---- state -> engine, sequencer, fx, disk ----
@@ -123,8 +123,8 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     chopToBank = [];
     chops.banks.forEach((b, n) => b.forEach((i) => { chopToBank[i] = n; }));
   };
-  const unsubscribe = store.subscribe((s, prev, _action, meta) => {
-    if (s.chops !== prev.chops) { engine.setChops(s.chops); indexBanks(s.chops); }
+  const unsubscribe = store.subscribe((s, prev, action, meta) => {
+    if (s.chops !== prev.chops) { engine.setChops(s.chops); indexBanks(s.chops); syncSeqTempo(); }
     if (s.bank !== prev.bank || s.chops !== prev.chops) engine.setBank(s.bank);
     if (s.settings !== prev.settings) {
       engine.setMode(s.settings.mode);
@@ -136,6 +136,10 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     }
     const P = s.project, Q = prev.project;
     if (P === Q) return;
+    if (P.tempo !== Q.tempo) {
+      syncSeqTempo();
+      if (action?.type === "tempo.set" && !meta.remote && P.tempo?.follow !== false) scheduleRefit();
+    }
     if (P.pads !== Q.pads) for (let p = 0; p < PADS; p++) if (P.pads[p] !== Q.pads[p]) engine.setPadParams(p, P.pads[p]);
     if (P.overrides !== Q.overrides) {
       for (const k of new Set([...Object.keys(P.overrides), ...Object.keys(Q.overrides)])) {
@@ -263,9 +267,9 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   // note repeat: a held pad retriggers at the chosen rate, in time with the tempo
   const held = new Map(); // pad -> interval handle
   function startRepeat(pad, velocity) {
-    const { settings, chops } = store.get();
+    const { settings } = store.get();
     if (!settings.repeat || held.has(pad)) return;
-    held.set(pad, setInterval(() => hit(pad, velocity), (settings.repeatRate * 60000) / chops.bpm));
+    held.set(pad, setInterval(() => hit(pad, velocity), (settings.repeatRate * 60000) / projectBpm(store.get())));
   }
   function stopRepeat(pad) { clearInterval(held.get(pad)); held.delete(pad); }
 
@@ -322,15 +326,16 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     emit("seq", {});
   }
   const patternMidi = () => {
-    const { chops, project } = store.get();
-    return patternToMidi(project.pattern, { bpm: chops.bpm, beatsPerBar: chops.beats_per_bar });
+    const st = store.get();
+    return patternToMidi(st.project.pattern, { bpm: projectBpm(st), beatsPerBar: st.chops.beats_per_bar });
   };
   /** Offline render of the pattern through the pad sounds and master fx. Returns WAV bytes, or null when empty. */
   async function renderPatternWav() {
     const { chops, project, settings } = store.get();
     const pat = project.pattern;
     if (!pat.events.length) return null;
-    const seconds = (pat.bars * chops.beats_per_bar * 60) / chops.bpm + 2 + (project.fx.reverb > 0 ? 0.4 + project.fx.size * 5.6 : 0);
+    const bpm = projectBpm(store.get());
+    const seconds = (pat.bars * chops.beats_per_bar * 60) / bpm + 2 + (project.fx.reverb > 0 ? 0.4 + project.fx.size * 5.6 : 0);
     const off = new OfflineAudioContext(2, Math.ceil(seconds * buffer.sampleRate), buffer.sampleRate);
     const ofx = createFx(off, project.fx);
     ofx.output.connect(off.destination);
@@ -347,7 +352,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     for (const e of pat.events) {
       const step = q ? Math.round(e.beat / q) : 0;
       const beat = q && step % 2 === 1 ? e.beat + settings.swing * q : e.beat;
-      oe.trigger(e.pad, e.vel, (beat * 60) / chops.bpm, e.bank);
+      oe.trigger(e.pad, e.vel, (beat * 60) / bpm, e.bank);
     }
     return encodeWav(await off.startRendering());
   }
@@ -397,16 +402,86 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
 
   // ---- time-stretch (rubberband on the server; the result is a cached WAV the pad plays instead of the song region) ----
   /** Fit the slice on (bank, pad) to `{ target_bpm }` or `{ ratio }` (new length / old). Resolves { ok, ratio, url, duration, error }. */
-  async function stretchPad(bank, pad, how) {
+  async function stretchPad(bank, pad, how, { fit } = {}) {
     const sl = engine.getSlice(bank, pad);
     if (!sl) return { ok: false, error: `pad ${pad + 1} is empty` };
     const src = sl.song ?? id;   // a kit pad from another song is rendered from that song's audio
     const r = await postJson(`/api/songs/${src}/stretch`, { bank, pad, start: sl.start, end: sl.end, ...how });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
-    store.dispatch({ type: "slice.stretch", bank, pad, stretch: { ratio: body.ratio, url: body.url } });
+    if (fit && Math.abs(body.ratio - 1) < 0.002) {   // already at the project tempo: play the plain slice
+      store.dispatch({ type: "slice.stretch", bank, pad, stretch: null });
+      return { ok: true, ...body, cleared: true };
+    }
+    store.dispatch({ type: "slice.stretch", bank, pad, stretch: { ratio: body.ratio, url: body.url, ...(fit ? { fit } : {}) } });
     await Promise.all([...pending]);
     return { ok: true, ...body };
+  }
+
+  // ---- project tempo: fit pads to it, and keep fitted pads fitted when it changes ----
+  // A pad is "fitted" when its stretch carries `fit` (the project tempo it was made for); a stretch without it was made by
+  // hand (stretchPad) and is never touched here. Pads that play a resample (`src`) are already at the project tempo.
+  const fitState = () => {
+    const { project, bank } = store.get();
+    return { T: project.tempo?.bpm ?? null, overrides: project.overrides, bank, pattern: project.pattern };
+  };
+  const isFitted = (o) => !!o?.stretch && o.stretch.fit !== undefined;
+  const isHand = (o) => !!o?.stretch && o.stretch.fit === undefined;
+  async function fitKeys(keys, T) {
+    const results = [], skipped = [];
+    await Promise.all(keys.map(async (k) => {
+      const [bank, pad] = k.split(":").map(Number);
+      const o = store.get().project.overrides[k];
+      if (isHand(o)) { skipped.push({ bank, pad, reason: "stretched by hand" }); return; }
+      if (o?.src) { skipped.push({ bank, pad, reason: "resample (already at the project tempo)" }); return; }
+      if (!engine.getSlice(bank, pad)) return;
+      if (isFitted(o) && o.stretch.fit === T) { skipped.push({ bank, pad, reason: "already fitted" }); return; }
+      const r = await stretchPad(bank, pad, { target_bpm: T }, { fit: T });
+      results.push({ bank, pad, ...r });
+    }));
+    return { ok: results.every((r) => r.ok), tempo: T, fitted: results, skipped };
+  }
+  let chain = Promise.resolve(null);
+  /** Stretch the pads of `scope` ("pattern": every pad the pattern plays; "bank": the bank on screen) to the project tempo
+   *  (ratio = the slice's song tempo / project tempo). Needs project.tempo.bpm. Never touches pads stretched by hand. */
+  async function fitToTempo({ scope = "pattern" } = {}) {
+    const { T, bank, pattern } = fitState();
+    if (!T) return { ok: false, error: "set a project tempo first (tempo.set)", fitted: [], skipped: [] };
+    let keys;
+    if (scope === "bank") keys = Array.from({ length: PADS }, (_, p) => `${bank}:${p}`);
+    else if (scope === "pattern") keys = [...new Set(pattern.events.map((e) => `${e.bank}:${e.pad}`))];
+    else return { ok: false, error: 'scope must be "pattern" or "bank"', fitted: [], skipped: [] };
+    chain = chain.then(() => fitKeys(keys, T));
+    return chain;
+  }
+  let refitTimer = 0;
+  let refitWaiters = [];
+  /** Re-fit every pad that was fitted (any bank) to the project tempo; with no project tempo they go back to plain slices. */
+  function refitAll() {
+    const { T, overrides } = fitState();
+    const keys = Object.keys(overrides).filter((k) => isFitted(overrides[k]));
+    if (!keys.length) return Promise.resolve({ ok: true, tempo: T, fitted: [], skipped: [] });
+    if (T === null) {
+      for (const k of keys) { const [bank, pad] = k.split(":").map(Number); store.dispatch({ type: "slice.stretch", bank, pad, stretch: null }); }
+      return Promise.resolve({ ok: true, tempo: null, fitted: [], skipped: [], cleared: keys.length });
+    }
+    chain = chain.then(() => fitKeys(keys, T));
+    return chain;
+  }
+  function scheduleRefit() {
+    clearTimeout(refitTimer);
+    refitTimer = setTimeout(() => {
+      refitTimer = 0;
+      const waiters = refitWaiters; refitWaiters = [];
+      refitAll().then((r) => waiters.forEach((w) => w(r)), () => waiters.forEach((w) => w(null)));
+    }, 150);
+  }
+  /** Resolves when a pending or running re-fit has finished (immediately when there is none). */
+  const whenFitted = () => (refitTimer ? new Promise((res) => refitWaiters.push(res)) : chain);
+  /** Set (or, with null, clear) the project tempo and wait for fitted pads to follow it. */
+  async function setTempo(bpm, { follow } = {}) {
+    store.dispatch({ type: "tempo.set", bpm, ...(follow === undefined ? {} : { follow }) });
+    return whenFitted();
   }
   /** Stretch every pad on the current bank. Resolves the list of per-pad results (empty pads skipped). */
   async function stretchBank(how) {
@@ -497,6 +572,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
       } else apply({ type: "slice.set", bank, pad, start: sl.start, end: sl.end });
     }
     apply({ type: "fx.set", params: want.fx });
+    apply({ type: "tempo.set", bpm: want.tempo?.bpm ?? null, follow: want.tempo?.follow ?? true });
     apply({ type: "pattern.load", pattern: want.pattern });
     if (JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
   }
@@ -533,6 +609,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
     toggleRecord, togglePattern, patternMidi, renderPatternWav,
     loadSections, advise, loadAiBank, exportBank,
     stretchPad, stretchBank, stretchPattern, clearStretch, saveBankAsKit, loadKit, detectKey,
+    setTempo, fitToTempo, refitAll, whenFitted, get tempoBpm() { return projectBpm(store.get()); },
     panic,
     destroy() {
       unsubscribeOutbox();
@@ -541,6 +618,7 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
       stream?.close();
       unsubscribe();
       for (const t of timers) clearTimeout(t);
+      clearTimeout(refitTimer);
       panic();
       video.removeAttribute("src");
       video.load();
