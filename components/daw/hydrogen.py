@@ -88,7 +88,8 @@ class HydrogenBridge:
         self.want_port = osc_port or int(os.environ.get("CHOPPAD_HYDROGEN_OSC_PORT") or 0) or None
         env_head = os.environ.get("CHOPPAD_DAW_HEADLESS")
         self.headless = headless if headless is not None else (env_head not in (None, "", "0", "false"))
-        self.volume = volume
+        env_vol = os.environ.get("CHOPPAD_HYDROGEN_VOLUME")  # master volume 0..1.5 sent after every song load
+        self.volume = volume if volume is not None else (float(env_vol) if env_vol else None)
         self.base_conf = base_conf
         self._popen, self._which, self._osc_factory = popen, which, osc_factory
         self._wait_s, self._sleep, self._clock, self._port_free = wait_s, sleep, clock, port_free
@@ -111,18 +112,38 @@ class HydrogenBridge:
         self._ensure_running()
         return self.push(project)
 
-    def push(self, project):
-        """Write the song for `project` (kit + pattern + tempo) and make Hydrogen open it again."""
-        if not self._running():
-            self._ensure_running()
+    def _write_song(self, project):
+        """Install the kit under --user-data and write the project's .h2song; returns (path, info). No Hydrogen needed."""
         os.makedirs(self.songs, exist_ok=True)
         os.makedirs(self.kits, exist_ok=True)
         self._install_kit(project)
         path = os.path.join(self.songs, f"{project.song_id}.h2song")
         info = h2song.write_song(path, title=project.title, bpm=project.bpm, beats_per_bar=project.beats_per_bar,
                                  wavs=[os.path.basename(w) if w else None for w in project.wavs()], pattern=project.pattern,
-                                 bank=project.bank, kit_name=project.kit_name,
-                                 empty_wav=self._silence(project))
+                                 bank=project.bank, kit_name=project.kit_name, empty_wav=self._silence(project))
+        return path, info
+
+    def render(self, project, out_wav, *, timeout=120):
+        """Render the project's song to `out_wav` offline with `h2cli` (no window, no audio device, any tempo)."""
+        if not self._which("h2cli"):
+            raise RuntimeError("h2cli is not installed (it ships with hydrogen)")
+        os.makedirs(self.dir, exist_ok=True)
+        if not os.path.isfile(self.conf):  # h2cli rewrites the config it is given: always the bridge's copy
+            patch_config(self.base_conf or (OWNER_CONF if os.path.isfile(OWNER_CONF) else DEFAULT_CONF), self.conf,
+                         osc_port=self.want_port or DEFAULT_PORT)
+        path, _ = self._write_song(project)
+        p = subprocess.run(["h2cli", "-s", path, "-o", out_wav, "--config", self.conf, "--user-data", self.userdata,
+                            "-L", os.path.join(self.dir, "h2cli.log")], capture_output=True, text=True, timeout=timeout,
+                           env=dict(self._env, QT_QPA_PLATFORM="offscreen"))
+        if p.returncode != 0 or not os.path.isfile(out_wav):
+            raise RuntimeError(f"h2cli failed (exit {p.returncode}): {(p.stdout + p.stderr)[-300:]}")
+        return out_wav
+
+    def push(self, project):
+        """Write the song for `project` (kit + pattern + tempo) and make Hydrogen open it again."""
+        if not self._running():
+            self._ensure_running()
+        path, info = self._write_song(project)
         was_playing = self.playing
         self.osc.send("/Hydrogen/STOP")
         self.osc.send("/Hydrogen/OPEN_SONG", os.path.abspath(path))
@@ -197,9 +218,11 @@ class HydrogenBridge:
     def _attachable(self):
         """(pid, port) of a bridge Hydrogen left running by an earlier process, if it is still ours and alive."""
         try:
-            pid, port = open(self._pidfile()).read().split()
+            with open(self._pidfile()) as f:
+                pid, port = f.read().split()
             pid, port = int(pid), int(port)
-            cmd = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().split(b"\0")
         except (OSError, ValueError):
             return None
         return (pid, port) if self.conf.encode() in cmd else None
@@ -244,8 +267,9 @@ class HydrogenBridge:
             if self.proc.poll() is not None:
                 raise RuntimeError(f"Hydrogen exited at start (code {self.proc.returncode}); see {self.log}")
             try:
-                if "Osc server started" in open(self.log, errors="replace").read():
-                    return
+                with open(self.log, errors="replace") as f:
+                    if "Osc server started" in f.read():
+                        return
             except OSError:
                 pass
             self._sleep(0.1)
