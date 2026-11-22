@@ -181,6 +181,49 @@ class Station(unittest.TestCase):
         self.assertNotEqual(page.evaluate("getComputedStyle(document.activeElement).outlineStyle"), "none")
         self.assertEqual(errors, [])
 
+    def test_platter_scrub_stepgrid_keyboard_and_knobs(self):
+        page, errors = self.open_song("?noauto&vox=off")
+        # dragging the record scrubs the song: 3 o'clock is a quarter of the way through
+        box = page.locator(".plat .vin").bounding_box()
+        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        dur = page.evaluate(f"{S}.meta.duration_s")
+        page.mouse.move(cx, cy - box["height"] / 3)
+        page.mouse.down()
+        page.mouse.move(cx + box["width"] / 3, cy, steps=6)
+        page.mouse.up()
+        pos = page.evaluate(f"{S}.position()")
+        self.assertAlmostEqual(pos / dur, 0.25, delta=0.03)
+        # keyboard on the record: arrow right moves a bar
+        page.locator(".plat .vin").focus()
+        page.keyboard.press("ArrowRight")
+        self.assertGreater(page.evaluate(f"{S}.position()"), pos + 0.5)
+        # the step grid works from the keyboard: focus, move the cursor, Enter toggles
+        page.locator(".stepgrid").focus()
+        page.keyboard.press("ArrowRight")
+        page.keyboard.press("Enter")
+        events = self.store(page, "project.pattern.events")
+        self.assertEqual([(e["pad"], e["beat"]) for e in events], [(0, 0.25)])
+        page.keyboard.press("Enter")
+        self.assertEqual(self.store(page, "project.pattern.events"), [])
+        # knobs: arrow keys move TONE, double-click resets it
+        page.locator('[data-knob="tone"]').focus()
+        page.keyboard.press("ArrowUp")
+        self.assertGreater(self.store(page, "project.fx.tone"), 0)
+        page.locator('[data-knob="tone"]').dblclick()
+        self.assertEqual(self.store(page, "project.fx.tone"), 0)
+        # master volume knob drives the master gain
+        before = page.evaluate("window.choppad.audio.master.gain.value")
+        page.locator('[data-knob="vol"]').focus()
+        page.keyboard.press("ArrowDown")
+        self.assertLess(page.evaluate("window.choppad.audio.master.gain.value"), before)
+        # note variation changes the velocity of mouse hits
+        page.evaluate(f"() => {{ window.__v = []; {S}.on('hit', (e) => window.__v.push(e.detail.velocity)); }}")
+        page.locator(".nv").fill("64")
+        page.locator('.pad[data-pad="3"]').dispatch_event("pointerdown", {"pointerId": 1, "isPrimary": True})
+        page.wait_for_function("window.__v.length > 0")
+        self.assertAlmostEqual(page.evaluate("window.__v[0]"), 64 / 127, places=2)
+        self.assertEqual(errors, [])
+
     # ------------------------------------------------------------------ vox view
     def test_vox_view(self):
         page, errors = self.open_song("?noauto")   # no automatic drop, so the quality we ask for is the quality we measure

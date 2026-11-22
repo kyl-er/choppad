@@ -200,11 +200,13 @@ html[data-callouts="off"] [data-c]::after, html[data-callouts="off"] .legend { d
 .nvwrap input { writing-mode: vertical-lr; direction: rtl; width: 22px; flex: 1; margin: 0; min-height: 0; accent-color: var(--acc-b); } .nv-out { font: 10px var(--font-mono); }
 .right2 { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .vuzone { display: flex; flex-direction: column; gap: 6px; }
-.vus { display: grid; grid-template-columns: repeat(2, minmax(0, 150px)); gap: 8px; justify-content: space-between; }
+.vus { display: grid; grid-template-columns: minmax(0, 150px) minmax(64px, 1fr) minmax(0, 150px); gap: 8px; align-items: stretch; }
 .vu { border: 1px solid var(--vu-line); background: var(--vu-face); }
 .vu-svg { display: block; width: 100%; height: auto; } .vu-face { fill: var(--vu-face); stroke: var(--vu-line); stroke-width: 1.2; }
 .vu-tick { stroke: var(--vu-ink); stroke-width: .8; } .vu-tick.big { stroke-width: 1.5; } .vu-tick.hot { stroke: var(--acc-o); } .vu-arc { fill: none; stroke: var(--acc-o); stroke-width: 3; opacity: .85; }
 .vu-txt { font: 700 11px var(--font-mono); fill: var(--vu-ink); letter-spacing: .2em; } .vu-needle { stroke: var(--vu-needle); stroke-width: 1.4; stroke-linecap: round; } .vu-hub { fill: var(--vu-needle); }
+.vu-read { display: flex; flex-direction: column; justify-content: center; text-align: center; background: var(--lcd-bg); color: var(--lcd-ink); border: 1px solid var(--ink); font-family: var(--font-mono); padding: 3px; box-shadow: var(--lcd-shadow); }
+.vu-read small { font-size: 8.5px; letter-spacing: .08em; opacity: .85; } .vu-read b { font-size: 14px; line-height: 1.15; margin-bottom: 3px; white-space: nowrap; }
 .leds { display: flex; gap: 2px; } .leds i { flex: 1; height: 7px; background: var(--led-off); } .leds i.g { background: var(--led-g); } .leds i.y { background: var(--acc-b); } .leds i.r { background: var(--acc-o); }
 .transport { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
 .tkey { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 3px 2px; min-width: 0; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); }
@@ -276,13 +278,13 @@ html[data-callouts="off"] [data-c]::after, html[data-callouts="off"] .legend { d
 
 /* ---------- phone pad mode (?mode=pad) ---------- */
 html[data-ui="pad"], html[data-ui="pad"] body { height: 100%; overflow: hidden; overscroll-behavior: none; }
-html[data-ui="pad"] body { background-image: none; }
-.phone { position: fixed; inset: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 12px; padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: var(--paper); touch-action: none; -webkit-user-select: none; user-select: none; }
+html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, transparent 1px), linear-gradient(90deg, var(--faint) 1px, transparent 1px); background-size: 20px 20px; }
+.phone { position: fixed; inset: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 12px; padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); background: color-mix(in srgb, var(--paper) 70%, transparent); touch-action: none; -webkit-user-select: none; user-select: none; }
 .ph-hd { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--ink); padding-bottom: 6px; min-width: 0; } .ph-title { flex: 1; font: 700 13px var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } .ph-bank { font: 600 11px var(--font-mono); white-space: nowrap; }
-.ph-pads { width: min(100%, 100vh - 190px); max-height: 100%; aspect-ratio: 1; margin: auto; gap: 10px; align-self: center; justify-self: center; }
+.ph-pads { width: min(100%, calc(100vh - 190px)); aspect-ratio: 1; margin: auto; gap: 10px; align-self: center; justify-self: center; min-width: 0; }
 .ph-pads .pad { box-shadow: 4px 4px 0 var(--ink); } .ph-pads .pad-label { font-size: clamp(16px, 5vw, 26px); } .ph-pads .pad-time { font-size: 11px; } .ph-pads .pad-no { font-size: 11px; left: 7px; top: 5px; }
-.ph-keys { display: flex; gap: 8px; align-items: center; justify-content: space-between; } .ph-banks { display: flex; gap: 8px; flex: 1; justify-content: center; }
-.ph-keys .bkey { min-width: 48px; height: 52px; font-size: 16px; } .ph-keys .tkey { min-width: 72px; height: 52px; }
+.ph-keys { display: flex; gap: 6px; align-items: center; justify-content: space-between; min-width: 0; } .ph-banks { display: flex; gap: 6px; flex: 1; justify-content: center; min-width: 0; }
+.ph-keys .bkey { min-width: 44px; height: 52px; font-size: 16px; padding: 0 4px; } .ph-keys .bkey.nav { min-width: 34px; } .ph-keys .tkey { min-width: 64px; height: 52px; } .ph-banks .bkey { flex: 1; }
 @media (orientation: landscape) and (max-height: 600px) {
   .phone { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); }
   .ph-hd { grid-column: 1 / -1; } .ph-pads { width: auto; height: 100%; grid-column: 1; }

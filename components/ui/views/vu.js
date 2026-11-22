@@ -9,7 +9,7 @@ const scale = (db) => clamp((db + 36) / 36, 0, 1.15);        // -36 dB .. 0 dB a
 export function mount(root, session, env) {
   const d = createDisposer();
   const analyser = env.audio.analyser;
-  root.innerHTML = `<div class="vus" data-c="10"><div class="vu" data-vu="VU" role="img" aria-label="VU meter, average level"></div><div class="vu" data-vu="PK" role="img" aria-label="Peak meter"></div></div>
+  root.innerHTML = `<div class="vus" data-c="10"><div class="vu" data-vu="VU" role="img" aria-label="VU meter, average level"></div><div class="vu-read" aria-hidden="true"><small>PEAK dBFS</small><b data-pk>-∞</b><small>RMS dBFS</small><b data-rms>-∞</b></div><div class="vu" data-vu="PK" role="img" aria-label="Peak meter"></div></div>
     <div data-leds class="leds" role="img" aria-label="Level ladder"></div>`;
   const needles = {};
   for (const el of root.querySelectorAll("[data-vu]")) {
@@ -28,12 +28,15 @@ export function mount(root, session, env) {
   const leds = root.querySelector("[data-leds]");
   for (let i = 0; i < 14; i++) leds.append(document.createElement("i"));
   const buf = new Float32Array(analyser.fftSize);
-  let vu = 0, pk = 0, hold = 0, holdT = 0, shown = "";
+  const pkOut = root.querySelector("[data-pk]"), rmsOut = root.querySelector("[data-rms]");
+  let vu = 0, pk = 0, hold = 0, holdT = 0, shown = "", readT = 0, peakDb = -Infinity;
   d.add(env.ticker.add((now, dt) => {
     analyser.getFloatTimeDomainData(buf);
     let peak = 0, sum = 0;
     for (let i = 0; i < buf.length; i++) { const a = Math.abs(buf[i]); if (a > peak) peak = a; sum += buf[i] * buf[i]; }
     const rms = Math.sqrt(sum / buf.length);
+    if (dbOf(peak) > peakDb || now - holdT > 900) peakDb = dbOf(peak);
+    if (now - readT > 120) { readT = now; pkOut.textContent = peakDb > -80 ? peakDb.toFixed(1) : "-∞"; rmsOut.textContent = rms > 1e-4 ? dbOf(rms).toFixed(1) : "-∞"; }
     const tv = scale(dbOf(rms) + 3), tp = scale(dbOf(peak));
     vu += (tv - vu) * Math.min(1, dt * (tv > vu ? 7 : 3));            // VU ballistics: ~300 ms
     pk += (tp - pk) * Math.min(1, dt * (tp > pk ? 40 : 5));

@@ -33,6 +33,7 @@ export function mount(root, session, env) {
   let THREE = null, renderer = null, canvas2d = null, loadingThree = null;
   let scene, cam, points, mat, line, gridLines, tex;
   const hist = { nx: 0, nz: 0, data: null, head: 0, acc: 0, frac: 0 };
+  let lostT = 0;
   let W = 10, H = 10, dirty = true, frames = 0, kick = 0, pulse = 0, lowPrev = 0;
   const freq = new Uint8Array(analyser.frequencyBinCount);
   let cols = [];     // per column: [lo bin, hi bin, centre bin (float)]
@@ -66,7 +67,7 @@ export function mount(root, session, env) {
       else { b = 0; for (let k = lo; k <= hi; k++) if (freq[k] > b) b = freq[k]; }
       const x = i / nx;
       // dB-ish floor, then a gentle treble lift (music spectra fall ~4 dB/oct) so the right side is not flat
-      const v = Math.pow(clamp((b - 70) / 170, 0, 1.15), 1.15) * (1 + 0.9 * x);
+      const v = Math.pow(clamp((b - 55) / 150, 0, 1.15), 1.1) * (1 + 0.9 * x);
       hist.data[base + i] = v;
       if (i < nx * 0.18) low += v;
     }
@@ -89,7 +90,9 @@ export function mount(root, session, env) {
       renderer.setClearColor(0x000000, 0);
       renderer.domElement.setAttribute("aria-hidden", "true");
       holder.append(renderer.domElement);
-      renderer.domElement.addEventListener("webglcontextlost", (e) => { e.preventDefault(); useFallback(); });
+      // a lost context (GPU reset, driver hiccup) usually comes back: wait for it, fall back to 2D only if it does not
+      renderer.domElement.addEventListener("webglcontextlost", (e) => { e.preventDefault(); clearTimeout(lostT); lostT = setTimeout(useFallback, 2500); });
+      renderer.domElement.addEventListener("webglcontextrestored", () => { clearTimeout(lostT); dirty = true; });
     } catch { renderer = null; }
   }
   function useFallback() {
@@ -142,7 +145,7 @@ export function mount(root, session, env) {
       transparent: true, depthTest: false, depthWrite: false, blending: theme.add ? THREE.AdditiveBlending : THREE.NormalBlending,
       uniforms: {
         uTex: { value: tex }, uHead: { value: 0 }, uNX: { value: cfg.nx }, uNZ: { value: cfg.nz }, uFrac: { value: 0 }, uSize: { value: 3.0 * cfg.size }, uPR: { value: cfg.pr },
-        uKick: { value: 0 }, uPulse: { value: 0 }, uSpanX: { value: 4.4 }, uSpanZ: { value: 3.6 }, uHeight: { value: 2.0 },
+        uKick: { value: 0 }, uPulse: { value: 0 }, uSpanX: { value: 4.4 }, uSpanZ: { value: 3.6 }, uHeight: { value: 1.75 },
         uRip: { value: ripples.map(() => new THREE.Vector4(0.5, 0.1, 9, 0)) }, uRipCol: { value: ripples.map(() => new THREE.Vector3(1, 1, 1)) },
         uInk: { value: col3(theme.ink) }, uHot: { value: col3(theme.hot) }, uSec: { value: col3(theme.blue) }, uAlpha: { value: theme.alpha },
       },
@@ -234,7 +237,7 @@ export function mount(root, session, env) {
       u.uHead.value = hist.head; u.uFrac.value = hist.frac; u.uKick.value = kick; u.uPulse.value = pulse;
       ripples.forEach((r, i) => { u.uRip.value[i].set(r.x, r.z, r.age, r.age < 3 ? r.amp : 0); u.uRipCol.value[i].set(...rgb(r.c)); });
       const pa = line.geometry.attributes.position, base = hist.head * hist.nx;
-      for (let i = 0; i < hist.nx; i++) pa.setXYZ(i, (i / (hist.nx - 1) - 0.5) * 4.4, Math.pow(hist.data[base + i], 0.72) * 2.0, 0);
+      for (let i = 0; i < hist.nx; i++) pa.setXYZ(i, (i / (hist.nx - 1) - 0.5) * 4.4, Math.pow(hist.data[base + i], 0.72) * 1.75, 0);
       pa.needsUpdate = true;
       cam.position.set(0, 1.5 + kick * 0.025, 3.5); cam.lookAt(0, 0.55, -1.8);
       renderer.render(scene, cam);
@@ -250,7 +253,7 @@ export function mount(root, session, env) {
       const row = (hist.head - iz + hist.nz * 2) % hist.nz, zf = (iz + hist.frac) / (hist.nz - 1), Z = -zf * 3.6, k = f / (3.5 - Z);
       const fade = 1 - clamp((zf - 0.55) / 0.45, 0, 1);
       for (let ix = 0; ix < hist.nx; ix++) {
-        const h = Math.pow(hist.data[row * hist.nx + ix], 0.72), X = (ix / (hist.nx - 1) - 0.5) * 4.4, Y = h * 2.0 * (1 - 0.35 * zf);
+        const h = Math.pow(hist.data[row * hist.nx + ix], 0.72), X = (ix / (hist.nx - 1) - 0.5) * 4.4, Y = h * 1.75 * (1 - 0.35 * zf);
         const px = W / 2 + X * k, py = H * 0.86 - Y * k * 0.42 - zf * H * 0.26;
         g.fillStyle = h > 0.72 ? theme.hot : h > 0.3 ? theme.blue : theme.ink;
         g.globalAlpha = clamp((theme.alpha + h * 0.9) * fade, 0, 1);
@@ -299,6 +302,7 @@ export function mount(root, session, env) {
   return {
     destroy() {
       d.run();
+      clearTimeout(lostT);
       try { tex?.dispose(); mat?.dispose(); points?.geometry.dispose(); line?.geometry.dispose(); gridLines?.geometry.dispose(); renderer?.dispose(); renderer?.forceContextLoss?.(); } catch { /* already gone */ }
       root.innerHTML = "";
     },
