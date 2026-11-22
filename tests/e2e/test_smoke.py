@@ -114,7 +114,7 @@ class SongScreenSmoke(unittest.TestCase):
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "Failed to load resource" not in m.text else None)
-        page.on("response", lambda r: errors.append(f"{r.status} {r.request.method} {r.url} {(r.request.post_data or \'\')[:400]}") if r.status >= 400 and not r.url.endswith(self.OPTIONAL_404) else None)  # every failed request, with its body, so a flake names itself
+        page.on("response", lambda r: errors.append(f"{r.status} {r.request.method} {r.url} {(r.request.post_data or "")[:400]}") if r.status >= 400 and not r.url.endswith(self.OPTIONAL_404) else None)  # every failed request, with its body, so a flake names itself
         page.goto(f"{self.base}/#/song/{self.sid}")
         page.wait_for_function("window.choppad?.song?.session", timeout=30000)
         page.wait_for_selector(".pad .pad-label:not(:empty)")

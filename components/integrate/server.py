@@ -75,7 +75,7 @@ def compute_peaks(media_dir: str, points: int = PEAK_POINTS) -> dict:
     peaks = [float(mono[a:b].max()) if b > a else 0.0 for a, b in zip(edges, edges[1:])]
     top = max(peaks) or 1.0
     doc = {"duration_s": n / sr, "peaks": [round(p / top, 4) for p in peaks]}
-    json.dump(doc, open(path, "w"))
+    write_json_atomic(path, doc)
     return doc
 
 

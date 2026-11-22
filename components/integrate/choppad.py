@@ -52,6 +52,23 @@ STATIC_MIME = {
 }
 
 
+
+def _write_json(path, doc, indent=None):
+    """Write JSON through a temp file and a rename, so a request that reads the file while it is being
+    rewritten (a regrid racing a pad edit) never sees half of it."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(doc, f, indent=indent)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
 def run_pipeline(source: str, media_root: str, grid: str = "1/4", meter: str | None = None,
                  bpm: float | None = None, on_stage=None, **ingest_kw) -> str:
     stage = on_stage or (lambda name, progress: None)
@@ -62,14 +79,12 @@ def run_pipeline(source: str, media_root: str, grid: str = "1/4", meter: str | N
     audio_path = os.path.join(media_dir, "audio.wav")
     analysis = _analyze(audio_path, meter=meter, bpm=bpm)
     analysis_path = os.path.join(media_dir, "analysis.json")
-    with open(analysis_path, "w") as f:
-        json.dump(analysis, f, indent=2)
+    _write_json(analysis_path, analysis, indent=2)
 
     stage("chopping", 0.85)
     chops = {**_chop(analysis, grid=grid, meter=meter), "mode": "grid"}
     chops_path = os.path.join(media_dir, "chops.json")
-    with open(chops_path, "w") as f:
-        json.dump(chops, f, indent=2)
+    _write_json(chops_path, chops, indent=2)
 
     return media_dir
 
@@ -81,8 +96,7 @@ def _onsets(media_dir: str) -> dict:
     if os.path.isfile(path) and os.path.getmtime(path) >= os.path.getmtime(audio):
         return json.load(open(path))
     table = _detect_onsets(audio)
-    with open(path, "w") as f:
-        json.dump(table, f)
+    _write_json(path, table)
     return table
 
 
@@ -97,16 +111,14 @@ def regrid(media_dir: str, *, grid="1/4", meter=None, beat_offset=0, bpm_mult=1,
         chops = {**_chop(analysis, grid=grid, meter=meter, beat_offset=beat_offset, bpm_mult=bpm_mult), "mode": "grid"}
     else:
         raise ValueError("mode must be grid or transient")
-    with open(os.path.join(media_dir, "chops.json"), "w") as f:
-        json.dump(chops, f, indent=2)
+    _write_json(os.path.join(media_dir, "chops.json"), chops, indent=2)
     return chops
 
 
 def reanalyze(media_dir: str, *, bpm=None, meter=None) -> tuple[dict, dict]:
     """Re-run rhythm with a forced tempo/meter (e.g. from tap tempo), then chop with defaults."""
     analysis = _analyze(os.path.join(media_dir, "audio.wav"), meter=meter, bpm=bpm)
-    with open(os.path.join(media_dir, "analysis.json"), "w") as f:
-        json.dump(analysis, f, indent=2)
+    _write_json(os.path.join(media_dir, "analysis.json"), analysis, indent=2)
     return analysis, regrid(media_dir, meter=meter)
 
 
@@ -155,8 +167,7 @@ def _key(media_dir, body):
         return analysis["key"]
     from choppad_key import detect_key_file
     analysis["key"] = detect_key_file(os.path.join(media_dir, "audio.wav"))
-    with open(path, "w") as f:
-        json.dump(analysis, f, indent=2)
+    _write_json(path, analysis, indent=2)
     return analysis["key"]
 
 
