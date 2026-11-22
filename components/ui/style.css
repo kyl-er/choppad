@@ -229,6 +229,8 @@ html[data-callouts="off"] [data-c]::after, html[data-callouts="off"] .legend { d
 .stepgrid { --steps: 32; flex: 1; min-height: 0; display: grid; grid-template-columns: 38px repeat(var(--steps), minmax(0, 1fr)); grid-template-rows: repeat(16, minmax(0, 1fr)); gap: 1px; user-select: none; }
 .stepgrid:focus-visible { outline-offset: 4px; }
 .row-name { font: 600 8.5px/1 var(--font-mono); text-align: right; padding: 0 5px 0 0; display: flex; align-items: center; justify-content: flex-end; min-height: 0; color: var(--ink); }
+/* on a 1000 px tall window a step row is under 8 px: keep the 16 row numbers from running into each other */
+@media (max-height: 1040px) { .row-name { font-size: 6.5px; line-height: .9; overflow: hidden; } }
 .row-name.empty { opacity: .4; } .row-name.selected { color: var(--acc-b); font-weight: 700; text-decoration: underline; }
 .stepgrid i { background: var(--sc-off); border: 1px solid var(--faint); min-height: 0; cursor: pointer; }
 .stepgrid i.beat { border-left-color: var(--hair); } .stepgrid i.bar { border-left: 2px solid var(--ink); }
@@ -340,7 +342,10 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 .pad-mg, .pad-tag { position: absolute; bottom: 2px; font: 700 8px/1 var(--font-mono); letter-spacing: .04em; padding: 1px 3px; pointer-events: none; }
 .pad-mg { left: 3px; border: 1px solid currentColor; } .pad-tag { right: 3px; background: var(--key-on); color: var(--key-on-ink); }
 .pad-mg[hidden], .pad-tag[hidden] { display: none; }
-.pad.tagged { padding-bottom: 14px; }
+/* a tagged or custom pad keeps the size of every other pad: its text shrinks, the pad never grows (a taller pad row squeezes the step grid) */
+.pad { overflow: hidden; min-height: 0; }
+.pad.tagged .pad-label, .pad.custom .pad-label, .pad.foreign .pad-label { font-size: 12px; }
+.pad.tagged .pad-time { font-size: 8.5px; line-height: 1.05; margin-bottom: 9px; }
 .pad.handstretched .pad-time::before { content: "≈ "; }
 .pad.resampled .pad-tag { background: transparent; color: inherit; border: 1px solid currentColor; }
 .pad.hit .pad-tag { background: var(--on-o); color: var(--acc-o); }
