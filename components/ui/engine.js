@@ -50,7 +50,9 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   let _mode = mode;
   let _choke = choke;
   let _fullLevel = fullLevel;
-  const normGain = normalizationGain(buffer);
+  let _buffer = buffer;                 // the open song's audio; swapped by setBuffer when a mega bank changes its source song
+  let _bankCount = null;                // number of banks when it is more than the chop table's (kept pads on later banks)
+  let normGain = normalizationGain(buffer);
   const activeVoices = [];
   let pendingTarget = null;
   let cancelPause = null;
@@ -90,9 +92,9 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   let revBuffer = null;
   function reversedBuffer() {
     if (!revBuffer) {
-      revBuffer = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
-      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-        const src = buffer.getChannelData(ch), dst = revBuffer.getChannelData(ch), n = src.length;
+      revBuffer = ctx.createBuffer(_buffer.numberOfChannels, _buffer.length, _buffer.sampleRate);
+      for (let ch = 0; ch < _buffer.numberOfChannels; ch++) {
+        const src = _buffer.getChannelData(ch), dst = revBuffer.getChannelData(ch), n = src.length;
         for (let i = 0; i < n; i++) dst[i] = src[n - 1 - i];
       }
     }
@@ -103,7 +105,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   const padBuffers = new Map();
   const reversedCache = new WeakMap();
   const reversedOf = (buf) => {
-    if (buf === buffer) return reversedBuffer();
+    if (buf === _buffer) return reversedBuffer();
     let r = reversedCache.get(buf);
     if (!r) {
       r = ctx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
@@ -124,6 +126,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
     if (o.stretch) out.stretch = o.stretch;
     if (o.src) out.src = o.src;
     if (o.stem) out.stem = o.stem;
+    if (o.kept) { out.kept = true; if (o.from) out.from = o.from; }   // CHOP-13: the pad owns its audio and its sound
     return out;
   }
 
@@ -145,14 +148,15 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   function trigger(pad, velocity = 1, when = null, bank = _bank, extra = null) {
     const chop = sliceFor(bank, pad);
     if (!chop) return;
-    const P = padParams[pad];
+    if (chop.kept && !padBuffers.has(`${bank}:${pad}`)) return;   // its sample is not loaded yet: silence, never the song's audio
+    const P = overrides.get(`${bank}:${pad}`)?.params ?? padParams[pad];   // a kept pad has its own sound (CHOP-13)
     const mode = P.mode ?? _mode;
     const now = when ?? ctx.currentTime;
     if (_choke) chokeAll(now);
     else if (P.muteGroup > 0) chokeAll(now, P.muteGroup);   // a pad cuts the voices of its own mute group
 
     const alt = padBuffers.get(`${bank}:${pad}`);   // stretched slice or another song's audio, else the main song
-    const srcBuf = alt ? alt.buffer : buffer;
+    const srcBuf = alt ? alt.buffer : _buffer;
     const sliceBuf = alt && !alt.whole;             // the buffer is exactly the slice: play it from 0
     const xPitch = Number.isFinite(extra?.pitch) ? extra.pitch : 0;
     const rate = Math.pow(2, (P.pitch + xPitch) / 12);
@@ -230,7 +234,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
 
   function setBank(n) {
     if (n < 0) n = 0;
-    if (n >= _chops.banks.length) n = _bank; // clamp stays at current
+    if (n >= (_bankCount ?? _chops.banks.length)) n = _bank; // clamp stays at current
     _bank = n;
   }
 
@@ -258,6 +262,11 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   return {
     trigger, release, setBank,
     get bank() { return _bank; },
+    /** CHOP-13: swap the main buffer (the open song's audio) in one step; pads that play their own buffers are not touched. */
+    setBuffer(buf) { _buffer = buf; normGain = normalizationGain(buf); revBuffer = null; },
+    get buffer() { return _buffer; },
+    /** CHOP-13: number of banks (>= the chop table's when kept pads sit on later banks); null = the chop table's. */
+    setBankCount(n) { _bankCount = n; },
     setChops, setMode, setChoke, setFullLevel, stopAll,
     /** Merge sound params into a pad: {gainDb, pitch, attack, release, reverse, mode|null}. */
     setPadParams(pad, partial) { Object.assign(padParams[pad], partial); },
@@ -272,6 +281,11 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
         if (slice.stretch) o.stretch = slice.stretch;
         if (slice.src) o.src = slice.src;       // W3b: a rendered file of a song (resample) ...
         if (slice.stem) o.stem = slice.stem;    // ... or a stem of it: both are whole files played from the slice start
+        if (slice.kept) {                       // CHOP-13: a kept pad's own sound, merged with the defaults here, not on the trigger path
+          o.kept = true;
+          if (slice.from) o.from = slice.from;
+          if (slice.params) o.params = { ...DEFAULT_PAD, ...slice.params };
+        }
         overrides.set(key, o);
         const alt = padBuffers.get(key);
         if (alt && ((alt.whole && !slice.song && !slice.src && !slice.stem) || (!alt.whole && !slice.stretch))) padBuffers.delete(key);

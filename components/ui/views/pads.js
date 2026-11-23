@@ -1,7 +1,7 @@
 // 4x4 pads (pad 1 bottom-left, MPC style), bank keys A-D with group arrows, the bank label and the note-variation slider.
 // Also the pad / bank / panic events from the keyboard and MIDI input. createPadGrid() is shared with the phone pad mode.
 import { cellToPad } from "/layout.js";
-import { PADS, sixteenLevel } from "/actions.js";
+import { PADS, bankCount, sixteenLevel } from "/actions.js";
 import { createDisposer, fmt } from "./util.js";
 
 /** Builds the 16 pad buttons inside `grid` and keeps them drawn from the store. velocity() gives the hit velocity. */
@@ -51,13 +51,14 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}
       el.classList.toggle("handstretched", !!o?.stretch && o.stretch.fit === undefined);
       el.classList.toggle("resampled", !!o?.src);
       el.classList.toggle("levels", !!sx);
+      el.classList.toggle("kept", !!o?.kept);                                // CHOP-13: owns its audio and its sound
       el.classList.toggle("tagged", !!mg || !!o?.src || !!o?.stem || o?.stretch?.fit !== undefined);   // room under the label for the badges
       const mgEl = el.querySelector(".pad-mg"), tag = el.querySelector(".pad-tag");
       const mgText = mg ? `M${mg}` : "";
       if (mgEl.textContent !== mgText) { mgEl.textContent = mgText; mgEl.hidden = !mg; mgEl.title = mg ? `Mute group ${mg}` : ""; }
-      const tagText = o?.src ? "RS" : o?.stem ? STEM_TAG[o.stem] ?? "STM" : o?.stretch?.fit !== undefined ? "FIT" : "";
-      if (tag.textContent !== tagText) { tag.textContent = tagText; tag.hidden = !tagText; tag.title = o?.src ? "Resampled sound" : o?.stem ? `Plays the ${o.stem} stem` : tagText ? `Fitted to the project tempo (${o.stretch.fit} BPM)` : ""; }
-      el.setAttribute("aria-label", `Pad ${p + 1}${mg ? `, mute group ${mg}` : ""}${o?.src ? ", resample" : ""}${o?.stem ? `, ${o.stem} stem` : ""}${o?.stretch?.fit !== undefined ? ", fitted to the project tempo" : o?.stretch ? ", stretched by hand" : ""}${sx ? `, level ${fmtLevel(sx.mode, sixteenLevel(sx.mode, p)).join(" ")}` : ""}`);
+      const tagText = o?.kept ? "KEPT" : o?.src ? "RS" : o?.stem ? STEM_TAG[o.stem] ?? "STM" : o?.stretch?.fit !== undefined ? "FIT" : "";
+      if (tag.textContent !== tagText) { tag.textContent = tagText; tag.hidden = !tagText; tag.title = o?.kept ? `Kept: this pad owns its audio${o.from ? ` (from ${o.from.song})` : ""} and its sound` : o?.src ? "Resampled sound" : o?.stem ? `Plays the ${o.stem} stem` : tagText ? `Fitted to the project tempo (${o.stretch.fit} BPM)` : ""; }
+      el.setAttribute("aria-label", `Pad ${p + 1}${mg ? `, mute group ${mg}` : ""}${o?.kept ? ", kept" : o?.src ? ", resample" : ""}${o?.stem ? `, ${o.stem} stem` : ""}${o?.stretch?.fit !== undefined ? ", fitted to the project tempo" : o?.stretch ? ", stretched by hand" : ""}${sx ? `, level ${fmtLevel(sx.mode, sixteenLevel(sx.mode, p)).join(" ")}` : ""}`);
       el.classList.toggle("empty", !c);
       el.classList.toggle("custom", !!c?.custom);
       el.classList.toggle("stretched", !!c?.stretch);
@@ -117,8 +118,8 @@ export function mount(root, session, env) {
     if (b) session.setBank(Math.floor(st().bank / 4) * 4 + Number(b.dataset.bank), true);
   });
   function renderBanks() {
-    const { bank, chops } = st();
-    const n = chops.banks.length, g0 = Math.floor(bank / 4) * 4;
+    const { bank, chops, project } = st();
+    const n = bankCount(project, chops), g0 = Math.floor(bank / 4) * 4;
     banksEl.querySelectorAll("[data-bank]").forEach((b) => {
       const i = Number(b.dataset.bank), real = g0 + i;
       b.classList.toggle("on", real === bank);
@@ -132,7 +133,7 @@ export function mount(root, session, env) {
     const a = chops.chops[ids[0]], z = chops.chops[ids.at(-1)];
     $(".bank-label").textContent = `Bank ${bank + 1}/${n} · bars ${a ? a.bar + 1 : "—"}–${z ? z.bar + 1 : "—"}`;
   }
-  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank) renderBanks(); }));
+  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.project.overrides !== prev.project.overrides) renderBanks(); }));
   renderBanks();
 
   // 16 LEVELS key: on = the selected pad is the source, the 16 pads become its levels (mode: env.levelMode, set on the LCD)

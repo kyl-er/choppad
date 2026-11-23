@@ -17,6 +17,7 @@
 // `ctx` = { session, st(), dispatch, setting(params), fxSet(params), toast, env, out, refresh(), tapState }.
 import { PRESETS, DEFAULT_FX } from "/fx.js";
 import { esc, fmt } from "./util.js";
+import { bankCount } from "/actions.js";
 import { moreSubpages } from "./lcdpages2.js";
 
 export const num = (label, o) => ({ t: "n", label, ...o });
@@ -43,8 +44,9 @@ export function buildPages(ctx) {
   const { session, st, dispatch, setting, env, out } = ctx;
   const { meta, engine, seq } = session;
   const base = () => meta.title.replace(/[^\w-]+/g, "_").slice(0, 40);
-  const P = () => st().project.pads[st().selected];
-  const padSet = (params) => dispatch({ type: "pad.set", pad: st().selected, params });
+  // a kept pad's sound is its own (contracts §15): read and write it with the bank, so the reducer reaches the override
+  const P = () => { const { project, bank, selected } = st(); const o = project.overrides[`${bank}:${selected}`]; return o?.kept && o.params ? o.params : project.pads[selected]; };
+  const padSet = (params) => dispatch({ type: "pad.set", pad: st().selected, bank: st().bank, params });
   const fxNum = (k, label, min, max, step, f) => num(label, { name: k, min, max, step, get: () => st().project.fx[k], set: (v) => ctx.fxSet({ [k]: v }),
     fmt: f ?? ((v) => (v < 0 ? "" : "") + sgn(+v.toFixed(2))) });
   const fxText = {
@@ -95,7 +97,7 @@ export function buildPages(ctx) {
   const padInfo = () => {
     const { bank, selected } = st();
     const c = engine.getSlice(bank, selected);
-    return `PAD ${selected + 1} · ${c ? `${c.custom ? "CUSTOM SLICE" : "BAR " + session.chopLabel(c)} · ${fmt(c.start)}–${fmt(c.end)}${c.stretch ? ` · STRETCH ×${c.stretch.ratio.toFixed(2)}` : ""}${c.song ? " · KIT PAD" : ""}` : "EMPTY"}`;
+    return `PAD ${selected + 1} · ${c ? `${c.custom ? "CUSTOM SLICE" : "BAR " + session.chopLabel(c)} · ${fmt(c.start)}–${fmt(c.end)}${c.stretch ? ` · STRETCH ×${c.stretch.ratio.toFixed(2)}` : ""}${c.song ? " · KIT PAD" : ""}${c.kept ? " · KEPT (OWN SOUND)" : ""}` : "EMPTY"}`;
   };
   const keyText = (k) => (k ? `${k.tonic} ${k.mode === "minor" ? "min" : "maj"}` : "—");
 
@@ -120,7 +122,7 @@ export function buildPages(ctx) {
           opts: [{ v: "", l: "global" }, { v: "oneshot", l: "1-shot" }, { v: "gate", l: "gate" }, { v: "playthrough", l: "thru" }] }),
       ] },
       { name: "slice", info: { cls: "insp-title", html: padInfo }, fields: () => [
-        act("Grab", { cls: "grab", val: "playhead", fn: () => {
+        act("Grab", { cls: "grab", val: "playhead", disabled: () => !!engine.getSlice(st().bank, st().selected)?.kept, fn: () => {
           const { bank, selected, chops } = st();
           const t = session.position(), c = engine.getSlice(bank, selected);
           const len = c ? c.end - c.start : 60 / chops.bpm;
@@ -128,7 +130,7 @@ export function buildPages(ctx) {
         } }),
         act("Reset slice", { cls: "unslice", fn: () => dispatch({ type: "slice.clear", bank: st().bank, pad: st().selected }) }),
         act("Copy all", { cls: "all", val: "sound → 16", fn: () => dispatch({ type: "pad.copyToAll", pad: st().selected }) }),
-        act("Reset snd", { cls: "resetpad", fn: () => dispatch({ type: "pad.reset", pad: st().selected }) }),
+        act("Reset snd", { cls: "resetpad", fn: () => dispatch({ type: "pad.reset", pad: st().selected, bank: st().bank }) }),
         blank(), blank(),
       ] },
       { name: "global", info: { html: () => "APPLIES TO ALL PADS UNLESS A PAD HAS ITS OWN MODE" }, fields: () => [
@@ -273,7 +275,7 @@ export function buildPages(ctx) {
     const el = document.createElement("div");
     el.className = "lcd-main";
     const analysis = session.analysis;
-    el.innerHTML = `<div class="lcd-title">${esc(meta.title)}</div>
+    el.innerHTML = `<div class="lcd-title"></div>
       <div class="lcd-big"><div><small>BPM</small><b class="bpm"></b></div><div><small>METER</small><b class="meter"></b></div>
         <div><small>KEY</small><b class="key"></b></div><div><small>BAR</small><b class="pos">1.1</b></div><div><small>TIME</small><b class="clock">0:00.0</b></div></div>
       <div class="lcd-line bankline"></div>
@@ -282,9 +284,12 @@ export function buildPages(ctx) {
     const q = (s) => el.querySelector(s);
     const set = (node, v) => { if (node.textContent !== v) node.textContent = v; };
     const bpm = q(".bpm"), meter = q(".meter"), key = q(".key"), pos = q(".pos"), clock = q(".clock"), line = q(".bankline"), status = q(".statusline"), pat = q(".lcd-pat");
+    const title = q(".lcd-title"), bpmLabel = q(".lcd-big small");
     const update = () => {
       const { chops, bank, selected, project } = st();
-      const T = session.tempoBpm;
+      const T = session.tempoBpm, user = project.tempo?.bpm != null;
+      set(title, meta.title);   // meta is the open song's, replaced in place when the source changes
+      set(bpmLabel, user ? "USER BPM" : "SONG BPM");
       set(bpm, T.toFixed(1));
       set(meter, `${chops.beats_per_bar}/4`);
       const k = analysis.key;
@@ -298,11 +303,11 @@ export function buildPages(ctx) {
       const a = chops.chops[ids[0]], b = chops.chops[ids.at(-1)];
       const sec = st().sections.find((s) => s.start_s <= t && t < s.end_s);
       const sc = engine.getSlice(bank, selected);
-      const text = `BANK ${bank + 1}/${chops.banks.length} · BARS ${a ? a.bar + 1 : "—"}–${b ? b.bar + 1 : "—"}${sec ? " · " + sec.label.toUpperCase() : ""} · PAD ${selected + 1}${sc ? "=" + (sc.custom ? "★" : session.chopLabel(sc)) : ""}${seq.state.recording ? " · REC" : ""}`;
+      const text = `BANK ${bank + 1}/${bankCount(project, chops)} · BARS ${a ? a.bar + 1 : "—"}–${b ? b.bar + 1 : "—"}${sec ? " · " + sec.label.toUpperCase() : ""} · PAD ${selected + 1}${sc ? "=" + (sc.custom ? "★" : session.chopLabel(sc)) : ""}${seq.state.recording ? " · REC" : ""}`;
       if (line.textContent !== text) line.textContent = text;
       // what is different from the plain song: project tempo, 16 levels, a chain that is playing
       const bits = [];
-      if (Math.abs(T - chops.bpm) > 0.005) bits.push(`${T.toFixed(1)} BPM (SONG ${chops.bpm.toFixed(1)})`);
+      if (Math.abs(T - chops.bpm) > 0.005) bits.push(`${T.toFixed(1)} BPM (SONG ${chops.bpm.toFixed(1)})`);   // the user's tempo stays through a song change
       const sx = session.sixteen;
       if (sx) bits.push(`16 LEVELS: PAD ${sx.pad + 1} · ${sx.mode.toUpperCase()}`);
       const sg = project.song;

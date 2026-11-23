@@ -20,8 +20,9 @@ const setHtml = (el, html) => { if (el._h !== html) { el._h = html; el.innerHTML
 export function moreSubpages(ctx) {
   const { session, st, dispatch, out, env } = ctx;
   const { meta, engine, seq } = session;
-  const P = () => st().project.pads[st().selected];
-  const padSet = (params) => dispatch({ type: "pad.set", pad: st().selected, params });
+  // a kept pad's sound is its own (contracts §15): read and write it with the bank, so the reducer reaches the override
+  const P = () => { const { project, bank, selected } = st(); const o = project.overrides[`${bank}:${selected}`]; return o?.kept && o.params ? o.params : project.pads[selected]; };
+  const padSet = (params) => dispatch({ type: "pad.set", pad: st().selected, bank: st().bank, params });
   const base = () => meta.title.replace(/[^\w-]+/g, "_").slice(0, 40);
   const ov = (bank = st().bank, pad = st().selected) => st().project.overrides[`${bank}:${pad}`];
 
