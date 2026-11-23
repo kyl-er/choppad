@@ -288,6 +288,11 @@ media/_mega/<mid>/samples/<16hex>.wav     audio the mega bank owns (16-bit PCM)
 **Browser (step B).** The engine, sequencer and master bus live as long as a mega bank is open, not as long as a song: `session.setSource(song)`
 loads the next song's audio, video, peaks and analysis while the pattern and kept pads keep playing; kept pads play from their sample files.
 Routes: `#/mega/<mid>`; `#/song/<id>` opens that song's mega bank.
+**Hard requirement (neo, 2026-11-22: "i dont want it to completely refresh everytime we load up a song"):** choosing another song must not
+rebuild the page. No navigation or reload, the AudioContext, engine, sequencer and master bus objects stay the same instances, and the DOM
+nodes of everything that does not depend on the source (library, pads, LCD, transport, step grid, meters, vox view) are the same nodes
+before and after; only the source-dependent parts (video, waveform, section and bank strips, source figures in the LCD and header) are
+updated. A browser test must prove this by object and node identity, with a pattern playing across the switch.
 
 **UI (step C).** Library shows SONGS and DRUM PAD MEGA BANKS; the header names song → mega bank → drum pad bank. Choosing another song while the
 open mega bank has used pads asks: (a) new mega bank for that song, or (b) keep current drum pads and bring the song in. Kept pads are marked.
