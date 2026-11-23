@@ -3,7 +3,7 @@ title: choppad
 type: project
 status: production          # idea | active | production | paused | archived  (lifecycle is a field, never a move)
 goal: "Browser MPC sampler for YouTube songs, growing into an AI-controllable, DAW-connected workstation (v4: ChopPad Station)"
-next: "v4 feature-complete and green (13/13). WAITING on neo: try it (choppad --serve from the v4 checkout), phone acceptance with the Pixel (CHOP-9), then say when to merge v4 to master"
+next: "CHOP-13 drum pad mega banks built on v4 (steps A-D merged, 13/13 green). WAITING on neo: restart the :8960 server on this commit and try it; phone acceptance (CHOP-9); say when to merge v4 to master"
 kaneo: CHOP
 runs-as: "web :8960 (choppad --serve); launcher 04-Apps/media-tools/choppad"          # cli | daemon :port | web :port | mcp | none
 repo: ""
