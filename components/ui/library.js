@@ -6,7 +6,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const ago = (t) => {
   if (!Number.isFinite(t)) return "";
   const s = Math.max(0, Date.now() / 1000 - t);
-  if (s < 45) return "just now";
+  if (s < 45) return "now";
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return new Date(t * 1000).toISOString().slice(0, 10);

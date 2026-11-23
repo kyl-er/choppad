@@ -138,6 +138,7 @@ export function mount(root, session, env) {
     const ids = chops.banks[bank] ?? [];
     const a = chops.chops[ids[0]], z = chops.chops[ids.at(-1)];
     $(".bank-label").textContent = `Bank ${bank + 1}/${n} · bars ${a ? a.bar + 1 : "—"}–${z ? z.bar + 1 : "—"}`;
+    $(".bank-label").title = $(".bank-label").textContent;
   }
   d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.project.overrides !== prev.project.overrides) renderBanks(); }));
   renderBanks();
