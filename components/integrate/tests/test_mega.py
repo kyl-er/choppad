@@ -702,6 +702,7 @@ class SourceSwitch(Rig):
         mega_stream = self.stream(f"/api/mega/{mid}/events?origin=m", "m")
         time.sleep(0.2)
         r = self.switch(mid, origin="x")
+        self.assertEqual([a["type"] for a in r["actions"]], ["tempo.set", "slice.keep", "slice.keep", "source.set"])   # the origin tab does not get its own batch by stream
         for s in (song_stream, mega_stream):
             ev = s.wait(1)
             self.assertEqual([e[0] for e in ev], ["actions"])
@@ -720,7 +721,7 @@ class SourceSwitch(Rig):
         # idempotent: the same switch again does nothing
         saved, n = slurp(self.mega_file(mid)), len(mega_stream.events)
         r2 = self.switch(mid, origin="x")
-        self.assertEqual((r2["kept"], r2["released"], r2["failed"]), ([], 0, []))
+        self.assertEqual((r2["kept"], r2["released"], r2["failed"], r2["actions"]), ([], 0, [], []))
         time.sleep(0.2)
         self.assertEqual((slurp(self.mega_file(mid)), len(mega_stream.events)), (saved, n))
         self.assertEqual(len(r["kept"]), 2)

@@ -554,7 +554,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 except KeyError:
                     return self._err(404, "unknown mega bank")
                 if doc.get("source") == song:  # already the source: nothing to do
-                    return self._json({"mega": M.summary(media_root, doc), "kept": [], "released": 0, "failed": []})
+                    return self._json({"mega": M.summary(media_root, doc), "kept": [], "released": 0, "failed": [], "actions": []})
                 try:
                     new_chops = read_json(os.path.join(M.song_dir(media_root, song), "chops.json"))
                 except (OSError, ValueError):
@@ -573,7 +573,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 owned = {A._override_key(k) for k in state["project"]["overrides"]}
                 doc = self._commit(doc, state, taken, before)
                 return self._json({"mega": M.summary(media_root, doc), "kept": kept, "released": len(cells - owned), "failed": failed,
-                                   "view": {"bank": state["bank"]}})
+                                   "view": {"bank": state["bank"]}, "actions": taken})   # `actions`: the batch broadcast to the other streams
 
         def _keep(self, mid):
             """POST /api/mega/<mid>/keep {bank, pad}: keep one pad now (the KEEP key)."""
@@ -592,7 +592,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 acts, kept, already, failed = self._keep_actions(doc, state, [(bank, pad)], skip_empty=False)
                 state, taken = self._run_batch(doc, state, acts)
                 doc = self._commit(doc, state, taken, before)
-                return self._json({"mega": M.summary(media_root, doc), "kept": kept, "already": already, "failed": failed})
+                return self._json({"mega": M.summary(media_root, doc), "kept": kept, "already": already, "failed": failed, "actions": taken})
 
         def _transport(self, mid, dawsid):
             """`dawsid`: the song a DAW bridge would hold for this mega bank (its source), or None."""
