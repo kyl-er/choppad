@@ -38,6 +38,13 @@ export const RESAMPLE_URL = /^\/media\/[A-Za-z0-9_-]{1,64}\/resample\/[0-9a-f]{1
 export const stemUrl = (song, stem) => `/media/${song}/stems/${stem}.wav`;
 /** CHOP-13: audio a mega bank owns (contracts §15): `/media/_mega/<mid>/samples/<16 hex>.wav`. */
 export const MEGA_SAMPLE_URL = /^\/media\/_mega\/[A-Za-z0-9_-]{1,64}\/samples\/[0-9a-f]{16}\.wav$/;
+/** A pad's `src`: a resample of a song, or (step D) a sample a mega bank owns. */
+const srcOk = (url) => RESAMPLE_URL.test(url) || MEGA_SAMPLE_URL.test(url);
+/** The chop table of a mega bank with no source song. */
+export const EMPTY_CHOPS = Object.freeze({ schema: "choppad.chops/2", grid: "1/4", bpm: null, beats_per_bar: 4, chops: [], banks: [] });
+/** Beats per bar a pattern owns (CHOP-13 step D): an integer 1..16, else null (an old pattern: readers use the chop table). */
+export const validBpb = (v) => (Number.isInteger(v) && v >= 1 && v <= 16 ? v : null);
+const bpbKey = (p) => (validBpb(p?.beatsPerBar) ? { beatsPerBar: p.beatsPerBar } : {});
 
 const PAD_KEYS = Object.keys(DEFAULT_PAD);
 const FX_KEYS = Object.keys(DEFAULT_FX);
@@ -132,12 +139,16 @@ export function cleanSong(raw, pattern) {
   for (const p of (Array.isArray(raw.patterns) ? raw.patterns : []).slice(0, MAX_PATTERNS)) {
     if (!p || typeof p.id !== "string" || !/^[A-Za-z0-9_-]{1,32}$/.test(p.id) || seen.has(p.id)) continue;
     seen.add(p.id);
-    patterns.push({ id: p.id, name: cleanName(p.name, `Pattern ${patterns.length + 1}`), bars: isNum(p.bars) && p.bars >= 1 ? p.bars : 2, events: cleanEvents(p.events) });
+    patterns.push({ id: p.id, name: cleanName(p.name, `Pattern ${patterns.length + 1}`), bars: isNum(p.bars) && p.bars >= 1 ? p.bars : 2, events: cleanEvents(p.events), ...bpbKey(p) });
   }
   const chain = cleanChain(raw.chain, patterns);
   const mode = raw.mode === "song" ? "song" : "pattern";
   const current = patterns.some((p) => p.id === raw.current) ? raw.current : null;
-  if (current !== null && pattern) patterns = patterns.map((p) => (p.id === current ? { ...p, bars: pattern.bars, events: pattern.events } : p));
+  if (current !== null && pattern) patterns = patterns.map((p) => {
+    if (p.id !== current) return p;
+    const { beatsPerBar: _b, ...rest } = p;
+    return { ...rest, bars: pattern.bars, events: pattern.events, ...bpbKey(pattern) };
+  });
   if (!patterns.length && !chain.length && mode === "pattern") return null;
   return { patterns, chain, mode, current };
 }
@@ -146,7 +157,7 @@ export function cleanSong(raw, pattern) {
 export function songTimeline(project, beatsPerBar = 4, { force = false } = {}) {
   const s = project.song;
   const single = () => {
-    const len = project.pattern.bars * beatsPerBar;
+    const len = project.pattern.bars * (validBpb(project.pattern.beatsPerBar) ?? beatsPerBar);
     return { total: len, chain: false, segments: [{ start: 0, len, id: s?.current ?? null, events: project.pattern.events }] };
   };
   if (!s || !s.chain.length || !(s.mode === "song" || force)) return single();
@@ -155,7 +166,7 @@ export function songTimeline(project, beatsPerBar = 4, { force = false } = {}) {
   for (const c of s.chain) {
     const p = s.patterns.find((x) => x.id === c.pattern);
     if (!p) continue;
-    const len = p.bars * beatsPerBar;
+    const len = p.bars * (validBpb(p.beatsPerBar) ?? beatsPerBar);
     const events = p.events.filter((e) => e.beat < len);
     for (let r = 0; r < c.repeats; r++) { segments.push({ start: cursor, len, id: p.id, events }); cursor += len; }
   }
@@ -167,7 +178,7 @@ export const timelineEvents = (tl) => tl.segments.flatMap((seg) => seg.events.ma
 /** Build the starting state from what the server returns for a song. */
 export function initialState({ project = {}, chops, sections = [], source = null, mega = null } = {}) {
   const pattern = project?.pattern;
-  const pat = { bars: pattern?.bars ?? 2, events: [...(pattern?.events ?? [])] };
+  const pat = { bars: pattern?.bars ?? 2, events: [...(pattern?.events ?? [])], ...bpbKey(pattern) };
   const song = cleanSong(project?.song, pat);
   return {
     project: {
@@ -213,9 +224,19 @@ function mirrorCurrent(state) {
   if (!song || song.current === null) return state;
   const i = song.patterns.findIndex((p) => p.id === song.current);
   const pat = state.project.pattern;
-  if (i < 0 || (song.patterns[i].bars === pat.bars && song.patterns[i].events === pat.events)) return state;
-  return withProject(state, { song: { ...song, patterns: song.patterns.map((p, k) => (k === i ? { ...p, bars: pat.bars, events: pat.events } : p)) } });
+  if (i < 0 || (song.patterns[i].bars === pat.bars && song.patterns[i].events === pat.events && song.patterns[i].beatsPerBar === pat.beatsPerBar)) return state;
+  return withProject(state, { song: { ...song, patterns: song.patterns.map((p, k) => {
+    if (k !== i) return p;
+    const { beatsPerBar: _b, ...rest } = p;
+    return { ...rest, bars: pat.bars, events: pat.events, ...bpbKey(pat) };
+  }) } });
 }
+/** The bar length a new pattern takes when it has none yet: the action's `beatsPerBar`, else the chop table's, else 4. */
+const chopBpb = (state, a) => validBpb(a?.beatsPerBar) ?? validBpb(state.chops?.beats_per_bar) ?? 4;
+/** Beats per bar of `pattern`: its own, else the action's / chop table's / 4. */
+const patBpb = (pattern, state, a) => validBpb(pattern.beatsPerBar) ?? chopBpb(state, a);
+/** `pattern` with new `events`; a pattern that has no bar length yet takes one with its first event, and keeps it from then on. */
+const withEvents = (state, pattern, events, a) => ({ ...pattern, events, ...(!validBpb(pattern.beatsPerBar) && !pattern.events.length && events.length ? { beatsPerBar: chopBpb(state, a) } : {}) });
 const clampBank = (state, n) => Math.max(0, Math.min(bankCount(state.project, state.chops) - 1, n));
 /** Bank an action about a pad refers to: `bank` when sent, else the current one; null when `bank` is no valid bank. */
 const targetBank = (a, state) => (a.bank === undefined || a.bank === null ? state.bank : Number.isInteger(a.bank) && a.bank >= 0 ? a.bank : null);
@@ -314,7 +335,7 @@ function reduceCore(state, action) {
         const { [key]: _gone, ...overrides } = state.project.overrides;
         return withProject(state, { overrides });
       }
-      if (typeof a.src !== "string" || !RESAMPLE_URL.test(a.src) || !isNum(a.start) || !isNum(a.end) || !(a.start >= 0) || !(a.end > a.start)) return state;
+      if (typeof a.src !== "string" || !srcOk(a.src) || !isNum(a.start) || !isNum(a.end) || !(a.start >= 0) || !(a.end > a.start)) return state;
       return withProject(state, { overrides: { ...state.project.overrides, [key]: { start: a.start, end: a.end, src: a.src } } });
     }
     case "slice.stem": {   // W3b: the pad plays its slice from a stem of the song (drums, bass, vocals, other); null = the full mix again
@@ -369,7 +390,7 @@ function reduceCore(state, action) {
         const o = { start: k.start, end: k.end };
         if (k.song_id !== a.song) o.song = k.song_id;   // `song` = the open song's id: its own slices need no source
         if (k.stretch && k.stretch.url && Number(k.stretch.ratio) > 0) o.stretch = cleanStretch(k.stretch);
-        if (typeof k.src === "string" && RESAMPLE_URL.test(k.src)) o.src = k.src;
+        if (typeof k.src === "string" && srcOk(k.src)) o.src = k.src;
         else if (STEMS.includes(k.stem)) o.stem = k.stem;
         overrides[`${bank}:${pad}`] = o;
         const params = cleanPad(k.params, pads[pad]);
@@ -403,13 +424,13 @@ function reduceCore(state, action) {
         : [...pattern.events, { beat: a.step / 4, pad: a.pad, bank: a.bank ?? state.bank, vel: a.vel ?? 1, pass: -1,
           // W3b: a hit can carry its own pitch offset (semitones) and cutoff (Hz), as recorded in 16 levels
           ...(isNum(a.pitch) ? { pitch: a.pitch } : {}), ...(isNum(a.cutoff) ? { cutoff: a.cutoff } : {}) }];
-      return withProject(state, { pattern: { ...pattern, events } });
+      return withProject(state, { pattern: withEvents(state, pattern, events, a) });
     }
     case "pattern.addEvent": {
       const e = a.event;
       if (!e || !isPad(e.pad)) return state;
       const { pattern } = state.project;
-      return withProject(state, { pattern: { ...pattern, events: [...pattern.events, { ...e }] } });
+      return withProject(state, { pattern: withEvents(state, pattern, [...pattern.events, { ...e }], a) });
     }
     case "pattern.undo": {
       const { pattern } = state.project;
@@ -419,18 +440,19 @@ function reduceCore(state, action) {
     }
     case "pattern.clear": {
       const { pattern } = state.project;
-      return pattern.events.length ? withProject(state, { pattern: { ...pattern, events: [] } }) : state;
+      // an emptied pattern forgets its bar length: its next first hit takes the one of the song it is made on
+      return pattern.events.length ? withProject(state, { pattern: { bars: pattern.bars, events: [] } }) : state;
     }
     case "pattern.setBars": {
       const bars = Number(a.bars);
       if (!(bars >= 1)) return state;
-      const loopBeats = bars * (a.beatsPerBar ?? state.chops?.beats_per_bar ?? 4);
-      const events = state.project.pattern.events.filter((e) => e.beat < loopBeats);
-      return withProject(state, { pattern: { bars, events } });
+      const bpb = patBpb(state.project.pattern, state, a);   // the pattern's own bar length; one it has none of yet is set here
+      const events = state.project.pattern.events.filter((e) => e.beat < bars * bpb);
+      return withProject(state, { pattern: { bars, events, beatsPerBar: bpb } });
     }
     case "pattern.load": {
       const p = a.pattern ?? {};
-      return withProject(state, { pattern: { bars: p.bars ?? state.project.pattern.bars, events: [...(p.events ?? [])] } });
+      return withProject(state, { pattern: { bars: p.bars ?? state.project.pattern.bars, events: [...(p.events ?? [])], ...bpbKey(p) } });
     }
 
     case "song.addPattern": {   // W3b: a new pattern, which becomes the one being edited ({name?, bars?, copy?: bool})
@@ -441,20 +463,21 @@ function reduceCore(state, action) {
       if (patterns.length >= MAX_PATTERNS - 1) return state;
       if (current === null) {   // the pattern being edited so far becomes "Pattern 1"
         current = nextPatternId(patterns);
-        patterns = [...patterns, { id: current, name: `Pattern ${patterns.length + 1}`, bars: pat.bars, events: pat.events }];
+        patterns = [...patterns, { id: current, name: `Pattern ${patterns.length + 1}`, bars: pat.bars, events: pat.events, ...bpbKey(pat) }];
       }
       const id = nextPatternId(patterns);
       const bars = isNum(a.bars) && a.bars >= 1 ? a.bars : pat.bars;
-      const bpb = a.beatsPerBar ?? state.chops?.beats_per_bar ?? 4;
+      const bpb = patBpb(pat, state, a);
       const events = a.copy === true ? pat.events.filter((e) => e.beat < bars * bpb).map((e) => ({ ...e })) : [];
-      patterns = [...patterns, { id, name: cleanName(a.name, `Pattern ${patterns.length + 1}`), bars, events }];
-      return withSong({ ...state, project: { ...state.project, pattern: { bars, events } } }, { ...song, patterns, current: id });
+      const own = a.copy === true ? bpbKey(pat) : {};   // a copy keeps the bar length of what it copies; an empty pattern gets one with its first hit
+      patterns = [...patterns, { id, name: cleanName(a.name, `Pattern ${patterns.length + 1}`), bars, events, ...own }];
+      return withSong({ ...state, project: { ...state.project, pattern: { bars, events, ...own } } }, { ...song, patterns, current: id });
     }
     case "song.selectPattern": {   // the pattern to edit
       const song = state.project.song;
       const p = song?.patterns.find((x) => x.id === a.id);
       if (!p || song.current === a.id) return state;
-      return withSong({ ...state, project: { ...state.project, pattern: { bars: p.bars, events: p.events.map((e) => ({ ...e })) } } }, { ...song, current: p.id });
+      return withSong({ ...state, project: { ...state.project, pattern: { bars: p.bars, events: p.events.map((e) => ({ ...e })), ...bpbKey(p) } } }, { ...song, current: p.id });
     }
     case "song.renamePattern": {
       const song = state.project.song;
@@ -473,7 +496,7 @@ function reduceCore(state, action) {
       if (song.current === a.id) {
         const first = patterns[0];
         next = { ...next, current: first ? first.id : null };
-        if (first) st = { ...state, project: { ...state.project, pattern: { bars: first.bars, events: first.events.map((e) => ({ ...e })) } } };
+        if (first) st = { ...state, project: { ...state.project, pattern: { bars: first.bars, events: first.events.map((e) => ({ ...e })), ...bpbKey(first) } } };
       }
       return withSong(st, next);
     }
@@ -503,6 +526,11 @@ function reduceCore(state, action) {
     case "chops.replace":
       return a.chops ? { ...state, chops: a.chops, bank: 0 } : state;
     case "source.set": {   // CHOP-13: the song being chopped changes; the project is not touched
+      if ("song" in a && a.song === null && !a.chops) {   // step D: no source any more (the mega bank keeps its pads)
+        if (state.source === null && !state.chops?.banks?.length) return state;
+        const cleared = { ...state, source: null, chops: structuredClone(EMPTY_CHOPS) };
+        return { ...cleared, bank: clampBank(cleared, state.bank) };
+      }
       if (typeof a.song !== "string" || !a.song || !a.chops || typeof a.chops !== "object" || !Array.isArray(a.chops.banks)) return state;
       if (state.source === a.song && eq(state.chops, a.chops)) return state;
       const next = { ...state, source: a.song, chops: a.chops };

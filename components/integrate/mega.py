@@ -236,6 +236,45 @@ def mega_for_song(media_root, song_id):
         return create(media_root, None, song_id, seed if isinstance(seed, dict) else None)
 
 
+class NoSource(Exception):
+    """An operation needs the mega bank's source song and it has none (HTTP 409, a plain sentence)."""
+    http_status = 409
+
+
+NO_SOURCE_MSG = "This mega bank has no source song, so there is nothing to {what}. Pick a song first."
+
+
+class Target:
+    """What one mega-keyed operation acts on: the mega bank document as read at the start of the request, its source song folder
+    (None without one), the source's chop table (an empty table without one), and the player settings the server knows of."""
+
+    def __init__(self, media_root, doc, view_settings=None):
+        self.media_root, self.doc, self.mid = media_root, doc, doc["id"]
+        self.project = doc["project"]
+        self.source = doc.get("source")
+        self.media_dir = song_dir(media_root, self.source) if self.source else None
+        self.chops = chops_of(media_root, doc)
+        self.view_settings = view_settings or {}
+
+    @property
+    def title(self):
+        return self.doc.get("name") or self.mid
+
+    def need_song(self, what):
+        """The source song's folder, or NoSource (409) saying what could not be done."""
+        if not self.media_dir:
+            raise NoSource(NO_SOURCE_MSG.format(what=what))
+        return self.media_dir
+
+    def samples_dir(self):
+        return os.path.join(_dir(self.media_root, self.mid), "samples")
+
+    def exports_dir(self):
+        d = os.path.join(_dir(self.media_root, self.mid), "exports")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
 def used_pads(project):
     """Every (bank, pad) with an override or hit by an event of the pattern or of any song pattern (contracts §15)."""
     return A.used_pads(project)

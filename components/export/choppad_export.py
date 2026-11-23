@@ -3,6 +3,7 @@ See contracts/README.md §7 (v2.1)."""
 
 import io
 import json
+import math
 import os
 import re
 import struct
@@ -50,7 +51,10 @@ STEMS = ("drums", "bass", "vocals", "other")
 
 
 def _resample_path(media_root, url):
-    """File of a pad's resample (`src: /media/<id>/resample/<hash>.wav`)."""
+    """File of a pad's resample (`src: /media/<id>/resample/<hash>.wav`), or, since CHOP-13 step D, a sample a mega bank owns
+    (`src: /media/_mega/<mid>/samples/<hash>.wav`: a resample uploaded to the mega bank)."""
+    if _MEGA_SAMPLE_URL.match(url or ""):
+        return _mega_sample_path(media_root, url)
     m = _RESAMPLE_URL.match(url or "")
     if not m:
         raise ValueError(f"bad resample url {url!r}")
@@ -198,14 +202,16 @@ def bank_pads(media_dir, bank=0, overrides=None, pad_params=None, sounds=None, *
             if o.get("kept") is True and _MEGA_SAMPLE_URL.match(o.get("src") or ""):
                 kept, audio, stretch = True, _mega_sample_path(media_root, o["src"]), None
             else:
-                if not o.get("song") or o["song"] == own_id:
+                if o.get("src"):                      # W3b: a resample, or a stem of the song, instead of the song's own audio
+                    audio = _resample_path(media_root, o["src"])   # (needs no song: a mega bank's own resample)
+                elif not o.get("song") or o["song"] == own_id:
                     if own is None:
                         raise NoSourceSong(f"pad {pad + 1} on bank {bank + 1} needs a source song")
                     audio = own
                 else:
                     audio = _song_audio(media_root, o["song"])
-                if o.get("src"):                      # W3b: a resample, or a stem of the song, instead of the song's own audio
-                    audio = _resample_path(media_root, o["src"])
+                if o.get("src"):
+                    pass
                 elif o.get("stem"):
                     audio = _stem_path(media_root, o.get("song") or own_id, o["stem"])
                 stretch = _stretch_path(media_root, o["stretch"]["url"]) if o.get("stretch") else None
@@ -220,8 +226,11 @@ def bank_pads(media_dir, bank=0, overrides=None, pad_params=None, sounds=None, *
             pr = o["params"] if isinstance(o.get("params"), dict) else {}
         else:
             pr = params[pad] if pad < len(params) and isinstance(params[pad], dict) else {}
+        # `level`: the multiplier a kept pad played at before it was kept (§15 `gain`); the file stays raw, so exports and the
+        # zip are unchanged and only a Hydrogen kit or song carries it (pad_gain_db adds it to the pad's gain)
+        level = float(o["gain"]) if kept and _num(o.get("gain")) and 0 < o["gain"] <= 4 else 1.0
         pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch, "sr": _sample_rate(audio),
-                     "kept": kept, "params": pr,
+                     "kept": kept, "params": pr, "level": level,
                      "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
                      "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
     return pads
@@ -388,6 +397,11 @@ def write_zip(pads, out_path):
     return out_path
 
 
+def pad_gain_db(p):
+    """The gain a DAW instrument carries for a pad: its own `gain_db` plus, for a kept pad, the level it played at when it was kept."""
+    return float(p.get("gain_db") or 0.0) + 20.0 * math.log10(p.get("level") or 1.0)
+
+
 def hydrogen_gain(gain_db):
     """Hydrogen instrument `gain` (linear multiplier, its knob runs 0..5) for a ChopPad pad gain in dB."""
     return round(max(0.0, min(5.0, 10 ** (float(gain_db or 0.0) / 20.0))), 6)
@@ -413,7 +427,7 @@ def _hy_instrument(inst_list, p, wav_name, choke, grouped=False):
     el("pan", "0.0")
     el("pitchOffset", hydrogen_pitch(p.get("pitch")))
     el("randomPitchFactor", "0.0")
-    el("gain", hydrogen_gain(p.get("gain_db")))
+    el("gain", hydrogen_gain(pad_gain_db(p)))
     el("applyVelocity", "true")
     el("filterActive", "false")
     el("filterCutoff", "1.0")

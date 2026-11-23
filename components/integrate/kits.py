@@ -193,6 +193,29 @@ def kit_from_bank(media_root, song_id, bank, name, *, overrides=None, pads=None,
     return {"name": name, "pads": out, "fx": (proj.get("fx") or {}) if fx is None else fx}
 
 
+def kit_from_mega(t, bank, name, *, overrides=None, pads=None, fx=None):
+    """Build a kit from bank `bank` of the mega bank in Target `t` (what the bank holds now: kept pads, other-song pads, stretch
+    renderings, free pads of the source), with the pad sounds and master fx of the mega bank unless the request carries them."""
+    from choppad_export import bank_pads
+    proj = t.project
+    ov = proj.get("overrides") or {} if overrides is None else overrides
+    sounds = proj.get("pads") or [] if pads is None else pads
+    out = [None] * 16
+    for p in bank_pads(t.media_dir, bank, ov, sounds, chops=t.chops, media_root=t.media_root):
+        o = ov.get(f"{bank}:{p['pad']}") or {}
+        if o.get("kept"):  # CHOP-13: a kept pad owns its audio; a kit pad names a song slice, so it cannot hold one (step D)
+            raise ValueError(f"pad {p['pad'] + 1} is kept (it owns its audio); kits of kept pads are not supported yet")
+        entry = {"song_id": o.get("song") or t.source, "start": p["start"], "end": p["end"],
+                 "params": sounds[p["pad"]] if p["pad"] < len(sounds) and isinstance(sounds[p["pad"]], dict) else {}}
+        if o.get("stretch"):
+            entry["stretch"] = o["stretch"]
+        for k in ("src", "stem"):   # W3b
+            if o.get(k):
+                entry[k] = o[k]
+        out[p["pad"]] = entry
+    return {"name": name, "pads": out, "fx": (proj.get("fx") or {}) if fx is None else fx}
+
+
 def export_kit(media_root, kid, kind, *, hydrogen_root=None):
     """Write a kit as a Hydrogen drumkit or an SFZ. Pads from other songs and stretched pads work in both;
     a kit whose songs are gone fails with a clear ValueError."""

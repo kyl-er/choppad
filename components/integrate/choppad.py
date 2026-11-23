@@ -132,32 +132,6 @@ def _advise(media_dir, body):
     return advise(media_dir, force=bool(body.get("force")))
 
 
-def _export(media_dir, body):
-    """kind=hydrogen: install the bank as a Hydrogen drumkit (with body.fx baked in via pedalboard);
-    kind=sfz: write <id>-bank<N>.sfz next to audio.wav (zero-copy, so no fx)."""
-    from choppad_export import bank_pads, export_sfz, render_bank_kit
-    bank = int(body.get("bank") or 0)
-    sid = os.path.basename(media_dir)
-    title = json.load(open(os.path.join(media_dir, "meta.json"))).get("title", sid)
-    if body.get("kind") == "hydrogen":
-        name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
-        out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        # the same pad -> audio path the DAW bridge uses (custom slice, other song, stretch, fx bake; gain/pitch in the kit)
-        _, baked = render_bank_kit(bank_pads(media_dir, bank, body.get("overrides"), body.get("pads")), out, name, fx=body.get("fx"),
-                                   choke=body.get("choke", True) is not False)
-        note = "Restart Hydrogen or use Drumkits > Rescan to see it."
-        if baked:
-            note = "Tone/reverb baked into the samples. " + note
-        return {"path": out, "kit": name, "note": note}
-    if body.get("kind") == "zip":
-        from choppad_export import export_zip
-        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
-        return {"path": os.path.abspath(path), "url": f"/media/{sid}/{os.path.basename(path)}",
-                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out by default); each pad's filter and envelope are baked in, pitch, gain and master fx are not."}
-    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
-    return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
-
-
 # ---- W3: key detection ----
 def _key(media_dir, body):
     """POST /api/songs/<id>/key -> {tonic, mode, confidence}; detected once and cached in analysis.json["key"]."""
@@ -171,59 +145,6 @@ def _key(media_dir, body):
     return analysis["key"]
 
 
-# ---- W3: time-stretch ----
-def _refuse_kept(media_dir, bank, pad):
-    """CHOP-13: a kept pad owns its audio, so there is no slice of the song to stretch (ValueError)."""
-    from server import load_project
-    if ((load_project(media_dir).get("overrides") or {}).get(f"{bank}:{pad}") or {}).get("kept"):
-        raise ValueError(f"pad {pad + 1} on bank {bank + 1} is kept (it owns its audio) and has no slice of the song to stretch")
-
-
-def _pad_slice(media_dir, bank, pad, project=None):
-    """(start, end) of the slice on (bank, pad): the custom slice if the project has one, else the grid/transient chop."""
-    chops = json.load(open(os.path.join(media_dir, "chops.json")))
-    from server import load_project
-    ov = ((project or load_project(media_dir)).get("overrides") or {}).get(f"{bank}:{pad}")
-    if ov and ov.get("end", 0) > ov.get("start", 0) and not ov.get("song"):
-        return float(ov["start"]), float(ov["end"])
-    try:
-        ch = chops["chops"][chops["banks"][bank][pad]]
-    except (IndexError, TypeError):
-        raise ValueError(f"pad {pad} on bank {bank} is empty")
-    return ch["start"], ch["end"]
-
-
-def _stretch(media_dir, body):
-    """POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]}
-    Renders the pad's slice at `ratio` x its length (same pitch) into media/<id>/stretch/<hash>.wav (cached).
-    target_bpm: the slice is fitted so the song's tempo (or source_bpm) becomes target_bpm.
-    `stem` (W3b): cut the slice from that stem of the song instead of the full mix.
-    Returns {url, duration, ratio, hash, start, end}."""
-    sid = os.path.basename(media_dir)
-    try:
-        if body.get("pad") is not None:
-            _refuse_kept(media_dir, int(body.get("bank") or 0), int(body["pad"]))
-        if body.get("start") is not None and body.get("end") is not None:
-            start, end = float(body["start"]), float(body["end"])
-        else:
-            start, end = _pad_slice(media_dir, int(body.get("bank") or 0), int(body.get("pad") or 0))
-        if body.get("ratio") is not None:
-            ratio = float(body["ratio"])
-        elif body.get("target_bpm") is not None:
-            src = float(body.get("source_bpm") or json.load(open(os.path.join(media_dir, "chops.json")))["bpm"])
-            ratio = _ratio_for_tempo(src, float(body["target_bpm"]))
-        else:
-            raise _StretchError("ratio or target_bpm required")
-        stem = body.get("stem")
-        if stem is not None and stem not in ("drums", "bass", "vocals", "other"):
-            raise _StretchError("stem must be drums, bass, vocals or other")
-        r = _stretch_slice(media_dir, start, end, ratio, f"stems/{stem}.wav" if stem else "audio.wav")
-    except (_StretchError, ValueError) as e:
-        raise ValueError(str(e))
-    return {"url": f"/media/{sid}/stretch/{r['file']}", "duration": r["duration"], "ratio": r["ratio"], "hash": r["hash"],
-            "start": start, "end": end}
-
-
 # ---- W3b: stems ----
 def _stems(media_dir, body):
     """POST /api/songs/<id>/stems {force?} -> {stems: [...], urls: {name: url}, backend}. Needs a stems backend (components/stems:
@@ -233,17 +154,6 @@ def _stems(media_dir, body):
     sid = os.path.basename(media_dir)
     return {"stems": list(paths), "urls": {n: f"/media/{sid}/stems/{n}.wav" for n in paths},
             "backend": (os.environ.get("CHOPPAD_STEMS_BACKEND") or "none").lower()}
-
-
-# ---- W3: kits ----
-def _savekit(media_dir, body):
-    """POST /api/songs/<id>/savekit {bank, name [, overrides, pads, fx]} -> the new kit (what the bank holds now)."""
-    from kits import create_kit, kit_from_bank
-    media_root = os.path.dirname(os.path.abspath(media_dir))
-    name = str(body.get("name") or "").strip() or f"{os.path.basename(media_dir)} bank {int(body.get('bank') or 0) + 1}"
-    doc = kit_from_bank(media_root, os.path.basename(media_dir), int(body.get("bank") or 0), name,
-                        overrides=body.get("overrides"), pads=body.get("pads"), fx=body.get("fx"))
-    return create_kit(media_root, doc)
 
 
 def make_server(media_root: str, port: int = 8960):
@@ -259,12 +169,12 @@ def make_server(media_root: str, port: int = 8960):
     else:
         daw = DawManager()
 
-    def _daw(media_dir, body):
-        return daw.command(os.path.basename(media_dir), media_dir, body)
-    srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
-                actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
-                         "savekit": _savekit, "key": _key, "daw": _daw, "stems": _stems},
-                on_transport=daw.on_transport, daw_state=daw.state_for)
+    import megaops
+    source_ops = {"sections": _sections, "advise": _advise, "key": _key, "stems": _stems}
+    # the project operations (export, savekit, stretch, daw, and the source-song ones) are keyed by mega bank (megaops.py): the
+    # song-keyed routes resolve the song's mega bank and call the same functions. The source-song ones also stay song-keyed.
+    srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze, actions=source_ops,
+                mega_actions=megaops.make_ops(daw, source_ops), on_transport=daw.on_transport, daw_state=daw.state_for)
     srv.daw = daw
     daw.on_change = lambda sid: srv.announce_daw(sid)  # `daw` events when a bridge opens or closes
     _shutdown = srv.shutdown

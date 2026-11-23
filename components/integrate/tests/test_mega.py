@@ -734,7 +734,7 @@ class SourceSwitch(Rig):
         mid = self.mega_of("A")
         self.acts(mid, *self.hits(0, 1))
         before, files = slurp(self.mega_file(mid)), sorted(os.listdir(os.path.join(self.root, "_mega", mid, "samples")))
-        for body in ({"song": "nope"}, {"song": "../A"}, {"song": ""}, {"song": 5}, {}, {"song": None}):
+        for body in ({"song": "nope"}, {"song": "../A"}, {"song": ""}, {"song": 5}, {}):   # {"song": null} clears the source since step D (test_mega_d)
             self.assertEqual(self.call(f"/api/mega/{mid}/source", body)[0], 404, body)
         self.assertEqual((slurp(self.mega_file(mid)), sorted(os.listdir(os.path.join(self.root, "_mega", mid, "samples")))), (before, files))
         self.assertEqual(self.call("/api/mega/nope/source", {"song": "B"})[0], 404)
