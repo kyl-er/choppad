@@ -232,3 +232,68 @@ settings gains sixteen: null | {pad, mode: "velocity"|"pitch"|"filter"}   // vie
 - CLI: `tempo`, `song`, `resample`, `stems`; `pad` gains `--filter-type --cutoff --q --decay --sustain --mute-group`; `pattern` gains `--pitch --cutoff`. MCP: `tempo`, `song`, `resample`, `stems`.
 - Known limits: the master limiter adds a constant ~6 ms to live audio and renders; MIDI export ignores per-event pitch; per-hit cutoff does not reach Hydrogen or SFZ; reverse is not carried into exports.
 - UI (station screen; the classic screen does not have these): TEMPO on GRID 4, envelope/filter/mute group/16 levels on PAD 5–8, resample on EXPORT 3, DAW on EXPORT 4, patterns and chain on SEQ 3–4, stems on AI 2. Session additions for the view: `remote.dawName`, `dawCommand(name, command, {bank})`. The library pane follows `GET /api/events` and polls `/api/jobs/<id>` only while that stream is disconnected.
+
+## 15. Drum pad mega banks (CHOP-13; steps A–D, interface fixed here before the build)
+neo, 2026-11-22: "It should keep the sounds and sequence you recorded from pads when you select a new song it shouldnt change
+the whole sequence and pad. There should be: SONG / DRUM PAD MEGA BANKS / THEN drum pad banks. So i can load up a drum break,
+start laying down a break beat, then load up a new song and play the loop and bass and keep my drum loops. […] the option when
+switching to either: (a) create new mega bank, or (b) keep current drum pad: only keep the pads you used and import the new
+song into current pad session."
+
+**Model.** Three levels: SONG (the source being chopped: audio, video, chop table, sections) → DRUM PAD MEGA BANK (what is being
+made: pads, their sounds, patterns and chain, master fx, tempo; several exist, one is open) → DRUM PAD BANKS inside it (16 pads each).
+A mega bank is today's project document (§8, §14) moved out of the song:
+```
+media/_mega/<mid>/mega.json = { schema: "choppad.mega/1", id, name, source: <song id> | null, created, updated,
+                                project: { pads, overrides, pattern, fx, tempo?, song? } }      // project exactly as §8/§14
+media/_mega/<mid>/samples/<16hex>.wav     audio the mega bank owns (16-bit PCM)
+```
+- A pad with no override shows the SOURCE song's chop for that (bank, pad), as today. A pad with an override is the mega bank's own.
+- **Used pads** = every (bank, pad) that has an override, or is hit by an event of `project.pattern` or of any `project.song.patterns[*]`.
+  `usedPads(project)` (JS) / `used_pads(project)` (Python) return them.
+- **Kept pad** = an override that owns its audio and its sound:
+  `overrides["b:p"] = { start: 0, end: <duration>, src: "/media/_mega/<mid>/samples/<hash>.wav", kept: true, params: {<pad params §8/§14>}, from?: { song, start, end } }`.
+  `params` is the pad's sound frozen at keep time; from then on the pad's sound lives in the override, not in `pads[p]` (which other
+  banks share). The engine and the exporters use `override.params` when present, else `pads[p]`.
+- Number of banks = `max(len(chops.banks), 1 + highest bank index in overrides)`; a pad beyond the source's banks without an override is empty.
+- State (§8) gains `source: <song id> | null` and `mega: <mid>`.
+
+**Actions (both reducers, with fixture cases).**
+| type | payload | effect |
+|---|---|---|
+| `slice.keep` | `bank, pad, src, start, end, params?, from?` | set the kept override (replaces any other override on that pad); invalid input leaves the state untouched |
+| `source.set` | `song, chops` | new source: `state.source`, `state.chops`; the current bank is kept if it still exists (clamped otherwise); the project is not touched |
+| `pad.set` | `pad, bank?, params` | as before, but when the pad at (`bank` ?? current bank, `pad`) is kept, the params merge into `override.params` |
+| `pad.reset` | `pad, bank?` | as before; on a kept pad it resets `override.params` |
+`bank.set` clamps to the bank count above. `chops.replace` (regrid of the source) keeps its meaning.
+
+**Server.**
+- `GET /api/mega` → `[{id, name, source, source_title, updated, used_pads, banks}]`; `POST /api/mega {name?, source?}` → new empty mega bank;
+  `GET /api/mega/<mid>` → `{mega, project, chops (of the source, or an empty table), view}`; `PUT /api/mega/<mid> {name}`; `DELETE /api/mega/<mid>`.
+- `POST /api/mega/<mid>/actions`, `GET /api/mega/<mid>/events`, `POST /api/mega/<mid>/transport`: as §10, keyed by mega bank.
+- `POST /api/mega/<mid>/source {song}` — option (b) "keep current drum pad": for every USED pad whose audio is not yet owned, render the pad's
+  audio as played (slice, other-song source, stretch rendering, resample or stem; NOT the pad's filter/envelope/gain/pitch and NOT the master fx)
+  into `samples/`, turn it into a kept override with its params frozen, then set the source. Unused pads are simply released (they show the new
+  song's chops). One `actions` batch (`slice.keep`…, `source.set`) is saved and broadcast, so open tabs follow without reloading. Returns
+  `{mega, kept: [{bank, pad}], released: n}`. Idempotent; switching to the current source is a no-op.
+- `POST /api/mega/<mid>/keep {bank, pad}` — keep one pad now (same rendering), for the KEEP key.
+- Option (a) "create new mega bank" is `POST /api/mega {source: <new song>}`.
+- **Migration, non-destructive:** a song's existing `project.json` becomes a mega bank named after the song with `source` = that song the first
+  time it is needed; `project.json` is left on disk untouched and is no longer written.
+- **Compatibility:** every `/api/songs/<id>/…` endpoint of §10/§13/§14 keeps working and acts on "the song's mega bank" = the most recently
+  updated mega bank whose `source` is that song (created empty if there is none). `GET /api/songs/<id>` also returns `mega: <mid>`.
+- **Cache eviction** never removes a song that is the `source` of a mega bank with used pads, or that an override still refers to
+  (`song`, or a `stretch.url` / `src` under `/media/<song>/`). `media/_mega` is never evicted (§13: `_` folders).
+
+**Browser (step B).** The engine, sequencer and master bus live as long as a mega bank is open, not as long as a song: `session.setSource(song)`
+loads the next song's audio, video, peaks and analysis while the pattern and kept pads keep playing; kept pads play from their sample files.
+Routes: `#/mega/<mid>`; `#/song/<id>` opens that song's mega bank.
+
+**UI (step C).** Library shows SONGS and DRUM PAD MEGA BANKS; the header names song → mega bank → drum pad bank. Choosing another song while the
+open mega bank has used pads asks: (a) new mega bank for that song, or (b) keep current drum pads and bring the song in. Kept pads are marked.
+
+**Agents, DAW, exports (step D).** CLI verbs and MCP tools take a mega bank (or a song, through the compatibility rule); exports and the DAW
+bridge read the mega bank; a kit (§13) is 16 pads saved from or loaded into a mega bank.
+
+**Assumptions not yet confirmed by neo (cheap to change):** the video follows only the open song (a kept pad from another song moves nothing);
+the mega bank's tempo stays when the song changes and new chops are fitted only on request; kept pads are not re-fitted automatically.
