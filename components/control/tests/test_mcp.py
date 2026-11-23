@@ -9,6 +9,7 @@ MCP_PY = os.path.join(ROOT, "components", "control", "choppad_mcp.py")
 EXPECTED = {"library", "song_summary", "chop_table", "pattern_text", "import_song", "regrid", "assign", "pad", "pattern_set",
             "pattern_clear", "fx", "play", "hit", "export", "daw_open", "daw_sync", "daw_transport"}
 EXPECTED |= {"tempo", "resample", "song", "stems"}  # W3b additions (the set above is unchanged)
+EXPECTED |= {"daw_close", "mega_list", "mega_show", "mega_new", "mega_rename", "mega_remove", "mega_source", "mega_keep", "mega_release", "mega_sweep"}  # CHOP-13 step D
 
 
 class McpTest(unittest.TestCase):

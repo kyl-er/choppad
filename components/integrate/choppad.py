@@ -6,7 +6,10 @@ http://127.0.0.1:<port>/?id=<id> with /media/<id>/* static. See contracts/README
 
 Agent verbs (clients of a running server): `choppad songs | show ID | import SRC | regrid ID | assign ID | pad ID P |
 pattern ID set|add|clear|show | fx ID | play ID pattern|song|stop | hit ID P | export ID hydrogen|sfz |
-daw open|sync|play|stop ID [--daw hydrogen|ardour] | station [ID] [--daw ...]`.
+daw open|sync|play|stop|close ID [--daw hydrogen|ardour] | station [ID] [--daw ...] |
+mega list|show|new|rename|remove|source|keep|release|sweep`.
+Every verb that takes a song ID also takes `--mega MID` (a drum pad mega bank): it then acts on exactly that mega bank. With only a song
+ID it keeps its meaning: the song's most recently updated mega bank.
 `choppad <verb> --help` for each; `--server URL` or $CHOPPAD_SERVER picks the server (default http://127.0.0.1:8960).
 """
 
@@ -191,13 +194,33 @@ def make_server(media_root: str, port: int = 8960):
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
 VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
-         "tempo", "resample", "song", "stems")
+         "tempo", "resample", "song", "stems", "mega")
+NO_SONG_ID = ("songs", "import", "mega", "daw", "station")   # verbs whose first positional is not a song id (daw and station: optional)
+
+
+def split_mega(argv):
+    """`--mega MID` / `--mega=MID` out of `argv`: (argv without it, MID or None). When there is one, a placeholder song id takes the
+    place of the id so the verb's own positionals line up; the verb then acts on the mega bank."""
+    argv, mega = list(argv), None
+    for i, x in enumerate(argv):
+        if x == "--mega" and i + 1 < len(argv):
+            mega = argv[i + 1]
+            del argv[i:i + 2]
+            break
+        if x.startswith("--mega="):
+            mega = x[len("--mega="):]
+            del argv[i]
+            break
+    if mega and argv and argv[0] not in NO_SONG_ID:
+        argv.insert(1, "-")
+    return argv, mega
 
 
 def build_verb_parser():
     import choppad_client as cc
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--server", default=None, help="server URL (default $CHOPPAD_SERVER or http://127.0.0.1:8960)")
+    common.add_argument("--mega", default=None, metavar="MID", help="act on this drum pad mega bank instead of a song's (then leave the song ID out)")
     p = argparse.ArgumentParser(prog="choppad", description="Drive a running ChopPad server (start it with `choppad <url> --serve`).")
     sub = p.add_subparsers(dest="verb", required=True)
     add = lambda name, help_: sub.add_parser(name, parents=[common], help=help_, description=help_)  # noqa: E731
@@ -263,9 +286,9 @@ def build_verb_parser():
     s.add_argument("pad", type=int)
     s.add_argument("--velocity", type=float, default=1.0)
     s.add_argument("--bank", type=int)
-    s = add("export", "export a bank as a Hydrogen kit or an SFZ file")
+    s = add("export", "export a bank as a Hydrogen kit, an SFZ file or a zip of 16 WAVs")
     s.add_argument("id")
-    s.add_argument("kind", choices=["hydrogen", "sfz"])
+    s.add_argument("kind", choices=["hydrogen", "sfz", "zip"])
     s.add_argument("--bank", type=int, default=0)
     # --- W3b sampler core ---
     s = add("tempo", "project tempo: show it, set it (--bpm), go back to the song's tempo (--song), fit pads to it (--fit)")
@@ -297,16 +320,25 @@ def build_verb_parser():
                    help="pattern = offline render of the step pattern (default); master = live recording of the master bus")
     s.add_argument("--bank", type=int, help="bank of the pad (default: the bank on screen)")
     s.add_argument("--wait", type=float, default=120, help="seconds to wait for the browser (default 120)")
+    # --- CHOP-13 step D: drum pad mega banks ---
+    s = add("mega", "drum pad mega banks: list | show MID | new [--source SONG] [--name N] | rename MID NAME | remove MID | "
+                    "source MID SONG|none | keep MID --bank B --pad P | release MID --bank B --pad P | sweep MID")
+    s.add_argument("op", choices=["list", "show", "new", "rename", "remove", "source", "keep", "release", "sweep"])
+    s.add_argument("args", nargs="*", help="show/remove/keep/release/sweep MID; rename MID NAME; source MID SONG|none")
+    s.add_argument("--source", help="new: the song that feeds the new mega bank (default none)")
+    s.add_argument("--name", help="new: its name")
+    s.add_argument("--bank", type=int, help="keep/release: bank (0-based)")
+    s.add_argument("--pad", type=int, help="keep/release: pad 0-15")
     # --- W2 DAW bridge (components/daw) ---
     s = add("daw", "DAW bridge: open a song in Hydrogen or Ardour, re-sync it after edits, drive its transport")
-    s.add_argument("op", choices=["open", "sync", "play", "stop"])
-    s.add_argument("id", nargs="?", help="song id (required)")
+    s.add_argument("op", choices=["open", "sync", "play", "stop", "close"])
+    s.add_argument("id", nargs="?", help="song id (or --mega MID); close shuts the bridge this server started")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
     s.add_argument("--bank", type=int, help="bank to export (default: the bank the pattern plays, else 0)")
     s.add_argument("--swing", type=float, help="0..0.5, bake this swing into the DAW pattern (the browser's swing is not saved)")
     s.add_argument("--quant", choices=["off", "1/8", "1/16"], help="the step swing refers to (default 1/16)")
     s.add_argument("--choke", action=argparse.BooleanOptionalAction, default=None, help="pads cut each other off (default on)")
-    s = add("station", "start ChopPad (if it is not running), open a song in the DAW wired to it, print the URL")
+    s = add("station", "start ChopPad (if it is not running), open a song (or --mega MID) in the DAW wired to it, print the URL")
     s.add_argument("id", nargs="?", help="song id (default: the newest song in the library)")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
     s.add_argument("--bank", type=int)
@@ -335,12 +367,15 @@ def _station(a, c, out, err):
             import signal
             signal.signal(signal.SIGINT, signal.default_int_handler)   # a backgrounded job inherits SIGINT=ignored
             signal.signal(signal.SIGTERM, signal.default_int_handler)  # so `kill` also closes the DAW cleanly
-        sid = a.id or next(iter(c.songs()), {}).get("id")
+        if getattr(a, "mega", None):
+            sid = cc.MegaRef(a.mega)
+        else:
+            sid = a.id or next(iter(c.songs()), {}).get("id")
         if not sid:
             raise cc.ControlError("the library is empty; import a song first (`choppad import <url|file>`)")
         r = c.daw(sid, a.daw, "open", a.bank)
         out(json.dumps({k: r[k] for k in r if k != "detail"}, separators=(",", ":")))
-        out(f"ChopPad: {base}/#/song/{sid}")
+        out(f"ChopPad: {base}/#/mega/{sid}" if isinstance(sid, cc.MegaRef) else f"ChopPad: {base}/#/song/{sid}")
         if r.get("detail"):
             out(f"{a.daw}: " + json.dumps({k: v for k, v in r["detail"].items() if k in ("song", "osc_port", "headless", "file", "pid", "tracks", "regions")}))
         if r.get("not_implemented"):
@@ -365,18 +400,72 @@ def _station(a, c, out, err):
     return 0
 
 
+def _mega_verb(a, c, out, err, j):
+    """`choppad mega ...`: the drum pad mega banks of the server (list, show, new, rename, remove, source, keep, release, sweep)."""
+    import choppad_client as cc
+    args = list(a.args)
+
+    def one(what):
+        if not args:
+            raise cc.ControlError(f"mega {a.op} needs {what}")
+        return args[0]
+    if a.op == "list":
+        rows = [{"id": m["id"], "name": m["name"], "source": m.get("source") or "-", "used": m["used_pads"], "banks": m["banks"],
+                 "song": m.get("source_title") or ""} for m in c.megas()]
+        out(cc.format_table(rows, ["id", "name", "source", "used", "banks", "song"]))
+    elif a.op == "show":
+        j(c.mega_show(one("a mega bank id")))
+    elif a.op == "new":
+        j(c.mega_new(a.source, a.name))
+    elif a.op == "rename":
+        mid = one("a mega bank id")
+        if len(args) < 2:
+            raise cc.ControlError("mega rename needs the new name")
+        j(c.mega_rename(mid, " ".join(args[1:])))
+    elif a.op == "remove":
+        j(c.mega_remove(one("a mega bank id")))
+        err("(moved to media/_mega/.trash/ on the server; nothing is deleted)")
+    elif a.op == "source":
+        mid = one("a mega bank id")
+        if len(args) < 2:
+            raise cc.ControlError("mega source needs a song id, or `none` to leave the mega bank with no source")
+        r = c.mega_source(mid, args[1])
+        j({"mega": r["mega"], "kept": len(r.get("kept") or []), "released": r.get("released"), "failed": r.get("failed")})
+    elif a.op in ("keep", "release"):
+        if a.bank is None or a.pad is None:
+            raise cc.ControlError(f"mega {a.op} needs --bank and --pad")
+        mid = one("a mega bank id")
+        r = c.mega_keep(mid, a.bank, a.pad) if a.op == "keep" else c.mega_release(mid, a.bank, a.pad)
+        j({k: r[k] for k in ("kept", "already", "failed", "applied", "ignored") if k in r})
+    elif a.op == "sweep":
+        j(c.mega_sweep(one("a mega bank id")))
+    return 0
+
+
 def run_verb(argv, client=None, out=None, err=None):
     """Run one verb; returns the exit code. `client` and the streams are injectable for tests."""
     import choppad_client as cc
     out = out or (lambda s: print(s))
     err = err or (lambda s: print(s, file=sys.stderr))
+    argv, mega = split_mega(argv)
     a = build_verb_parser().parse_args(argv)
+    a.mega = mega
     j = lambda o: out(json.dumps(o, separators=(",", ":")))  # noqa: E731
+    if mega and a.verb not in ("mega", "songs", "import", "station", "daw"):
+        a.id = cc.MegaRef(mega)   # every verb below takes `a.id`: a mega bank id there means "this mega bank"
+    elif mega and a.verb == "daw":
+        a.id = cc.MegaRef(mega)
     if a.verb == "daw" and not a.id:  # explicit on purpose: a DAW should never open the "newest song" by accident
-        err("daw: a song id is required (see `choppad songs`); `choppad station` opens the newest song. "
+        err("daw: a song id or --mega MID is required (see `choppad songs`, `choppad mega list`); `choppad station` opens the newest song. "
             "DAW bridge: components/daw, workstream W2")
         return 2
     c = client or cc.Client(a.server)
+    if a.verb == "mega":
+        try:
+            return _mega_verb(a, c, out, err, j)
+        except cc.ControlError as e:
+            err(f"choppad: {e}")
+            return 1
     if a.verb == "station":
         try:
             return _station(a, c, out, err)
@@ -457,6 +546,9 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "tempo":
             j(c.tempo(a.id, a.bpm, a.song, a.follow, a.fit))
         elif a.verb == "daw":
+            if a.op == "close":
+                j(c.daw_close(a.id, a.daw))
+                return 0
             r = c.daw(a.id, a.daw, a.op, a.bank, **{k: getattr(a, k) for k in ("swing", "quant", "choke") if getattr(a, k) is not None})
             j(r)
             if r.get("not_implemented"):

@@ -32,6 +32,11 @@ class ControlError(Exception):
     """A request failed in a way worth telling the agent about (message is the whole story)."""
 
 
+class MegaRef(str):
+    """A drum pad MEGA BANK id (CHOP-13) given where a song id is expected. Every verb of the client that takes a song id also takes
+    `MegaRef(mid)`: it then acts on exactly that mega bank (the `/api/mega/<mid>/...` routes), whatever song feeds it, or none."""
+
+
 class Client:
     def __init__(self, server=None, origin=ORIGIN, timeout=30):
         self.server = (server or os.environ.get("CHOPPAD_SERVER") or DEFAULT_SERVER).rstrip("/")
@@ -69,14 +74,62 @@ class Client:
         return self.get("/api/songs")
 
     def song(self, sid):
-        return self.get(f"/api/songs/{_sid(sid)}")
+        d = self.get(_path(sid, ""))
+        if isinstance(sid, MegaRef):   # shaped like a song document, so the verbs below work on a mega bank unchanged
+            m = d["mega"]
+            d.setdefault("meta", {"id": m.get("source"), "title": m.get("source_title") or m.get("name"), "duration_s": 0})
+            d.setdefault("analysis", {})
+        return d
+
+    # ---- drum pad mega banks (contracts §15) ----
+    def megas(self):
+        return self.get("/api/mega")
+
+    def mega_show(self, mid):
+        """The mega bank in a few lines: name, source, tempo, kept pads and where they came from."""
+        return mega_summary(self.get(f"/api/mega/{_seg(mid)}"), self._titles(), full=True)
+
+    def _titles(self):
+        try:
+            return {s["id"]: s.get("title") for s in self.songs()}
+        except ControlError:
+            return {}
+
+    def mega_new(self, source=None, name=None):
+        body = {**({"source": source} if source else {}), **({"name": name} if name else {})}
+        return self.post("/api/mega", body)["mega"]
+
+    def mega_rename(self, mid, name):
+        return self._call("PUT", f"/api/mega/{_seg(mid)}", {"name": name})["mega"]
+
+    def mega_remove(self, mid):
+        return self._call("DELETE", f"/api/mega/{_seg(mid)}")
+
+    def mega_source(self, mid, song):
+        """Set the source song (the used pads are kept, the rest are released); song None (or "none") leaves the mega bank with no source."""
+        song = None if song in (None, "", "none") else song
+        return self.post(f"/api/mega/{_seg(mid)}/source", {"song": song}, timeout=300)
+
+    def mega_keep(self, mid, bank, pad):
+        return self.post(f"/api/mega/{_seg(mid)}/keep", {"bank": bank, "pad": pad}, timeout=300)
+
+    def mega_release(self, mid, bank, pad):
+        """Give a pad back to the source song's chop (its kept sound goes; the sample is swept to .trash)."""
+        return self.actions(MegaRef(mid), [{"type": "slice.clear", "bank": bank, "pad": pad}])
+
+    def mega_sweep(self, mid):
+        return self.post(f"/api/mega/{_seg(mid)}/sweep", {})
 
     def actions(self, sid, actions):
         """Apply §8 actions on the server; open browsers show them live. Returns the server's answer."""
-        return self.post(f"/api/songs/{_sid(sid)}/actions", {"actions": actions})
+        return self.post(_path(sid, "/actions"), {"actions": actions})
 
     def transport(self, sid, command, **kw):
-        return self.post(f"/api/songs/{_sid(sid)}/transport", {"command": command, **kw})
+        return self.post(_path(sid, "/transport"), {"command": command, **kw})
+
+    def daw_close(self, sid, daw=None):
+        """Shut the DAW bridge this server started for `sid` (a song, or a MegaRef). 409 (ControlError) when none is open."""
+        return self.post(_path(sid, "/daw"), {"daw": daw or "hydrogen", "command": "close"}, timeout=60)
 
     # --- W2 DAW bridge (contracts §11) ---
     def daw(self, sid, daw, command, bank=None, swing=None, quant=None, choke=None):
@@ -89,7 +142,7 @@ class Client:
         for k, v in (("swing", swing), ("quant", quant), ("choke", choke)):
             if v is not None:
                 body[k] = v
-        return self.post(f"/api/songs/{_sid(sid)}/daw", body, timeout=300)
+        return self.post(_path(sid, "/daw"), body, timeout=300)
 
     def regrid_to(self, sid, **change):
         """change: grid, meter, bpm_mult, beat_offset (absolute) and/or mult, shift (relative). Returns the new chops."""
@@ -98,14 +151,14 @@ class Client:
         mult = change.get("bpm_mult", chops.get("bpm_mult", 1)) * change.get("mult", 1)
         offset = change.get("beat_offset", chops.get("beat_offset", 0)) + change.get("shift", 0)
         body = {"grid": grid, "meter": change.get("meter"), "beat_offset": int(offset), "bpm_mult": mult}
-        return self.post(f"/api/songs/{_sid(sid)}/regrid", body)
+        return self.post(_path(sid, "/regrid"), body)
 
     def reanalyze(self, sid, bpm, meter=None):
-        return self.post(f"/api/songs/{_sid(sid)}/reanalyze", {"bpm": bpm, "meter": meter}, timeout=300)["chops"]
+        return self.post(_path(sid, "/reanalyze"), {"bpm": bpm, "meter": meter}, timeout=300)["chops"]
 
     def export(self, sid, kind, bank=0):
         fx = self.song(sid)["project"].get("fx")
-        return self.post(f"/api/songs/{_sid(sid)}/export", {"kind": kind, "bank": bank, "fx": fx}, timeout=300)
+        return self.post(_path(sid, "/export"), {"kind": kind, "bank": bank, "fx": fx}, timeout=300)
 
     def import_source(self, source, wait_s=900, progress=None):
         """URL -> import job; an existing file path -> upload. Waits for the job and returns {id, job, steps}: the new
@@ -212,7 +265,7 @@ class Client:
         """Replace the pattern with `steps` ("1:0,8 3:4,12"), or with add=True merge them in. Only `bars`: change loop length."""
         d = self.song(sid)
         cur = (d.get("project") or {}).get("pattern") or {"bars": 2, "events": []}
-        bpb = d["chops"]["beats_per_bar"]
+        bpb = pattern_bpb(d)
         if steps is None:
             if bars is None:
                 raise ControlError("give --steps and/or --bars")
@@ -225,7 +278,8 @@ class Client:
             events = cur.get("events", []) + [e for e in events if (e["pad"], round(e["beat"] * 4)) not in have]
             if bars is None:
                 use_bars = cur.get("bars", 2)
-        return self.actions(sid, [{"type": "pattern.load", "pattern": {"bars": use_bars, "events": events}}])
+        # the pattern keeps its own bar length (step D): the one it has, else the one of the song it is made on
+        return self.actions(sid, [{"type": "pattern.load", "pattern": {"bars": use_bars, "events": events, "beatsPerBar": bpb}}])
 
     # ---- W3b: project tempo ----
     def _slice_of(self, d, bank, pad):
@@ -285,7 +339,10 @@ class Client:
             body = {"bank": bank, "pad": pad, "start": sl[1], "end": sl[2], "target_bpm": T}
             if o.get("stem"):  # a pad that plays a stem is stretched from that stem
                 body["stem"] = o["stem"]
-            r = self.post(f"/api/songs/{_sid(sl[0])}/stretch", body, timeout=300)
+            if isinstance(sid, MegaRef):   # the mega bank's route; `song` names the song a pad from another song is cut from
+                r = self.post(_path(sid, "/stretch"), {**body, **({"song": sl[0]} if sl[0] != d["meta"].get("id") else {})}, timeout=300)
+            else:
+                r = self.post(_path(sl[0], "/stretch"), body, timeout=300)
             if abs(r["ratio"] - 1) < 0.002:
                 if st:
                     acts.append({"type": "slice.stretch", "bank": bank, "pad": pad, "stretch": None})
@@ -312,7 +369,7 @@ class Client:
             act["bpm"] = bpm
         if follow is not None:
             act["follow"] = follow
-        out = {"tempo": cur["bpm"], "follow": cur["follow"], "song_bpm": round(d["chops"]["bpm"], 3)}
+        out = {"tempo": cur["bpm"], "follow": cur["follow"], "song_bpm": round(d["chops"]["bpm"], 3) if d["chops"].get("bpm") else None}
         if len(act) > 1:
             r = self.actions(sid, [act])
             out.update(applied=r.get("applied"), listeners=r.get("listeners"))
@@ -348,7 +405,7 @@ class Client:
                 raise ControlError(f"{op} needs {what}")
             return v
         if op == "add":
-            bpb = self.song(sid)["chops"]["beats_per_bar"]
+            bpb = pattern_bpb(self.song(sid))
             act = {"type": "song.addPattern", "beatsPerBar": bpb, **({"name": name} if name else {}),
                    **({"bars": bars} if bars is not None else {}), **({"copy": True} if copy else {})}
         elif op == "select":
@@ -371,7 +428,7 @@ class Client:
     def stems(self, sid, force=False):
         """Split the song into stems with the server's stems backend (CHOPPAD_STEMS_BACKEND=remote + CHOPPAD_STEMS_URL on the
         server). Can take minutes. Returns {stems: [...], urls: {...}}; without a backend the server's message is the error."""
-        return self.post(f"/api/songs/{_sid(sid)}/stems", {"force": True} if force else {}, timeout=1800)
+        return self.post(_path(sid, "/stems"), {"force": True} if force else {}, timeout=1800)
 
     def pad_stem(self, sid, bank, pad, stem):
         """Make a pad play its slice from a stem ("drums", "bass", "vocals", "other"), or from the full mix again with stem=None."""
@@ -422,7 +479,7 @@ class Client:
 
     def pattern_view(self, sid, bank=None):
         d = self.song(sid)
-        return pattern_text((d.get("project") or {}).get("pattern") or {"bars": 2, "events": []}, d["chops"]["beats_per_bar"], bank)
+        return pattern_text((d.get("project") or {}).get("pattern") or {"bars": 2, "events": []}, pattern_bpb(d), bank)
 
     def chop_rows(self, sid, bank=None):
         d = self.song(sid)
@@ -435,8 +492,14 @@ class Client:
     def summary(self, sid):
         d = self.song(sid)
         out = song_summary(d)
+        try:   # the mega bank the project lives in: its name, and which pads are kept and where they came from (compact)
+            view = d if isinstance(sid, MegaRef) else (self.get(f"/api/mega/{_seg(d['mega'])}") if d.get("mega") else None)
+            if view:
+                out.update(mega_summary(view, self._titles() if _has_kept(view) else {}))
+        except ControlError:
+            pass
         try:
-            secs = self.post(f"/api/songs/{_sid(sid)}/sections").get("sections", [])
+            secs = self.post(_path(sid, "/sections")).get("sections", [])
             out["sections"] = [{"label": s["label"], "bars": f"{s['start_bar']}-{s['end_bar']}"} for s in secs]
         except ControlError:
             out["sections"] = []
@@ -450,11 +513,29 @@ def _sid(sid):
     return urllib.parse.quote(sid, safe="")
 
 
+def _seg(mid):
+    mid = str(mid)
+    if not mid or "/" in mid:
+        raise ControlError(f"bad mega bank id {mid!r}")
+    return urllib.parse.quote(mid, safe="")
+
+
+def _path(sid, tail=""):
+    """/api/songs/<id><tail>, or /api/mega/<mid><tail> when `sid` is a MegaRef."""
+    return f"/api/mega/{_seg(sid)}{tail}" if isinstance(sid, MegaRef) else f"/api/songs/{_sid(sid)}{tail}"
+
+
+def pattern_bpb(d):
+    """Beats per bar of the pattern of document `d` (a song or mega bank): its own (step D), else the chop table's, else 4."""
+    own = ((d.get("project") or {}).get("pattern") or {}).get("beatsPerBar")
+    return own or (d.get("chops") or {}).get("beats_per_bar") or 4
+
+
 def song_summary(d):
     """Small description of a song from GET /api/songs/<id> (no peaks, no chop list)."""
     meta, chops, ana, proj = d["meta"], d["chops"], d.get("analysis") or {}, d.get("project") or {}
     out = {"id": meta.get("id"), "title": meta.get("title"), "duration_s": round(meta.get("duration_s") or 0, 2),
-           "bpm": round(chops["bpm"], 2), "meter": f"{chops['beats_per_bar']}/4", "grid": chops["grid"],
+           "bpm": round(chops["bpm"], 2) if chops.get("bpm") else None, "meter": f"{chops['beats_per_bar']}/4", "grid": chops["grid"],
            "banks": len(chops["banks"]), "chops": len(chops["chops"]),
            "pattern": {"bars": (proj.get("pattern") or {}).get("bars", 2),
                        "hits": len((proj.get("pattern") or {}).get("events", []))},
@@ -469,6 +550,53 @@ def song_summary(d):
     bank = (d.get("view") or {}).get("bank")
     if bank is not None:
         out["current_bank"] = bank
+    return out
+
+
+def _has_kept(d):
+    return any(isinstance(o, dict) and o.get("kept") for o in ((d.get("project") or {}).get("overrides") or {}).values())
+
+
+def _pad_ranges(cells):
+    """[(bank, pad), ...] -> "0:0-3,5 1:2" (pads of one bank as ranges), 0-based like every option of the CLI."""
+    by = {}
+    for b, p in sorted(cells):
+        by.setdefault(b, []).append(p)
+    out = []
+    for b, pads in by.items():
+        runs, i = [], 0
+        while i < len(pads):
+            j = i
+            while j + 1 < len(pads) and pads[j + 1] == pads[j] + 1:
+                j += 1
+            runs.append(str(pads[i]) if i == j else f"{pads[i]}-{pads[j]}")
+            i = j + 1
+        out.append(f"{b}:" + ",".join(runs))
+    return " ".join(out)
+
+
+def mega_summary(view, titles=None, full=False):
+    """The mega bank of a GET /api/mega/<mid> answer, compactly: {mega: {id, name, source, source_title}, kept: [{from, pads}]} where
+    `pads` are 0-based bank:pad groups and `from` is the title (or id) of the song the audio came from. `full` adds the tempo, the
+    pattern and the number of used pads."""
+    titles = titles or {}
+    m, proj = view["mega"], view.get("project") or {}
+    groups = {}
+    for key, o in (proj.get("overrides") or {}).items():
+        if isinstance(o, dict) and o.get("kept"):
+            b, p = (int(x) for x in key.split(":"))
+            song = (o.get("from") or {}).get("song")
+            groups.setdefault(song, []).append((b, p))
+    out = {"mega": {k: m.get(k) for k in ("id", "name", "source", "source_title")}}
+    if groups:
+        out["kept"] = [{"from": (titles.get(s) or s) if s else "a resample", "pads": _pad_ranges(c)} for s, c in groups.items()]
+    if full:
+        out["used_pads"] = m.get("used_pads")
+        out["banks"] = m.get("banks")
+        out["tempo"] = (proj.get("tempo") or {}).get("bpm")
+        pat = proj.get("pattern") or {}
+        out["pattern"] = {"bars": pat.get("bars", 2), "beats_per_bar": pat.get("beatsPerBar") or (view.get("chops") or {}).get("beats_per_bar") or 4,
+                          "hits": len(pat.get("events") or [])}
     return out
 
 
