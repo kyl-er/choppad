@@ -268,6 +268,8 @@ def render_keep(media_root, mid, source, project, chops, bank, pad):
             raise EmptyPad("the pad is empty")
         p = pads[0]
         data, duration = X.pad_wav_bytes(p, neutral=True)
+    except X.NoSourceSong:
+        raise ValueError(f"the song {source!r} is gone" if source else "the mega bank has no source song") from None
     except (OSError, wave.Error, EOFError) as e:
         raise ValueError(f"audio not readable: {e}") from None
     if duration <= 0:

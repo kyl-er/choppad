@@ -93,6 +93,10 @@ _MEGA_SAMPLE_URL = re.compile(r"^/media/_mega/([A-Za-z0-9_-]{1,64})/samples/([0-
 MEGA_DIR = "_mega"
 
 
+class NoSourceSong(ValueError):
+    """A pad needs the source song of its mega bank, and there is none (or it is gone)."""
+
+
 def _mega_sample_path(media_root, url):
     """File of a kept pad's audio (`src: /media/_mega/<mid>/samples/<hash>.wav`). The url pattern allows no path escape."""
     m = _MEGA_SAMPLE_URL.match(url or "")
@@ -196,7 +200,7 @@ def bank_pads(media_dir, bank=0, overrides=None, pad_params=None, sounds=None, *
             else:
                 if not o.get("song") or o["song"] == own_id:
                     if own is None:
-                        raise ValueError(f"pad {pad + 1} on bank {bank + 1} needs a source song")
+                        raise NoSourceSong(f"pad {pad + 1} on bank {bank + 1} needs a source song")
                     audio = own
                 else:
                     audio = _song_audio(media_root, o["song"])
@@ -336,6 +340,8 @@ def _read_wav(path, cache):
 def pad_pcm(p, cache):
     """(sr, channels, sampwidth, declicked PCM bytes) of one pad: its stretched rendering or its slice of the song."""
     sr, nch, sampwidth, frames = _read_wav(p["stretch"] or p["audio"], cache)
+    if p.get("kept") and (not p.get("params") or V.is_neutral(p["params"])):
+        return sr, nch, sampwidth, frames   # a kept pad's file already has its declick (made when it was kept): played as it is
     if p["stretch"]:
         start, end = 0, len(frames)
     else:
