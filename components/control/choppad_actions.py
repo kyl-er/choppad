@@ -21,6 +21,8 @@ DEFAULT_SONG = {"patterns": [], "chain": [], "mode": "pattern", "current": None}
 MAX_PATTERNS, MAX_CHAIN, MAX_REPEATS = 64, 256, 64
 _PATTERN_ID = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 RESAMPLE_URL = re.compile(r"^/media/[A-Za-z0-9_-]{1,64}/resample/[0-9a-f]{16}\.wav$")
+MEGA_SAMPLE_URL = re.compile(r"^/media/_mega/[A-Za-z0-9_-]{1,64}/samples/[0-9a-f]{16}\.wav$")  # CHOP-13: audio a mega bank owns
+_OVERRIDE_KEY = re.compile(r"^(\d+):(\d+)$")
 FILTER_TYPES = ("off", "lp", "hp", "bp")
 DEFAULT_FILTER = {"type": "off", "cutoff": 8000, "q": 0.7}
 DEFAULT_PAD = {"gainDb": 0, "pitch": 0, "attack": 0.0025, "decay": 0, "sustain": 1, "release": 0.003, "reverse": False,
@@ -33,10 +35,10 @@ DEFAULT_SETTINGS = {"mode": "oneshot", "choke": True, "fullLevel": True, "quant"
 # Actions that change the saved project. The rest only change what the player looks at (not written to project.json).
 PROJECT_ACTIONS = frozenset({
     "pad.set", "pad.reset", "pad.copyToAll", "slice.set", "slice.clear", "slice.setMany", "slice.stretch", "kit.load", "fx.set",
-    "tempo.set", "slice.src", "slice.stem",
+    "tempo.set", "slice.src", "slice.stem", "slice.keep",
     "song.addPattern", "song.selectPattern", "song.renamePattern", "song.removePattern", "song.setChain", "song.setMode", "song.load",
     "pattern.toggleStep", "pattern.addEvent", "pattern.undo", "pattern.clear", "pattern.setBars", "pattern.load"})
-VIEW_ACTIONS = frozenset({"pad.select", "bank.set", "chops.replace", "sections.set", "settings.set"})
+VIEW_ACTIONS = frozenset({"pad.select", "bank.set", "chops.replace", "source.set", "sections.set", "settings.set"})
 ACTION_TYPES = PROJECT_ACTIONS | VIEW_ACTIONS
 
 
@@ -147,6 +149,41 @@ def _same(a, b):
     return all(k in a and _same_value(a[k], v) for k, v in b.items())
 
 
+def _override_key(key):
+    """(bank, pad) of an overrides key "b:p", or None."""
+    m = _OVERRIDE_KEY.match(key) if isinstance(key, str) else None
+    return (int(m.group(1)), int(m.group(2))) if m and int(m.group(2)) < PADS else None
+
+
+def used_pads(project):
+    """CHOP-13: every (bank, pad) that has an override or is hit by an event of `project.pattern` or of any
+    `project.song.patterns[*]`, sorted. Works on a raw saved project as well as on a clean one."""
+    out = set()
+    for key in (project.get("overrides") or {}):
+        kp = _override_key(key)
+        if kp:
+            out.add(kp)
+    song = project.get("song") if isinstance(project.get("song"), dict) else {}
+    lists = [(project.get("pattern") or {}).get("events")] + [p.get("events") for p in (song.get("patterns") or []) if isinstance(p, dict)]
+    for events in lists:
+        for e in events if isinstance(events, list) else []:
+            if isinstance(e, dict) and _pad(e.get("pad")) is not None:
+                b = _bank_key(e.get("bank"))
+                out.add((b if b is not None and b >= 0 else 0, _pad(e["pad"])))
+    return sorted(out)
+
+
+def bank_count(project, chops):
+    """CHOP-13: number of banks = max(banks of the source's chop table, 1 + highest bank index in overrides), at least 1."""
+    banks = (chops or {}).get("banks")
+    top = len(banks) if isinstance(banks, list) else 0
+    for key in (project.get("overrides") or {}):
+        kp = _override_key(key)
+        if kp:
+            top = max(top, kp[0] + 1)
+    return max(top, 1)
+
+
 def _step_of(event):
     return math.floor(event["beat"] * 4 + 0.5)  # JS Math.round
 
@@ -252,8 +289,9 @@ def _mirror_current(state):
     return _with_project(state, song={**song, "patterns": patterns})
 
 
-def initial_state(project=None, chops=None, sections=None):
-    """Starting state for a song. `project` is whatever is on disk (may be partial or None)."""
+def initial_state(project=None, chops=None, sections=None, source=None, mega=None):
+    """Starting state. `project` is whatever is on disk (may be partial or None); `source` = id of the song being chopped
+    and `mega` = id of the mega bank (CHOP-13), both optional."""
     project = project if isinstance(project, dict) else {}
     pattern = project.get("pattern") if isinstance(project.get("pattern"), dict) else {}
     pads = project.get("pads") if isinstance(project.get("pads"), list) else []
@@ -271,6 +309,8 @@ def initial_state(project=None, chops=None, sections=None):
             **({"song": song} if song else {}),
         },
         "chops": chops,
+        "source": source,
+        "mega": mega,
         "sections": list(sections or []),
         "bank": 0,
         "selected": 0,
@@ -279,7 +319,7 @@ def initial_state(project=None, chops=None, sections=None):
 
 
 def project_doc(state):
-    """The part of the state that is written to project.json."""
+    """The part of the state that is saved: the project (the mega bank's `project`, contracts §15)."""
     return state["project"]
 
 
@@ -288,9 +328,20 @@ def _with_project(state, **patch):
 
 
 def _clamp_bank(state, n):
-    banks = (state.get("chops") or {}).get("banks")
-    top = (len(banks) if banks is not None else 1) - 1
-    return max(0, min(top, n))
+    return max(0, min(bank_count(state["project"], state.get("chops")) - 1, n))
+
+
+def _target_bank(a, state):
+    """Bank an action about a pad refers to: `bank` when sent, else the current one. None when `bank` is no valid bank."""
+    if a.get("bank") is None:
+        return state["bank"]
+    b = _bank_key(a["bank"])
+    return b if b is not None and b >= 0 else None
+
+
+def _kept(proj, bank, pad):
+    o = proj["overrides"].get(f"{bank}:{pad}")
+    return o if isinstance(o, dict) and o.get("kept") is True else None
 
 
 def reduce(state, action):
@@ -310,6 +361,16 @@ def _reduce_core(state, action):
         pad = _pad(a.get("pad"))
         if pad is None:
             return state
+        bank = _target_bank(a, state)
+        if bank is None:
+            return state
+        o = _kept(proj, bank, pad)
+        if o:  # CHOP-13: a kept pad's sound lives in its override
+            cur = {**_default_pad(), **(o.get("params") or {})}
+            params = clean_pad(a.get("params"), cur)
+            if _same(cur, params):
+                return state
+            return _with_project(state, overrides={**proj["overrides"], f"{bank}:{pad}": {**o, "params": {**cur, **params}}})
         params = clean_pad(a.get("params"), proj["pads"][pad])
         if _same(proj["pads"][pad], params):
             return state
@@ -319,6 +380,14 @@ def _reduce_core(state, action):
         pad = _pad(a.get("pad"))
         if pad is None:
             return state
+        bank = _target_bank(a, state)
+        if bank is None:
+            return state
+        o = _kept(proj, bank, pad)
+        if o:
+            if _same_value(o.get("params"), _default_pad()):
+                return state
+            return _with_project(state, overrides={**proj["overrides"], f"{bank}:{pad}": {**o, "params": _default_pad()}})
         return _with_project(state, pads=[_default_pad() if p == pad else P for p, P in enumerate(proj["pads"])])
     if t == "pad.copyToAll":
         pad = _pad(a.get("pad"))
@@ -415,6 +484,28 @@ def _reduce_core(state, action):
                 return state
             base = {"start": ch["start"], "end": ch["end"]}
         return _with_project(state, overrides={**proj["overrides"], key: {**{k: v for k, v in base.items() if k != "stretch"}, "stem": stem}})
+    if t == "slice.keep":  # CHOP-13: the pad owns its audio (a file of the mega bank) and its sound
+        pad, bank = _pad(a.get("pad")), _bank_key(a.get("bank"))
+        src, s_, e_ = a.get("src"), a.get("start"), a.get("end")
+        if pad is None or bank is None or bank < 0 or not isinstance(src, str) or not MEGA_SAMPLE_URL.match(src):
+            return state
+        if not (_is_num(s_) and _is_num(e_) and s_ >= 0 and e_ > s_):
+            return state
+        if a.get("params") is not None and not isinstance(a["params"], dict):
+            return state
+        fr = a.get("from")
+        if fr is not None and not (isinstance(fr, dict) and isinstance(fr.get("song"), str) and fr["song"]
+                                   and _is_num(fr.get("start")) and _is_num(fr.get("end"))):
+            return state
+        params = {**_default_pad(), **clean_pad(a["params"] if a.get("params") is not None else proj["pads"][pad])}
+        o = {"start": s_, "end": e_, "src": src, "kept": True, "params": params}
+        if fr is not None:
+            o["from"] = {"song": fr["song"], "start": fr["start"], "end": fr["end"]}
+        key = f"{bank}:{pad}"
+        if _same_value(proj["overrides"].get(key), o):
+            return state
+        return _with_project(state, overrides={**proj["overrides"], key: o})
+
     if t == "kit.load":  # put a kit's pads (16 entries or null) on a bank; null = leave the pad alone
         bank = a.get("bank")
         if not (isinstance(bank, int) and not isinstance(bank, bool) and bank >= 0) or not isinstance(a.get("pads"), list):
@@ -584,6 +675,14 @@ def _reduce_core(state, action):
         return state if bank == state["bank"] else {**state, "bank": bank}
     if t == "chops.replace":
         return {**state, "chops": a["chops"], "bank": 0} if a.get("chops") else state
+    if t == "source.set":  # CHOP-13: the song being chopped changes; the project is not touched
+        song, chops = a.get("song"), a.get("chops")
+        if not isinstance(song, str) or not song or not isinstance(chops, dict) or not isinstance(chops.get("banks"), list):
+            return state
+        if state.get("source") == song and state.get("chops") == chops:
+            return state
+        nxt = {**state, "source": song, "chops": chops}
+        return {**nxt, "bank": _clamp_bank(nxt, state["bank"])}
     if t == "sections.set":
         return {**state, "sections": list(a.get("sections") or [])}
     if t == "settings.set":
@@ -617,7 +716,10 @@ def diff_project(old, new):
     for k, v in new["overrides"].items():
         if old["overrides"].get(k) != v:
             bank, pad = (int(x) for x in k.split(":"))
-            if "song" in v or "stretch" in v or "src" in v or "stem" in v:  # a slice with a source or a stretch travels as a one-pad kit.load
+            if v.get("kept") is True:  # CHOP-13: a kept pad travels whole (src, params, from)
+                out.append({"type": "slice.keep", "bank": bank, "pad": pad, "src": v.get("src"), "start": v["start"], "end": v["end"],
+                            "params": v.get("params"), **({"from": v["from"]} if "from" in v else {})})
+            elif "song" in v or "stretch" in v or "src" in v or "stem" in v:  # a slice with a source or a stretch travels as a one-pad kit.load
                 kit = [None] * PADS
                 kit[pad] = {"song_id": v.get("song", ""), "start": v["start"], "end": v["end"],
                             **({"stretch": v["stretch"]} if "stretch" in v else {}),
