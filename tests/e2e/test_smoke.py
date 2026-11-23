@@ -16,6 +16,9 @@ import unittest
 import urllib.request
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from megastate import forget_projects, saved_project  # noqa: E402
 MEDIA = os.path.join(REPO, "media")
 HEAVY = {"audio.wav", "video.mp4"}  # linked, not copied
 
@@ -108,6 +111,7 @@ class SongScreenSmoke(unittest.TestCase):
         path = os.path.join(self.tmp, "media", self.sid, "project.json")
         if os.path.exists(path):
             os.remove(path)
+        forget_projects(os.path.join(self.tmp, "media"))
 
     def open_song(self):
         page = self.browser.new_page(viewport={"width": 1500, "height": 1000})
@@ -187,7 +191,7 @@ class SongScreenSmoke(unittest.TestCase):
 
         # the edits were saved and come back after a reload
         page.wait_for_timeout(700)
-        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        saved = saved_project(os.path.join(self.tmp, "media"), self.sid)
         self.assertEqual(saved["pads"][0]["pitch"], 5)
         page.close()
         page, errors2 = self.open_song()
@@ -294,7 +298,7 @@ class SongScreenSmoke(unittest.TestCase):
         lcd_page(page, "FX")           # W4: the fx sliders are the FX page
         self.assertEqual(page.locator(".fx input[name=reverb]").input_value(), "0.33")
         other.wait_for_function(f"{sess}.store.get().project.pattern.events.length === 1", timeout=2000)  # the second tab too
-        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        saved = saved_project(os.path.join(self.tmp, "media"), self.sid)
         self.assertEqual(saved["pads"][0]["pitch"], 7)  # the server wrote it, not the page
 
         # and the other way: a hand edit in one tab reaches the other tab and the disk, with no echo
@@ -302,7 +306,7 @@ class SongScreenSmoke(unittest.TestCase):
         other.wait_for_function(f"{sess}.store.get().project.pattern.events.length === 2", timeout=2000)
         page.wait_for_timeout(400)
         self.assertEqual(page.evaluate(f"{sess}.store.get().project.pattern.events.length"), 2)  # not doubled by its own echo
-        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        saved = saved_project(os.path.join(self.tmp, "media"), self.sid)
         self.assertEqual(sorted(e["pad"] for e in saved["pattern"]["events"]), [0, 3])
 
         # transport: an agent hit sounds in the page (signal on the master analyser)

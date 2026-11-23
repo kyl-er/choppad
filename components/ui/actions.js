@@ -36,6 +36,8 @@ export const TEMPO_MIN = 20, TEMPO_MAX = 400;
 export const STEMS = Object.freeze(["drums", "bass", "vocals", "other"]);
 export const RESAMPLE_URL = /^\/media\/[A-Za-z0-9_-]{1,64}\/resample\/[0-9a-f]{16}\.wav$/;
 export const stemUrl = (song, stem) => `/media/${song}/stems/${stem}.wav`;
+/** CHOP-13: audio a mega bank owns (contracts §15): `/media/_mega/<mid>/samples/<16 hex>.wav`. */
+export const MEGA_SAMPLE_URL = /^\/media\/_mega\/[A-Za-z0-9_-]{1,64}\/samples\/[0-9a-f]{16}\.wav$/;
 
 const PAD_KEYS = Object.keys(DEFAULT_PAD);
 const FX_KEYS = Object.keys(DEFAULT_FX);
@@ -67,6 +69,29 @@ export function cleanPad(raw, cur = DEFAULT_PAD) {
   if ("sustain" in out) { if (isNum(out.sustain)) out.sustain = clamp(out.sustain, 0, 1); else delete out.sustain; }
   if ("filter" in out) { const f = cleanFilter(out.filter, cur.filter ?? DEFAULT_FILTER); if (f) out.filter = f; else delete out.filter; }
   return out;
+}
+
+const overrideKey = (key) => { const m = /^(\d+):(\d+)$/.exec(key); return m && Number(m[2]) < PADS ? [Number(m[1]), Number(m[2])] : null; };
+/** CHOP-13: every [bank, pad] that has an override or is hit by an event of `project.pattern` or of any `project.song.patterns[*]`,
+ *  sorted by bank, then pad. Works on a raw saved project as well as on a clean one. Pure. */
+export function usedPads(project) {
+  const out = new Map();
+  const add = (b, p) => out.set(`${b}:${p}`, [b, p]);
+  for (const key of Object.keys(project?.overrides ?? {})) { const kp = overrideKey(key); if (kp) add(kp[0], kp[1]); }
+  const lists = [project?.pattern?.events, ...(Array.isArray(project?.song?.patterns) ? project.song.patterns.map((p) => p?.events) : [])];
+  for (const events of lists) {
+    for (const e of Array.isArray(events) ? events : []) {
+      if (!e || typeof e !== "object" || !isPad(e.pad)) continue;
+      add(Number.isInteger(e.bank) && e.bank >= 0 ? e.bank : 0, e.pad);
+    }
+  }
+  return [...out.values()].sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+}
+/** CHOP-13: number of banks = max(banks of the source's chop table, 1 + highest bank index in overrides), at least 1. Pure. */
+export function bankCount(project, chops) {
+  let top = Array.isArray(chops?.banks) ? chops.banks.length : 0;
+  for (const key of Object.keys(project?.overrides ?? {})) { const kp = overrideKey(key); if (kp) top = Math.max(top, kp[0] + 1); }
+  return Math.max(top, 1);
 }
 
 /** Tempo the sequencer, metronome, note repeat and every render use: the project tempo when set, else the song's own. */
@@ -140,7 +165,7 @@ export function songTimeline(project, beatsPerBar = 4, { force = false } = {}) {
 export const timelineEvents = (tl) => tl.segments.flatMap((seg) => seg.events.map((e) => ({ ...e, beat: e.beat + seg.start })));
 
 /** Build the starting state from what the server returns for a song. */
-export function initialState({ project = {}, chops, sections = [] } = {}) {
+export function initialState({ project = {}, chops, sections = [], source = null, mega = null } = {}) {
   const pattern = project?.pattern;
   const pat = { bars: pattern?.bars ?? 2, events: [...(pattern?.events ?? [])] };
   const song = cleanSong(project?.song, pat);
@@ -155,6 +180,8 @@ export function initialState({ project = {}, chops, sections = [] } = {}) {
       ...(song ? { song } : {}),
     },
     chops,
+    source,   // CHOP-13: id of the song being chopped (null = none), and the id of the mega bank
+    mega,
     sections,
     bank: 0,
     selected: 0,
@@ -189,7 +216,10 @@ function mirrorCurrent(state) {
   if (i < 0 || (song.patterns[i].bars === pat.bars && song.patterns[i].events === pat.events)) return state;
   return withProject(state, { song: { ...song, patterns: song.patterns.map((p, k) => (k === i ? { ...p, bars: pat.bars, events: pat.events } : p)) } });
 }
-const clampBank = (state, n) => Math.max(0, Math.min((state.chops?.banks?.length ?? 1) - 1, n));
+const clampBank = (state, n) => Math.max(0, Math.min(bankCount(state.project, state.chops) - 1, n));
+/** Bank an action about a pad refers to: `bank` when sent, else the current one; null when `bank` is no valid bank. */
+const targetBank = (a, state) => (a.bank === undefined || a.bank === null ? state.bank : Number.isInteger(a.bank) && a.bank >= 0 ? a.bank : null);
+const keptAt = (state, bank, pad) => { const o = state.project.overrides[`${bank}:${pad}`]; return o && o.kept === true ? o : null; };
 
 /** Pure reducer. Unknown or invalid actions return the same state object (so nothing re-renders or saves). */
 export function reduce(state, action) {
@@ -202,6 +232,15 @@ function reduceCore(state, action) {
   switch (a.type) {
     case "pad.set": {
       if (!isPad(a.pad)) return state;
+      const bank = targetBank(a, state);
+      if (bank === null) return state;
+      const kept = keptAt(state, bank, a.pad);
+      if (kept) {   // CHOP-13: a kept pad's sound lives in its override
+        const cur = { ...DEFAULT_PAD, ...(kept.params ?? {}) };
+        const kparams = cleanPad(a.params, cur);
+        if (same(cur, kparams)) return state;
+        return withProject(state, { overrides: { ...state.project.overrides, [`${bank}:${a.pad}`]: { ...kept, params: { ...cur, ...kparams } } } });
+      }
       const params = cleanPad(a.params, state.project.pads[a.pad]);
       if (same(state.project.pads[a.pad], params)) return state;
       const pads = state.project.pads.map((P, p) => (p === a.pad ? { ...P, ...params } : P));
@@ -209,6 +248,13 @@ function reduceCore(state, action) {
     }
     case "pad.reset": {
       if (!isPad(a.pad)) return state;
+      const bank = targetBank(a, state);
+      if (bank === null) return state;
+      const kept = keptAt(state, bank, a.pad);
+      if (kept) {
+        if (eq(kept.params, DEFAULT_PAD)) return state;
+        return withProject(state, { overrides: { ...state.project.overrides, [`${bank}:${a.pad}`]: { ...kept, params: { ...DEFAULT_PAD } } } });
+      }
       return withProject(state, { pads: state.project.pads.map((P, p) => (p === a.pad ? { ...DEFAULT_PAD } : P)) });
     }
     case "pad.copyToAll": {
@@ -291,6 +337,23 @@ function reduceCore(state, action) {
       }
       const { stretch: _x, ...rest } = base;
       return withProject(state, { overrides: { ...state.project.overrides, [key]: { ...rest, stem: a.stem } } });
+    }
+
+    case "slice.keep": {   // CHOP-13: the pad owns its audio (a file of the mega bank) and its sound
+      const bank = a.bank;
+      if (!isPad(a.pad) || !Number.isInteger(bank) || bank < 0) return state;
+      if (typeof a.src !== "string" || !MEGA_SAMPLE_URL.test(a.src)) return state;
+      if (!isNum(a.start) || !isNum(a.end) || !(a.start >= 0) || !(a.end > a.start)) return state;
+      const hasParams = a.params !== undefined && a.params !== null;
+      if (hasParams && (typeof a.params !== "object" || Array.isArray(a.params))) return state;
+      const fr = a.from;
+      const hasFrom = fr !== undefined && fr !== null;
+      if (hasFrom && !(typeof fr === "object" && typeof fr.song === "string" && fr.song && isNum(fr.start) && isNum(fr.end))) return state;
+      const params = { ...DEFAULT_PAD, ...cleanPad(hasParams ? a.params : state.project.pads[a.pad]) };
+      const o = { start: a.start, end: a.end, src: a.src, kept: true, params, ...(hasFrom ? { from: { song: fr.song, start: fr.start, end: fr.end } } : {}) };
+      const key = `${bank}:${a.pad}`;
+      if (eq(state.project.overrides[key], o)) return state;
+      return withProject(state, { overrides: { ...state.project.overrides, [key]: o } });
     }
 
     case "kit.load": {   // W3: put a kit's pads (kit.json `pads`, 16 entries or null) on a bank; null = leave the pad alone
@@ -436,6 +499,12 @@ function reduceCore(state, action) {
     }
     case "chops.replace":
       return a.chops ? { ...state, chops: a.chops, bank: 0 } : state;
+    case "source.set": {   // CHOP-13: the song being chopped changes; the project is not touched
+      if (typeof a.song !== "string" || !a.song || !a.chops || typeof a.chops !== "object" || !Array.isArray(a.chops.banks)) return state;
+      if (state.source === a.song && eq(state.chops, a.chops)) return state;
+      const next = { ...state, source: a.song, chops: a.chops };
+      return { ...next, bank: clampBank(next, state.bank) };
+    }
     case "sections.set":
       return { ...state, sections: [...(a.sections ?? [])] };
 

@@ -2,7 +2,7 @@
 Runs the real server (make_server(port=0)) in a thread on a synthetic song folder; stdlib only."""
 import http.client, json, os, shutil, sys, threading, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import CHOPS, jread, jwrite, make_song_root, srvmod, start_server  # noqa: E402
+from support import CHOPS, jread, jwrite, make_song_root, srvmod, start_server, mega_id, saved_project  # noqa: E402
 
 
 class Stream:
@@ -94,7 +94,7 @@ class ControlServer(unittest.TestCase):
         return self.req("POST", "/api/songs/song1/actions", {"actions": actions}, {"X-ChopPad-Origin": origin} if origin else None)
 
     def project_file(self):
-        return jread(os.path.join(self.root, "song1", "project.json"))
+        return saved_project(self.root)
 
     def test_binds_loopback_only(self):
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
@@ -123,7 +123,10 @@ class ControlServer(unittest.TestCase):
         time.sleep(0.1)
         code, out = self.post_actions([{"type": "bank.set", "bank": 1}, {"type": "settings.set", "params": {"swing": 0.3}}])
         self.assertEqual(out["applied"], 2)
+        # view actions change nothing that is saved: no project.json appears and the mega bank's project stays empty
         self.assertFalse(os.path.exists(os.path.join(self.root, "song1", "project.json")))
+        saved = saved_project(self.root)
+        self.assertTrue(saved is None or (saved.get("overrides") == {} and not (saved.get("pattern") or {}).get("events")))
         self.assertEqual([a["type"] for a in s.wait(1)[0][1]["actions"]], ["bank.set", "settings.set"])
         # the server remembers the bank, so a step without one lands on it
         _, out = self.post_actions([{"type": "pattern.toggleStep", "pad": 1, "step": 0}])
@@ -142,7 +145,7 @@ class ControlServer(unittest.TestCase):
         b = self.stream("/api/songs/song1/events?origin=tabB")
         anon = self.stream()
         time.sleep(0.2)
-        self.assertEqual(self.srv.hub.listeners("song1"), 3)
+        self.assertEqual(self.srv.hub.listeners(mega_id(self.root)), 3)
         self.post_actions([{"type": "pad.set", "pad": 1, "params": {"pitch": 2}}], origin="tabA")
         got_b, got_anon = b.wait(1), anon.wait(1)
         self.assertEqual(got_b[0][0], "actions")
@@ -207,13 +210,13 @@ class ControlServer(unittest.TestCase):
         raw.recv(4096)  # headers: the stream is open
         live = self.stream()
         time.sleep(0.2)
-        self.assertEqual(self.srv.hub.listeners("song1"), 2)
+        self.assertEqual(self.srv.hub.listeners(mega_id(self.root)), 2)
         raw.close()  # the tab went away without a word
         end = time.time() + 3
-        while self.srv.hub.listeners("song1") > 1 and time.time() < end:
+        while self.srv.hub.listeners(mega_id(self.root)) > 1 and time.time() < end:
             self.req("POST", "/api/songs/song1/transport", {"command": "stop"})
             time.sleep(0.05)
-        self.assertEqual(self.srv.hub.listeners("song1"), 1)
+        self.assertEqual(self.srv.hub.listeners(mega_id(self.root)), 1)
         self.assertGreaterEqual(len(live.wait(1)), 1)
 
     def test_shutdown_ends_open_streams(self):

@@ -172,17 +172,16 @@ def delete_kit(media_root, kid):
 def kit_from_bank(media_root, song_id, bank, name, *, overrides=None, pads=None, fx=None):
     """Build a kit from a song's bank: chops (or custom slices) of `bank`, with the pad sounds and master fx of the
     saved project unless `overrides` / `pads` / `fx` are given (what the browser holds right now)."""
-    from choppad_export import bank_pads
+    from choppad_export import bank_pads, song_project
     media_dir = os.path.join(media_root, song_id)
-    proj = {}
-    pj = os.path.join(media_dir, "project.json")
-    if os.path.isfile(pj):
-        proj = json.load(open(pj))
+    proj = song_project(media_dir)  # CHOP-13: the project of the song's mega bank (else its old project.json)
     ov = proj.get("overrides") or {} if overrides is None else overrides
     sounds = proj.get("pads") or [] if pads is None else pads
     out = [None] * 16
     for p in bank_pads(media_dir, bank, ov):
         o = ov.get(f"{bank}:{p['pad']}") or {}
+        if o.get("kept"):  # CHOP-13: a kept pad owns its audio; a kit pad names a song slice, so it cannot hold one (step D)
+            raise ValueError(f"pad {p['pad'] + 1} is kept (it owns its audio); kits of kept pads are not supported yet")
         entry = {"song_id": o.get("song") or song_id, "start": p["start"], "end": p["end"],
                  "params": sounds[p["pad"]] if p["pad"] < len(sounds) and isinstance(sounds[p["pad"]], dict) else {}}
         if o.get("stretch"):

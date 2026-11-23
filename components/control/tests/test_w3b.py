@@ -2,7 +2,7 @@
 against a real server on a synthetic song. The stretch endpoint is faked (no rubberband, no audio)."""
 import json, os, shutil, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import CHOPS, jread, make_song_root, start_server  # noqa: E402
+from support import CHOPS, jread, make_song_root, start_server, mega_id, saved_project  # noqa: E402
 import choppad_actions as A  # noqa: E402
 import choppad_client as cc  # noqa: E402
 import choppad_mcp  # noqa: E402
@@ -28,7 +28,7 @@ class Rig(unittest.TestCase):
         self.addCleanup(self.srv.shutdown)
 
     def project(self):
-        return jread(os.path.join(self.root, "song1", "project.json"))
+        return saved_project(self.root)
 
 
 class TempoReducer(unittest.TestCase):

@@ -1,7 +1,7 @@
 """MCP server: protocol handling in-process, plus one real stdio round trip (subprocess) against a test server."""
 import json, os, shutil, subprocess, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import ROOT, jread, make_song_root, start_server  # noqa: E402
+from support import ROOT, jread, make_song_root, start_server, mega_id, saved_project  # noqa: E402
 import choppad_client as cc  # noqa: E402
 import choppad_mcp as M  # noqa: E402
 
@@ -65,7 +65,7 @@ class McpTest(unittest.TestCase):
         self.assertFalse(err)
         self.call("pad", id="song1", pad=4, pitch=-2)
         self.call("assign", id="song1", bank=0, pad=1, start=1, end=1.5)
-        p = jread(os.path.join(self.root, "song1", "project.json"))
+        p = saved_project(self.root)
         self.assertEqual((len(p["pattern"]["events"]), p["fx"]["reverb"], p["pads"][4]["pitch"], p["overrides"]["0:1"]["end"]),
                          (4, 0.5, -2, 1.5))
         self.assertIn("X...", self.call("pattern_text", id="song1")[1])

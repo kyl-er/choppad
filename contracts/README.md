@@ -282,6 +282,15 @@ media/_mega/<mid>/samples/<16hex>.wav     audio the mega bank owns (16-bit PCM)
   time it is needed; `project.json` is left on disk untouched and is no longer written.
 - **Compatibility:** every `/api/songs/<id>/…` endpoint of §10/§13/§14 keeps working and acts on "the song's mega bank" = the most recently
   updated mega bank whose `source` is that song (created empty if there is none). `GET /api/songs/<id>` also returns `mega: <mid>`.
+- As built (step A): `/source` and `/keep` answer with the broadcast batch as `actions: [...]` (the calling tab's stream does not receive
+  it) and with `failed: [{bank, pad, reason}]`; `/source` also returns `view: {bank}`, `/keep` also `already: [{bank, pad}]`. A pad hit by
+  the pattern that has no audio at all is neither kept nor reported. `GET /api/mega` gives `used_pads` as a count; `GET /api/mega/<mid>`
+  also returns `daw`; `PUT /api/mega/<mid>/project` is the whole-document save. Migration happens at most once per song
+  (`media/_mega/migrated.json`), so deleting a migrated mega bank does not seed a new one from `project.json`; a deleted mega bank is moved
+  to `media/_mega/.trash/`. `source.set` and `chops.replace` sent to `/actions` are ignored. `slice.keep`: `src` must match
+  `/media/_mega/<mid>/samples/<16hex>.wav`; when `params` is omitted the pad's current sound is frozen. A kept pad cannot be stretched
+  (400), and `savekit` of a bank with kept pads answers 400 until step D. `GET /media/_mega/<mid>/samples/<hash>.wav` is the only thing
+  served from `_mega`.
 - **Cache eviction** never removes a song that is the `source` of a mega bank with used pads, or that an override still refers to
   (`song`, or a `stretch.url` / `src` under `/media/<song>/`). `media/_mega` is never evicted (§13: `_` folders).
 

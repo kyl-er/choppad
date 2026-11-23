@@ -1,7 +1,7 @@
 """CLI verbs: argument parsing, the steps text form, and every verb against a real server on a synthetic song."""
 import json, os, shutil, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from support import jread, make_song_root, start_server  # noqa: E402
+from support import jread, make_song_root, start_server, mega_id, saved_project  # noqa: E402
 import choppad_client as cc  # noqa: E402
 import choppad  # noqa: E402  (components/integrate/choppad.py)
 
@@ -89,7 +89,7 @@ class Verbs(unittest.TestCase):
         return out, err
 
     def project(self):
-        return jread(os.path.join(self.root, "song1", "project.json"))
+        return saved_project(self.root)
 
     def test_read_verbs(self):
         out, _ = self.run_cli("songs")

@@ -172,6 +172,13 @@ def _key(media_dir, body):
 
 
 # ---- W3: time-stretch ----
+def _refuse_kept(media_dir, bank, pad):
+    """CHOP-13: a kept pad owns its audio, so there is no slice of the song to stretch (ValueError)."""
+    from server import load_project
+    if ((load_project(media_dir).get("overrides") or {}).get(f"{bank}:{pad}") or {}).get("kept"):
+        raise ValueError(f"pad {pad + 1} on bank {bank + 1} is kept (it owns its audio) and has no slice of the song to stretch")
+
+
 def _pad_slice(media_dir, bank, pad, project=None):
     """(start, end) of the slice on (bank, pad): the custom slice if the project has one, else the grid/transient chop."""
     chops = json.load(open(os.path.join(media_dir, "chops.json")))
@@ -194,6 +201,8 @@ def _stretch(media_dir, body):
     Returns {url, duration, ratio, hash, start, end}."""
     sid = os.path.basename(media_dir)
     try:
+        if body.get("pad") is not None:
+            _refuse_kept(media_dir, int(body.get("bank") or 0), int(body["pad"]))
         if body.get("start") is not None and body.get("end") is not None:
             start, end = float(body["start"]), float(body["end"])
         else:

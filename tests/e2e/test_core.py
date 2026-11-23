@@ -7,6 +7,9 @@ folders (audio/video linked, json copied), so the real library is never written 
 """
 import json
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from megastate import forget_projects, saved_project  # noqa: E402
 import shutil
 import subprocess
 import sys
@@ -87,6 +90,7 @@ class CoreScreen(unittest.TestCase):
         cls.addClassCleanup(cls.browser.close)
 
     def setUp(self):  # every test starts from an empty project and the original chop table
+        forget_projects(os.path.join(self.tmp, "media"))
         for sid in self.sids:
             d = os.path.join(self.tmp, "media", sid)
             for f in ("project.json", "onsets.json"):
@@ -253,7 +257,7 @@ class CoreScreen(unittest.TestCase):
 
         # saved, and still there (buffer loaded again) after a reload
         page.wait_for_timeout(700)
-        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))
+        saved = saved_project(os.path.join(self.tmp, "media"), self.sid)
         self.assertEqual(saved["overrides"]["0:0"]["stretch"]["url"], ov["stretch"]["url"])
         page.close()
         page, errors2 = self.open_song()
@@ -347,7 +351,7 @@ class CoreScreen(unittest.TestCase):
 
         # saved with the song, rebound after a reload (the other song's audio is fetched again, once)
         page.wait_for_timeout(700)
-        saved = json.load(open(os.path.join(self.tmp, "media", self.sid2, "project.json")))
+        saved = saved_project(os.path.join(self.tmp, "media"), self.sid2)
         self.assertEqual(saved["overrides"]["0:0"]["song"], self.sid)
         page.close()
         page, errors3 = self.open_song(self.sid2)

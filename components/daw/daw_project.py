@@ -104,7 +104,7 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
     two calls the Export button makes. There is no slice logic in this module.
 
     fx: "project" = the song's saved master FX, a dict = those settings, None = no FX.
-    project: the project.json document (default: read from media_dir).
+    project: the project document (default: the project of the song's mega bank, else its old project.json).
     swing, quant, choke: the player settings that are not saved with the project (contracts section 8 `settings`);
     swing is baked into note positions by the bridges, choke decides the Hydrogen mute group. Defaults: 0, "1/16", True.
     """
@@ -112,7 +112,7 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
 
     meta = _read(os.path.join(media_dir, "meta.json"), {})
     chops = _read(os.path.join(media_dir, "chops.json"))
-    proj = project if project is not None else _read(os.path.join(media_dir, "project.json"), {})
+    proj = project if project is not None else X.song_project(media_dir)  # CHOP-13: the song's mega bank (X.song_project)
     pattern = proj.get("pattern") or {"bars": 2, "events": []}
     bank = pick_bank(pattern, bank, len(chops["banks"]))
     if fx == "project":
@@ -139,7 +139,7 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
     by_pad = {p["pad"]: p for p in pads}
     slots = [Chop(p, os.path.join(kit_dir, f"chop_{p:02d}.wav"), 36 + p, by_pad[p]["gain_db"], by_pad[p]["pitch"])
              if p in by_pad else None for p in range(PADS)]
-    # W3b: the project tempo (project.json "tempo": {bpm, follow}) wins over the song's own tempo
+    # W3b: the project tempo (project "tempo": {bpm, follow}) wins over the song's own tempo
     bpm = float(((proj.get("tempo") or {}).get("bpm")) or chops.get("bpm") or 120.0)
     groups = [X.mute_group_of(by_pad[i]) if i in by_pad else 0 for i in range(PADS)]
     if any(groups):  # W3b: mute groups travel inside the pattern dict (see h2song.build_song)

@@ -12,6 +12,9 @@ the fake of CHOPPAD_DAW_FAKE) and no network is used. CHOPPAD_SHOTS=1 also write
 import json
 import math
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from megastate import forget_projects, saved_project  # noqa: E402
 import shutil
 import struct
 import subprocess
@@ -131,6 +134,7 @@ class Station2(unittest.TestCase):
         cls.addClassCleanup(cls.browser.close)
 
     def setUp(self):  # every test starts from an empty project and the original chop table
+        forget_projects(os.path.join(self.tmp, "media"))
         for sid in self.sids:
             d = os.path.join(self.tmp, "media", sid)
             if os.path.exists(os.path.join(d, "project.json")):
@@ -460,7 +464,7 @@ class Station2(unittest.TestCase):
         self.assertEqual(open(dl.value.path(), "rb").read()[:4], b"MThd")
         # saved with the project
         page.evaluate(f"{S}.remote.flush()")
-        saved = json.load(open(os.path.join(self.tmp, "media", self.sid, "project.json")))["song"]
+        saved = saved_project(os.path.join(self.tmp, "media"), self.sid)["song"]
         self.assertEqual((saved["mode"], [c["repeats"] for c in saved["chain"]]), ("song", [2, 1]))
         self.assertEqual(errors, [], str(errors))
 

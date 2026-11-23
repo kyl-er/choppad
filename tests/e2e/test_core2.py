@@ -21,6 +21,9 @@ import urllib.request
 import urllib.request
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from megastate import forget_projects, saved_project  # noqa: E402
 MEDIA = os.path.join(REPO, "media")
 HEAVY = {"audio.wav", "video.mp4"}  # linked, not copied
 
@@ -206,6 +209,7 @@ class Core2(unittest.TestCase):
         cls.addClassCleanup(cls.browser.close)
 
     def setUp(self):  # every test starts from an empty project and the original chop table
+        forget_projects(os.path.join(self.tmp, "media"))
         for sid in self.sids:
             d = os.path.join(self.tmp, "media", sid)
             for f in ("project.json", "onsets.json"):

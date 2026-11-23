@@ -38,3 +38,28 @@ def start_server(root, **kw):
     srv = srvmod.make_server(root, port=0, **kw)
     threading.Thread(target=lambda: srv.serve_forever(poll_interval=0.05), daemon=True).start()
     return srv, srv.server_address[1]
+
+
+def saved_project(root, song="song1"):
+    """The project saved for a song: since the drum pad mega banks (contracts §15) that is the project of the song's
+    mega bank (media/_mega/<id>/mega.json), no longer media/<song>/project.json. None when nothing was saved yet."""
+    best = None
+    mroot = os.path.join(root, "_mega")
+    for d in sorted(os.listdir(mroot)) if os.path.isdir(mroot) else []:
+        path = os.path.join(mroot, d, "mega.json")
+        if d.startswith(".") or not os.path.isfile(path):
+            continue
+        doc = jread(path)
+        if doc.get("source") == song and (best is None or str(doc.get("updated", "")) >= str(best.get("updated", ""))):
+            best = doc
+    return best["project"] if best is not None else None
+
+
+def mega_id(root, song="song1"):
+    """Id of the song's mega bank: the key of its event hub, lock and view state."""
+    mroot = os.path.join(root, "_mega")
+    for d in sorted(os.listdir(mroot)) if os.path.isdir(mroot) else []:
+        path = os.path.join(mroot, d, "mega.json")
+        if not d.startswith(".") and os.path.isfile(path) and jread(path).get("source") == song:
+            return jread(path)["id"]
+    return None

@@ -7,6 +7,9 @@ Skips when Playwright or a library song is missing. Songs are served from a temp
 """
 import json
 import os
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from megastate import forget_projects, saved_project  # noqa: E402
 import shutil
 import statistics
 import subprocess
@@ -88,6 +91,7 @@ class Station(unittest.TestCase):
         for f in ("project.json",):
             if os.path.exists(os.path.join(self.dst, f)):
                 os.remove(os.path.join(self.dst, f))
+        forget_projects(os.path.dirname(self.dst))
         for f, text in self.pristine.items():
             open(os.path.join(self.dst, f), "w").write(text)
 
