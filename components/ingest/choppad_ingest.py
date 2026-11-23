@@ -9,6 +9,46 @@ import time
 import urllib.request
 
 
+
+class ImportProblem(ValueError):
+    """An import that cannot go ahead for a reason the person can act on. The message is a plain sentence shown as it is."""
+
+
+def _clock(seconds):
+    seconds = int(round(float(seconds)))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+_YT_HOSTS = ("youtube.com", "youtube-nocookie.com", "youtu.be")
+_YT_ID = r"[A-Za-z0-9_-]{11}"
+
+
+def normalize_url(source: str) -> str:
+    """A YouTube link reduced to its one video: `https://www.youtube.com/watch?v=<id>`.
+
+    Links copied while a playlist or a mix is playing carry `list=`, `index=`, `start_radio=`, `pp=` and friends; those
+    are dropped so nothing downstream can pick another entry of the list. Handles watch, youtu.be, shorts, embed, live
+    and music.youtube.com links, with or without a scheme. A playlist link that names no video raises ImportProblem.
+    Anything that is not YouTube is returned unchanged."""
+    import re
+    from urllib.parse import parse_qs, urlsplit
+    raw = source.strip()
+    parts = urlsplit(raw if "://" in raw else "https://" + raw)
+    host = (parts.hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in _YT_HOSTS):
+        return raw
+    vid = None
+    if host.endswith("youtu.be"):
+        vid = parts.path.strip("/").split("/")[0]
+    else:
+        m = re.match(rf"^/(?:shorts|embed|live|v)/({_YT_ID})(?:[/?]|$)", parts.path)
+        vid = m.group(1) if m else (parse_qs(parts.query).get("v") or [None])[0]
+    if not vid or not re.fullmatch(_YT_ID, vid):
+        if "list=" in parts.query or parts.path.startswith("/playlist"):
+            raise ImportProblem("That link is a whole playlist. Open the song you want and paste its link instead.")
+        return raw
+    return f"https://www.youtube.com/watch?v={vid}"
+
 def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies_from_browser: str | None = None,
            force: bool = False, cap_bytes: int = 500 * 2**20) -> str:
     """Fetch/convert `source`, enforce the cache cap, return the media dir. Idempotent unless force=True.
@@ -16,10 +56,13 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
 
     is_url = "://" in source or source.startswith(("http:", "https:", "www."))
     if is_url:
+        source = normalize_url(source)   # one video, never the playlist or mix the link was copied from
         info = _url_info(source, cookies_from_browser)
         duration = info.get("duration") or 0
         if duration > max_duration_s:
-            raise ValueError(f"source duration {duration}s exceeds max_duration_s {max_duration_s}")
+            raise ImportProblem(
+                f"\"{info.get('title') or info.get('id') or source}\" is {_clock(duration)} long; "
+                f"ChopPad imports up to {_clock(max_duration_s)}. ({info.get('id') or source})")
         media_id = info.get("id") or hashlib.sha1(source.encode()).hexdigest()[:10]
     else:
         if not os.path.isfile(source):
@@ -29,7 +72,8 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
              "-of", "default=noprint_wrappers=1:nokey=1", source],
             capture_output=True, text=True).stdout.strip() or 0)
         if duration_s > max_duration_s:
-            raise ValueError(f"source duration {duration_s:.1f}s exceeds max_duration_s {max_duration_s}")
+            raise ImportProblem(f"\"{os.path.basename(source)}\" is {_clock(duration_s)} long; "
+                                f"ChopPad imports up to {_clock(max_duration_s)}.")
         media_id = "local-" + hashlib.sha1(os.path.abspath(source).encode()).hexdigest()[:10]
 
     media_dir = os.path.join(media_root, media_id)

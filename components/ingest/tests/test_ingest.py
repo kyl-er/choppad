@@ -1,7 +1,7 @@
 import os, sys, tempfile, unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from _common import *  # noqa: E402,F403
-from choppad_ingest import enforce_cap, ingest  # noqa: E402
+from choppad_ingest import ImportProblem, enforce_cap, ingest, normalize_url  # noqa: E402
 import json, subprocess, time, wave  # noqa: E402
 
 
@@ -60,6 +60,48 @@ class LocalFile(unittest.TestCase):
     def test_rejects_too_long(self):
         with self.assertRaises(ValueError):
             ingest(self.src, os.path.join(self.tmp, "media-short"), max_duration_s=1)
+
+
+class Urls(unittest.TestCase):
+    V = "https://www.youtube.com/watch?v=ReineKbo5GM"
+
+    def test_playlist_and_mix_parameters_are_dropped(self):
+        for url in ("https://www.youtube.com/watch?v=ReineKbo5GM&list=RDahiGdGHqEfA&index=3",
+                    "https://www.youtube.com/watch?list=RDahiGdGHqEfA&v=ReineKbo5GM&start_radio=1&pp=abc",
+                    "https://www.youtube.com/watch?v=ReineKbo5GM&t=42s",
+                    "https://m.youtube.com/watch?v=ReineKbo5GM&feature=share",
+                    "https://music.youtube.com/watch?v=ReineKbo5GM&list=OLAK5uy_x",
+                    "https://youtu.be/ReineKbo5GM?list=RDahiGdGHqEfA&t=10",
+                    "youtu.be/ReineKbo5GM",
+                    "www.youtube.com/watch?v=ReineKbo5GM&list=PL123",
+                    "https://www.youtube.com/shorts/ReineKbo5GM?feature=share",
+                    "https://www.youtube.com/embed/ReineKbo5GM?start=5",
+                    "https://www.youtube.com/live/ReineKbo5GM",
+                    "https://www.youtube-nocookie.com/embed/ReineKbo5GM",
+                    "  https://www.youtube.com/watch?v=ReineKbo5GM  "):
+            self.assertEqual(normalize_url(url), self.V, url)
+
+    def test_other_sites_and_odd_links_are_left_alone(self):
+        for url in ("https://vimeo.com/123456?list=1", "https://soundcloud.com/a/b?in=sets/x",
+                    "https://notyoutube.com/watch?v=ReineKbo5GM&list=1", "https://www.youtube.com/@somechannel"):
+            self.assertEqual(normalize_url(url), url)
+
+    def test_a_playlist_without_a_video_is_refused_in_plain_words(self):
+        for url in ("https://www.youtube.com/playlist?list=PL123", "https://www.youtube.com/watch?list=PL123"):
+            with self.assertRaises(ImportProblem) as cm:
+                normalize_url(url)
+            self.assertIn("playlist", str(cm.exception))
+
+    def test_too_long_is_a_plain_sentence_and_still_a_value_error(self):
+        tmp = tempfile.mkdtemp(prefix="choppad-long-")
+        wav = os.path.join(tmp, "long take.wav")
+        click_track(wav, 120, n_beats=8)
+        with self.assertRaises(ValueError) as cm:
+            ingest(wav, os.path.join(tmp, "media"), max_duration_s=1)
+        msg = str(cm.exception)
+        self.assertIn("long take.wav", msg)
+        self.assertIn("up to 0:01", msg)
+        self.assertNotIn("max_duration_s", msg)
 
 
 class Cap(unittest.TestCase):

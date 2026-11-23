@@ -258,7 +258,9 @@ class Jobs:
             compute_peaks(media_dir)
             self.update(jid, state="done", stage="done", progress=1.0, id=os.path.basename(media_dir))
         except Exception as e:  # noqa: BLE001 - surfaced to the UI
-            self.update(jid, state="error", stage="error", error=f"{type(e).__name__}: {e}")
+            # a ValueError is a reason the person can act on (too long, a playlist link): show the sentence as it is
+            self.update(jid, state="error", stage="error",
+                        error=str(e) if isinstance(e, ValueError) and str(e) else f"{type(e).__name__}: {e}")
 
 
 class TokenBucket:
