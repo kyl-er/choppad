@@ -16,9 +16,10 @@
 //   cls "cols2" lays the rows out in two columns, leaving room for an extra. The new sub-pages of CHOP-12 are in lcdpages2.js.
 // `ctx` = { session, st(), dispatch, setting(params), fxSet(params), toast, env, out, refresh(), tapState }.
 import { PRESETS, DEFAULT_FX } from "/fx.js";
-import { esc, fmt } from "./util.js";
+import { bankName, esc, fmt } from "./util.js";
 import { bankCount } from "/actions.js";
 import { moreSubpages } from "./lcdpages2.js";
+import { megaSubpages } from "./megapages.js";
 
 export const num = (label, o) => ({ t: "n", label, ...o });
 export const inp = (label, o) => ({ t: "i", label, ...o });
@@ -173,11 +174,11 @@ export function buildPages(ctx) {
         bool("Pattern", { name: "pattern", get: () => seq.state.playing, set: () => session.togglePattern() }),
         bool("Click", { name: "metro", cls: "metro", get: () => st().settings.metronome, set: (v) => setting({ metronome: v }) }),
         en("Bars", { name: "bars", cls: "seq-bars", opts: [1, 2, 4], get: () => st().project.pattern.bars,
-          set: (v) => dispatch({ type: "pattern.setBars", bars: Number(v), beatsPerBar: st().chops.beats_per_bar }) }),
+          set: (v) => dispatch({ type: "pattern.setBars", bars: Number(v), beatsPerBar: session.patternBeatsPerBar }) }),
         en("Quant", { name: "quant", cls: "seq-q", opts: ["off", "1/8", "1/16"], get: () => st().settings.quant, set: (v) => setting({ quant: v }) }),
         num("Swing", { name: "swing", cls: "seq-swing", min: 0, max: 0.5, step: 0.05, get: () => st().settings.swing, set: (v) => setting({ swing: v }), fmt: (v) => `${Math.round(v * 100)}%` }),
       ] },
-      { name: "tools", info: { html: () => `${st().project.pattern.events.length} HITS · ${st().chops.bpm.toFixed(1)} BPM · REPEAT RETRIGGERS A HELD PAD` }, fields: () => [
+      { name: "tools", info: { html: () => `${st().project.pattern.events.length} HITS · ${session.tempoBpm.toFixed(1)} BPM · REPEAT RETRIGGERS A HELD PAD` }, fields: () => [
         bool("Repeat", { name: "repeat", cls: "repeat", get: () => st().settings.repeat, set: (v) => setting({ repeat: v }) }),
         en("Rate", { name: "rate", cls: "repeat-rate", opts: [{ v: 0.5, l: "1/8" }, { v: 0.25, l: "1/16" }], get: () => st().settings.repeatRate, set: (v) => setting({ repeatRate: Number(v) }) }),
         act("Undo", { fn: () => dispatch({ type: "pattern.undo" }) }),
@@ -193,7 +194,7 @@ export function buildPages(ctx) {
     ] },
 
     GRID: { title: "GRID / TEMPO", cls: "grid", subs: [
-      { name: "grid", info: { html: () => { const c = st().chops; return c.mode === "transient" ? `TRANSIENT CHOP · ${c.chops.length} SLICES` : `GRID ${c.grid} · ${c.beats_per_bar}/4 · ${c.bpm.toFixed(1)} BPM`; } }, fields: () => [
+      { name: "grid", info: { html: () => { const c = st().chops; return c.mode === "transient" ? `TRANSIENT CHOP · ${c.chops.length} SLICES` : `GRID ${c.grid} · ${c.beats_per_bar}/4 · CHOP TEMPO ${c.bpm.toFixed(1)} BPM (THE SONG'S OWN)`; } }, fields: () => [
         en("Grid", { name: "grid", cls: "grid-btns", optClsPrefix: "grid-", opts: ["1/4", "1/8", "1/16"], get: () => (st().chops.mode === "transient" ? null : st().chops.grid), set: (v) => session.regrid({ grid: v }) }),
         en("Meter", { name: "meter", cls: "meter-btns", optClsPrefix: "meter-", opts: ["2/4", "3/4", "4/4"], get: () => `${st().chops.beats_per_bar}/4`, set: (v) => session.regrid({ meter: v }) }),
         act("Tempo ÷2", { fn: () => session.regrid({ mult: 0.5 }) }),
@@ -201,7 +202,7 @@ export function buildPages(ctx) {
         act("Beat −1", { fn: () => session.regrid({ shift: -1 }) }),
         act("Beat +1", { fn: () => session.regrid({ shift: 1 }) }),
       ] },
-      { name: "tempo", info: { cls: "tap-info", html: () => (ctx.tapState.text ? `TAPPED: ${esc(ctx.tapState.text)}` : "TAP FOUR TIMES, THEN APPLY TO RE-ANALYZE AT THAT TEMPO") }, fields: () => [
+      { name: "tempo", info: { cls: "tap-info", html: () => (ctx.tapState.text ? `TAPPED: ${esc(ctx.tapState.text)}` : "CHOP TEMPO = THE SONG'S, FOR ITS GRID. TAP FOUR TIMES, THEN APPLY TO RE-ANALYZE THE SONG; YOUR TEMPO IS SET ON GRID 4") }, fields: () => [
         act("Bar1 = last", { fn: () => session.regrid({ bar1: true }) }),
         act("Tap", { cls: "tap", val: () => ctx.tapState.bpm ? `${ctx.tapState.bpm}` : "T", fn: () => tap() }),
         act("Apply", { cls: "tap-apply", disabled: () => !ctx.tapState.bpm, fn: async () => {
@@ -211,7 +212,7 @@ export function buildPages(ctx) {
           ctx.tapState.text = (await session.reanalyze(bpm)) ? `now ${st().chops.bpm.toFixed(1)} BPM` : "failed";
           ctx.refresh();
         } }),
-        inp("Tempo", { name: "tempo", min: 40, max: 240, step: 0.1, deferred: true, get: () => st().chops.bpm, set: (v) => session.reanalyze(v), fmt: (v) => v.toFixed(1) }),
+        inp("Chop tempo", { name: "tempo", min: 40, max: 240, step: 0.1, deferred: true, get: () => st().chops.bpm, set: (v) => session.reanalyze(v), fmt: (v) => v.toFixed(1) }),
         blank(), blank(),
       ] },
       { name: "chop", info: { cls: "sens-out", html: () => (st().chops.mode === "transient" ? `${st().chops.chops.length} SLICES` : "GRID: SLICES FOLLOW THE BEAT · TRANSIENTS: THEY FOLLOW THE HITS") }, fields: () => [
@@ -268,6 +269,8 @@ export function buildPages(ctx) {
 
   // CHOP-12: the second sampler-core slice appends its sub-pages (after the existing ones, whose numbers tests and habits rely on)
   for (const [key, subs] of Object.entries(moreSubpages(ctx))) pages[key].subs.push(...subs);
+  // CHOP-13 step C: the drum pad mega banks (MAIN 2: the three names and the banks, PAD 9: kept pad)
+  for (const [key, subs] of Object.entries(megaSubpages(ctx))) pages[key].subs.push(...subs);
   return pages;
 
   // MAIN: title, the big numbers, the bank line and three mini pattern rows. update() is called ~12x/s and on state changes.
@@ -276,6 +279,7 @@ export function buildPages(ctx) {
     el.className = "lcd-main";
     const analysis = session.analysis;
     el.innerHTML = `<div class="lcd-title"></div>
+      <div class="lcd-line mega-line"></div>
       <div class="lcd-big"><div><small>BPM</small><b class="bpm"></b></div><div><small>METER</small><b class="meter"></b></div>
         <div><small>KEY</small><b class="key"></b></div><div><small>BAR</small><b class="pos">1.1</b></div><div><small>TIME</small><b class="clock">0:00.0</b></div></div>
       <div class="lcd-line bankline"></div>
@@ -284,12 +288,16 @@ export function buildPages(ctx) {
     const q = (s) => el.querySelector(s);
     const set = (node, v) => { if (node.textContent !== v) node.textContent = v; };
     const bpm = q(".bpm"), meter = q(".meter"), key = q(".key"), pos = q(".pos"), clock = q(".clock"), line = q(".bankline"), status = q(".statusline"), pat = q(".lcd-pat");
-    const title = q(".lcd-title"), bpmLabel = q(".lcd-big small");
+    const title = q(".lcd-title"), bpmLabel = q(".lcd-big small"), megaLine = q(".mega-line");
     const update = () => {
       const { chops, bank, selected, project } = st();
       const T = session.tempoBpm, user = project.tempo?.bpm != null;
-      set(title, meta.title);   // meta is the open song's, replaced in place when the source changes
-      set(bpmLabel, user ? "USER BPM" : "SONG BPM");
+      set(title, session.source ? meta.title : "Pick a song to chop");   // meta is the open song's, replaced in place when the source changes
+      title.classList.toggle("none", !session.source);
+      // the three levels: song (above), mega bank and drum pad bank (here)
+      const ml = `MEGA BANK ${env.nav.megaInfo(session.mega)?.name ?? "—"} ▸ BANK ${bankName(bank, bankCount(project, chops))}`;
+      if (megaLine.textContent !== ml) megaLine.textContent = ml;
+      set(bpmLabel, user ? "TEMPO · YOURS" : session.source ? "TEMPO · FOLLOWS SONG" : "TEMPO · DEFAULT");
       set(bpm, T.toFixed(1));
       set(meter, `${chops.beats_per_bar}/4`);
       const k = analysis.key;
@@ -307,7 +315,7 @@ export function buildPages(ctx) {
       if (line.textContent !== text) line.textContent = text;
       // what is different from the plain song: project tempo, 16 levels, a chain that is playing
       const bits = [];
-      if (Math.abs(T - chops.bpm) > 0.005) bits.push(`${T.toFixed(1)} BPM (SONG ${chops.bpm.toFixed(1)})`);   // the user's tempo stays through a song change
+      if (session.source && Math.abs(T - chops.bpm) > 0.005) bits.push(`${T.toFixed(1)} BPM (SONG ${chops.bpm.toFixed(1)})`);   // the user's tempo stays through a song change
       const sx = session.sixteen;
       if (sx) bits.push(`16 LEVELS: PAD ${sx.pad + 1} · ${sx.mode.toUpperCase()}`);
       const sg = project.song;
@@ -318,7 +326,7 @@ export function buildPages(ctx) {
       const stText = bits.join(" · ");
       if (status.textContent !== stText) { status.textContent = stText; status.hidden = !stText; }
       // three busiest pad rows of the pattern
-      const n = project.pattern.bars * chops.beats_per_bar * 4;
+      const n = project.pattern.bars * session.patternBeatsPerBar * 4;
       const counts = new Map();
       for (const e of project.pattern.events) counts.set(e.pad, (counts.get(e.pad) ?? 0) + 1);
       const rows = [...counts.entries()].sort((x, y) => y[1] - x[1]).slice(0, 3).map(([p]) => p);

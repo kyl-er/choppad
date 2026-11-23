@@ -6,7 +6,7 @@ export function mount(root, session, env) {
   const d = createDisposer();
   const { store, seq, meta, video } = session;
   const st = () => store.get();
-  let dur = meta.duration_s;
+  let dur = meta.duration_s || 1;
   root.innerHTML = `<div class="vin" tabindex="0" role="slider" aria-label="Song position: drag the record or use the arrow keys" aria-valuemin="0" aria-valuemax="${Math.round(dur)}" aria-valuenow="0"></div>
     <div class="rd"><span>33⅓ RPM</span><span class="rd-clock">0:00.0</span><span class="rd-sect"></span></div>`;
   const host = root.querySelector(".vin");
@@ -14,7 +14,7 @@ export function mount(root, session, env) {
   let s, ring, arc, dot, spin, armLine, head;
   function build() {
     host.replaceChildren();
-    dur = meta.duration_s;
+    dur = meta.duration_s || 1;
     host.setAttribute("aria-valuemax", String(Math.round(dur)));
     s = svg("svg", { viewBox: "0 0 200 200", class: "plat-svg", "aria-hidden": "true" }, host);
     ring = svg("g", { class: "p-ring" }, s);
@@ -32,7 +32,7 @@ export function mount(root, session, env) {
     for (let r = 34; r < 79; r += 2.1) if (!(r > 55 && r < 57.5) && !(r > 66 && r < 68.5)) svg("circle", { cx: 100, cy: 100, r, class: "p-groove" }, spin);
     svg("circle", { cx: 100, cy: 100, r: 30, class: "p-label" }, spin);
     svg("path", { d: "M100 70 A30 30 0 0 1 130 100 L100 100Z", class: "p-wedge" }, spin);
-    const short = meta.title.replace(/^.*?[—:-]\s*/, "").slice(0, 14).toUpperCase();
+    const short = session.source ? meta.title.replace(/^.*?[—:-]\s*/, "").slice(0, 14).toUpperCase() : "NO SONG";
     svg("text", { x: 100, y: 91, class: "p-lt", "text-anchor": "middle" }, spin).textContent = "CHOPPAD";
     svg("text", { x: 100, y: 112, class: "p-lt s", "text-anchor": "middle" }, spin).textContent = short;
     svg("text", { x: 100, y: 120, class: "p-lt s", "text-anchor": "middle" }, spin).textContent = `${Math.round(st().chops.bpm)} BPM · 33⅓`;

@@ -2,10 +2,12 @@
 // Also the pad / bank / panic events from the keyboard and MIDI input. createPadGrid() is shared with the phone pad mode.
 import { cellToPad } from "/layout.js";
 import { PADS, bankCount, sixteenLevel } from "/actions.js";
-import { createDisposer, fmt } from "./util.js";
+import { createDisposer, fmt, shortSong } from "./util.js";
 
-/** Builds the 16 pad buttons inside `grid` and keeps them drawn from the store. velocity() gives the hit velocity. */
-export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}) {
+/** Builds the 16 pad buttons inside `grid` and keeps them drawn from the store. velocity() gives the hit velocity.
+ *  songTitle(id) names the song a kept pad came from (the library knows it; without it the id is shown). */
+export function createPadGrid(grid, session, { velocity = () => 1, onDown, songTitle = () => null } = {}) {
+  const titleOf = (id) => (id === session.source ? session.meta.title : songTitle(id)) ?? id;
   const d = createDisposer();
   const { store, engine } = session;
   const els = [];
@@ -57,8 +59,11 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}
       const mgText = mg ? `M${mg}` : "";
       if (mgEl.textContent !== mgText) { mgEl.textContent = mgText; mgEl.hidden = !mg; mgEl.title = mg ? `Mute group ${mg}` : ""; }
       const tagText = o?.kept ? "KEPT" : o?.src ? "RS" : o?.stem ? STEM_TAG[o.stem] ?? "STM" : o?.stretch?.fit !== undefined ? "FIT" : "";
-      if (tag.textContent !== tagText) { tag.textContent = tagText; tag.hidden = !tagText; tag.title = o?.kept ? `Kept: this pad owns its audio${o.from ? ` (from ${o.from.song})` : ""} and its sound` : o?.src ? "Resampled sound" : o?.stem ? `Plays the ${o.stem} stem` : tagText ? `Fitted to the project tempo (${o.stretch.fit} BPM)` : ""; }
-      el.setAttribute("aria-label", `Pad ${p + 1}${mg ? `, mute group ${mg}` : ""}${o?.kept ? ", kept" : o?.src ? ", resample" : ""}${o?.stem ? `, ${o.stem} stem` : ""}${o?.stretch?.fit !== undefined ? ", fitted to the project tempo" : o?.stretch ? ", stretched by hand" : ""}${sx ? `, level ${fmtLevel(sx.mode, sixteenLevel(sx.mode, p)).join(" ")}` : ""}`);
+      const from = o?.kept && o.from ? titleOf(o.from.song) : null;   // the song a kept pad came from
+      const keptTitle = o?.kept ? `Kept pad: it owns its audio and its sound${from ? `, cut from ${from} at ${fmt(o.from.start)}` : ""}. It stays when the song changes.` : "";
+      if (tag.textContent !== tagText || tag.title !== (keptTitle || tag.title)) { tag.textContent = tagText; tag.hidden = !tagText; tag.title = o?.kept ? keptTitle : o?.src ? "Resampled sound" : o?.stem ? `Plays the ${o.stem} stem` : tagText ? `Fitted to the project tempo (${o.stretch.fit} BPM)` : ""; }
+      if (el.title !== keptTitle) el.title = keptTitle;
+      el.setAttribute("aria-label", `Pad ${p + 1}${mg ? `, mute group ${mg}` : ""}${o?.kept ? `, kept${from ? ` from ${from}` : ""}` : o?.src ? ", resample" : ""}${o?.stem ? `, ${o.stem} stem` : ""}${o?.stretch?.fit !== undefined ? ", fitted to the project tempo" : o?.stretch ? ", stretched by hand" : ""}${sx ? `, level ${fmtLevel(sx.mode, sixteenLevel(sx.mode, p)).join(" ")}` : ""}`);
       el.classList.toggle("empty", !c);
       el.classList.toggle("custom", !!c?.custom);
       el.classList.toggle("stretched", !!c?.stretch);
@@ -66,6 +71,7 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown } = {}
       el.classList.toggle("selected", p === selected);
       let label = c ? (c.custom ? "★ " + fmt(c.start) : session.chopLabel(c)) : "";
       let time = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) + (c.stretch ? ` ×${c.stretch.ratio.toFixed(2)}` : "") + (c.song ? " ♪" : "") : "";
+      if (o?.kept) { label = from ? shortSong(from).slice(0, 9) : "kept"; time = from ? fmt(o.from.start) : `${(o.end - o.start).toFixed(2)}s`; }   // where it came from, not where it is now
       if (sx) [label, time] = fmtLevel(sx.mode, sixteenLevel(sx.mode, p));   // 16 levels: the pad shows its level, not the bar.beat
       const l = els[p].querySelector(".pad-label"), t = els[p].querySelector(".pad-time");
       if (l.textContent !== label) l.textContent = label;
@@ -92,7 +98,7 @@ export function mount(root, session, env) {
   root.innerHTML = `<div class="pad-col">
       <div class="pads" data-c="5" role="group" aria-label="Pads"></div>
       <div class="banks" data-c="6" role="group" aria-label="Banks"></div>
-      <div class="padkeys"><div class="bank-label" role="status"></div><button type="button" class="lvl-key" aria-pressed="false" title="16 levels: the 16 pads play the selected pad at 16 velocities, pitches or filter cutoffs. The mode is on the PAD page of the LCD."><i>▤</i><span>16 Levels</span></button></div>
+      <div class="padkeys"><div class="bank-label" role="status"></div><button type="button" class="lvl-key" aria-pressed="false" title="16 levels: the 16 pads play the selected pad at 16 velocities, pitches or filter cutoffs. The mode is on the PAD page of the LCD."><i>▤</i><span>16 Levels</span></button><button type="button" class="keep-key" title="Keep the selected pad: its sound is saved into the mega bank and stays when the song changes."><i>◆</i><span>Keep</span></button></div>
     </div>
     <div class="nvwrap" data-c="7"><span class="cap vert">Note var.</span>
       <input type="range" min="1" max="127" step="1" class="nv" aria-label="Note variation: velocity of mouse and keyboard hits"><output class="nv-out"></output></div>`;
@@ -104,7 +110,7 @@ export function mount(root, session, env) {
   nvOut.textContent = String(env.noteVar.get());
   const velocity = () => env.noteVar.get() / 127;
 
-  const grid = createPadGrid($(".pads"), session, { velocity });
+  const grid = createPadGrid($(".pads"), session, { velocity, songTitle: (id) => env.nav.songInfo(id)?.title });
   d.add(() => grid.destroy());
 
   const banksEl = $(".banks");
@@ -151,6 +157,26 @@ export function mount(root, session, env) {
   }
   d.add(store.subscribe((s, prev) => { if (s.settings.sixteen !== prev.settings.sixteen) renderLevels(); }));
   renderLevels();
+
+  // KEEP key: the selected pad becomes a kept pad now (the server renders its audio into the mega bank); the same as what a song change does to used pads
+  const keepKey = $(".keep-key");
+  const keepState = () => { const { bank, selected, project } = st(); return { bank, selected, empty: !session.engine.getSlice(bank, selected), kept: !!project.overrides[`${bank}:${selected}`]?.kept }; };
+  function renderKeep() {
+    const { selected, empty, kept } = keepState();
+    keepKey.disabled = empty || kept;
+    keepKey.classList.toggle("on", kept);
+    keepKey.setAttribute("aria-label", empty ? `Keep: pad ${selected + 1} is empty` : kept ? `Keep: pad ${selected + 1} is already kept` : `Keep pad ${selected + 1}: save its sound into the mega bank so it stays when the song changes`);
+  }
+  keepKey.addEventListener("click", async () => {
+    const { bank, selected } = keepState();
+    keepKey.disabled = true;
+    const r = await session.keepPad(bank, selected);
+    renderKeep();
+    const nm = `Pad ${selected + 1} (bank ${String.fromCharCode(65 + (bank % 4))})`;
+    env.toast(r.ok ? (r.kept.length ? `${nm} kept: it stays when the song changes` : `${nm} was already kept`) : `${nm} not kept: ${r.error ?? "unknown error"}`, r.ok ? 2200 : 5000);
+  });
+  d.add(store.subscribe((s, prev) => { if (s.selected !== prev.selected || s.bank !== prev.bank || s.project.overrides !== prev.project.overrides || s.chops !== prev.chops) renderKeep(); }));
+  renderKeep();
 
   // keyboard / MIDI input -> the session (same handlers as the classic screen)
   const handlers = {

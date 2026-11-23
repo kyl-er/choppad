@@ -2,7 +2,7 @@
 // Clicking a section or bank jumps there; dragging or resizing a pad's region re-slices it.
 import { createWaveform } from "/waveform.js";
 import { PADS, bankCount } from "/actions.js";
-import { createDisposer, cssVar, fmt, sectionIsLive } from "./util.js";
+import { createDisposer, cssVar, fmt, noSong, sectionIsLive } from "./util.js";
 
 export function mount(root, session, env) {
   const d = createDisposer();
@@ -20,7 +20,10 @@ export function mount(root, session, env) {
     custom: cssVar("--wf-custom"), label: cssVar("--wf-label"), sel: cssVar("--acc-b"), selFill: cssVar("--wf-sel-fill"), play: cssVar("--acc-o"),
   });
   // The container (`.wave`) lives as long as the view; the wavesurfer inside it is made again when the source song changes.
-  const makeWave = () => createWaveform(waveEl, {
+  // a mega bank with no song has no waveform: the view shows "Pick a song to chop" and this stand-in takes the calls
+  const noWave = { destroy() {}, setHeight() {}, setStyle() {}, showSlices() {}, markSelected() {}, zoom() {}, flash() {}, scrollTo() {} };
+  waveEl.append(noSong(session, env, d));
+  const makeWave = () => !session.source ? noWave : createWaveform(waveEl, {
     peaks: peaks.peaks, duration: peaks.duration_s, media: video, style: readStyle(),
     onPadClick: (p) => session.hit(p, env.noteVar.get() / 127),
     onSliceEdit: (p, start, end) => {
@@ -38,7 +41,7 @@ export function mount(root, session, env) {
   d.add(env.theme.on(() => wave.setStyle(readStyle())));
 
   // ---- bank strip + sections
-  let dur = meta.duration_s;
+  let dur = meta.duration_s || 1;
   function renderBankStrip() {
     const { chops } = st(), track = $(".banks-track");
     track.innerHTML = "";
@@ -112,7 +115,7 @@ export function mount(root, session, env) {
   d.add(() => session.off("hit", onHit));
   // the source song changed (the session emits it after swapping buffer, peaks, chops): same view, same container, new wavesurfer
   const onSource = () => {
-    dur = meta.duration_s;
+    dur = meta.duration_s || 1;
     wave.destroy();
     wave = makeWave();
     renderBankStrip(); renderSections(); renderBank();
