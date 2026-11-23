@@ -251,6 +251,28 @@ def summary(media_root, doc):
 
 
 # ---- keeping a pad ----
+TARGET_PEAK = 0.891   # -1 dBFS; the same two numbers as components/ui/engine.js (normalizationGain)
+MAX_NORM_GAIN = 4.0
+_norm_cache = {}
+
+
+def normalization_gain(wav_path):
+    """The gain the browser engine applies to audio from this file: its peak brought to TARGET_PEAK, at most MAX_NORM_GAIN."""
+    import numpy as np
+    st = os.stat(wav_path)
+    key = (wav_path, st.st_size, int(st.st_mtime))
+    if key not in _norm_cache:
+        with wave.open(wav_path, "rb") as w:
+            width, raw = w.getsampwidth(), w.readframes(w.getnframes())
+        if width != 2 or not raw:
+            _norm_cache[key] = 1.0
+        else:
+            x = np.frombuffer(raw, dtype="<i2")
+            peak = float(max(abs(int(x.max())), abs(int(x.min())))) / 32768.0   # ints: abs(-32768) must not wrap
+            _norm_cache[key] = 1.0 if peak <= 0 else round(min(MAX_NORM_GAIN, TARGET_PEAK / peak), 6)
+    return _norm_cache[key]
+
+
 class EmptyPad(ValueError):
     """The pad has no audio at all (nothing to keep)."""
 
@@ -292,6 +314,12 @@ def render_keep(media_root, mid, source, project, chops, bank, pad):
             raise
     o = (project.get("overrides") or {}).get(f"{bank}:{pad}") or {}
     out = {"src": f"/media/{ROOT}/{mid}/samples/{h}.wav", "start": 0, "end": duration}
+    # The browser plays a chop at its song's normalising gain; the kept sample is the raw audio (so exports stay as they
+    # were), and the pad remembers that gain so it sounds exactly as loud after it is kept. A resample already played at 1.
+    if not o.get("src"):
+        g = normalization_gain(p["audio"])
+        if abs(g - 1.0) > 1e-3:
+            out["gain"] = g
     frm_song = o.get("song") or source
     if frm_song and not o.get("src"):  # a resample has no slice of a song to point back to
         out["from"] = {"song": frm_song, "start": p["start"], "end": p["end"]}

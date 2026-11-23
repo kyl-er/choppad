@@ -174,7 +174,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   function sourceOf(o) {
     if (!o) return null;
     if (o.stretch) return { url: o.stretch.url, whole: false };
-    if (o.src) return { url: o.src, whole: true, gain: 1, follow: false };
+    if (o.src) return { url: o.src, whole: true, gain: o.kept ? (o.gain ?? 1) : 1, follow: false };   // a kept pad plays at the level it had before it was kept
     if (o.stem) { const own = !o.song || o.song === sourceId; return { url: stemUrl(o.song ?? sourceId, o.stem), whole: true, gain: own ? songNorm : undefined, follow: own }; }
     if (o.song && o.song !== sourceId) return { url: `/media/${o.song}/audio.wav`, whole: true };
     return null;
@@ -918,7 +918,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     if (d.mega.source && d.mega.source !== sourceId) {   // the source changed while we were away: follow it, with its kept pads
       const have0 = store.get().project.overrides;
       const keeps = Object.entries(want.overrides).filter(([k, o]) => o?.kept && JSON.stringify(o) !== JSON.stringify(have0[k]))
-        .map(([k, o]) => { const [bank, pad] = k.split(":").map(Number); return { type: "slice.keep", bank, pad, src: o.src, start: o.start, end: o.end, params: o.params, from: o.from }; });
+        .map(([k, o]) => { const [bank, pad] = k.split(":").map(Number); return { type: "slice.keep", bank, pad, src: o.src, start: o.start, end: o.end, params: o.params, from: o.from, gain: o.gain }; });
       await setSource(d.mega.source, { actions: [...keeps, { type: "source.set", song: d.mega.source, chops: d.chops }] });
     }
     const have = store.get().project;
@@ -932,7 +932,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
       if (JSON.stringify(sl) === JSON.stringify(have.overrides[k])) continue;
       const [bank, pad] = k.split(":").map(Number);
       if (sl.kept) {   // a kept pad: its own sample, sound and origin (a one-pad kit.load would drop kept, params and from)
-        apply({ type: "slice.keep", bank, pad, src: sl.src, start: sl.start, end: sl.end, params: sl.params, from: sl.from });
+        apply({ type: "slice.keep", bank, pad, src: sl.src, start: sl.start, end: sl.end, params: sl.params, from: sl.from, gain: sl.gain });
       } else if (sl.song || sl.stretch || sl.src || sl.stem) { // a slice with a source or a stretch travels as a one-pad kit.load
         const pads = Array(PADS).fill(null);
         pads[pad] = { song_id: sl.song ?? "", start: sl.start, end: sl.end, stretch: sl.stretch, src: sl.src, stem: sl.stem };

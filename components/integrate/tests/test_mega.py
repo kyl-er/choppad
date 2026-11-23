@@ -496,7 +496,9 @@ class Keep(Rig):
         code, r = self.call(f"/api/mega/{mid}/keep", {"bank": 1, "pad": 2})
         self.assertEqual((code, r["kept"], r["failed"], r["already"]), (200, [{"bank": 1, "pad": 2}], [], []))
         o = self.get(mid)["project"]["overrides"]["1:2"]
-        self.assertEqual({k for k in o}, {"start", "end", "src", "kept", "params", "from"})
+        # gain: the level the chop played at before it was kept (the song's normalising gain; contracts §15)
+        self.assertEqual({k for k in o}, {"start", "end", "src", "kept", "params", "from", "gain"})
+        self.assertTrue(0 < o["gain"] <= 4)
         self.assertTrue(o["kept"])
         self.assertEqual((o["from"], o["start"]), ({"song": "A", "start": 9.0, "end": 9.5}, 0))     # chop 18 = bank 1, pad 2
         self.assertEqual((o["params"]["gainDb"], o["params"]["pitch"], o["params"]["filter"], o["params"]["attack"]), (-6, 3, {"type": "lp", "cutoff": 500, "q": 0.7}, 0.2))

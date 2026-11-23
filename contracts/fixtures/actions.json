@@ -198,5 +198,12 @@
     {"name": "CHOP-13 source.set changes source and chops, keeps the project, clamps the bank", "actions": [{"type": "bank.set", "bank": 2}, {"type": "pad.set", "pad": 1, "params": {"gainDb": -2}}, {"type": "source.set", "song": "b", "chops": {"grid": "1/4", "bpm": 90, "beats_per_bar": 4, "banks": [[0], [1]]}}], "expect": {"source": "b", "bank": 1, "chops": {"bpm": 90}, "project": {"pads": [{"muteGroup": 0}, {"gainDb": -2}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}, {"muteGroup": 0}]}}},
     {"name": "CHOP-13 source.set keeps the bank while it still exists and a kept pad extends the bank count", "actions": [{"type": "slice.keep", "bank": 4, "pad": 0, "src": "/media/_mega/m1/samples/0123456789abcdef.wav", "start": 0, "end": 1.5}, {"type": "bank.set", "bank": 4}, {"type": "source.set", "song": "b", "chops": {"grid": "1/4", "bpm": 90, "beats_per_bar": 4, "banks": [[0]]}}], "expect": {"source": "b", "bank": 4, "project": {"overrides": {"4:0": {"kept": true}}}}},
     {"name": "CHOP-13 source.set with a missing song or chops changes nothing", "actions": [{"type": "source.set", "song": "", "chops": {"banks": []}}, {"type": "source.set", "song": "b"}, {"type": "source.set", "song": "b", "chops": {"bpm": 1}}, {"type": "source.set", "song": 7, "chops": {"banks": []}}], "unchanged": true}
+    ,{ "name": "slice.keep remembers the level the pad played at",
+      "actions": [{ "type": "slice.keep", "bank": 0, "pad": 2, "src": "/media/_mega/m0123456789a/samples/0123456789abcdef.wav", "start": 0, "end": 0.5, "gain": 1.78 }],
+      "expect": { "project": { "overrides": { "0:2": { "start": 0, "end": 0.5, "src": "/media/_mega/m0123456789a/samples/0123456789abcdef.wav", "kept": true, "gain": 1.78 } } } } },
+    { "name": "slice.keep with a level out of range is refused",
+      "actions": [{ "type": "slice.keep", "bank": 0, "pad": 2, "src": "/media/_mega/m0123456789a/samples/0123456789abcdef.wav", "start": 0, "end": 0.5, "gain": 9 },
+                  { "type": "slice.keep", "bank": 0, "pad": 2, "src": "/media/_mega/m0123456789a/samples/0123456789abcdef.wav", "start": 0, "end": 0.5, "gain": 0 }],
+      "unchanged": true }
   ]
 }

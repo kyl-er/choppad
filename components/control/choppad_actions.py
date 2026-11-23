@@ -498,9 +498,14 @@ def _reduce_core(state, action):
                                    and _is_num(fr.get("start")) and _is_num(fr.get("end"))):
             return state
         params = {**_default_pad(), **clean_pad(a["params"] if a.get("params") is not None else proj["pads"][pad])}
+        gain = a.get("gain")  # the level the pad played at before it was kept, so keeping does not change loudness
+        if gain is not None and not (_is_num(gain) and 0 < gain <= 4):
+            return state
         o = {"start": s_, "end": e_, "src": src, "kept": True, "params": params}
         if fr is not None:
             o["from"] = {"song": fr["song"], "start": fr["start"], "end": fr["end"]}
+        if gain is not None and gain != 1:
+            o["gain"] = gain
         key = f"{bank}:{pad}"
         if _same_value(proj["overrides"].get(key), o):
             return state
@@ -718,7 +723,8 @@ def diff_project(old, new):
             bank, pad = (int(x) for x in k.split(":"))
             if v.get("kept") is True:  # CHOP-13: a kept pad travels whole (src, params, from)
                 out.append({"type": "slice.keep", "bank": bank, "pad": pad, "src": v.get("src"), "start": v["start"], "end": v["end"],
-                            "params": v.get("params"), **({"from": v["from"]} if "from" in v else {})})
+                            "params": v.get("params"), **({"from": v["from"]} if "from" in v else {}),
+                            **({"gain": v["gain"]} if "gain" in v else {})})
             elif "song" in v or "stretch" in v or "src" in v or "stem" in v:  # a slice with a source or a stretch travels as a one-pad kit.load
                 kit = [None] * PADS
                 kit[pad] = {"song_id": v.get("song", ""), "start": v["start"], "end": v["end"],

@@ -27,11 +27,27 @@ sync_playwright = ts.sync_playwright
 S = "window.choppad.song.session"
 
 # peak of the master analyser over ~300 ms, in the page
-PEAK_JS = """async () => {
+WATCH_JS = """() => {
+    // Listen to the master bus all the time, so a short one-shot is caught even when the test process is slow to ask.
+    if (window.__sig) return;
     const a = window.choppad.audio.analyser, buf = new Float32Array(a.fftSize);
-    let peak = 0;
-    for (let i = 0; i < 20; i++) { a.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await new Promise((r) => setTimeout(r, 15)); }
-    return peak;
+    window.__sig = { peak: 0, at: -1e9 };
+    setInterval(() => {
+        a.getFloatTimeDomainData(buf);
+        let p = 0;
+        for (const v of buf) p = Math.max(p, Math.abs(v));
+        if (p > 0.001) window.__sig = { peak: p, at: performance.now() };
+    }, 10);
+}"""
+PEAK_JS = """async () => {
+    // peak heard on the master bus in the last 1.5 s, or within the next 2 s
+    const end = performance.now() + 2000;
+    while (performance.now() < end) {
+        const s = window.__sig;
+        if (s && performance.now() - s.at < 1500) return s.peak;
+        await new Promise((r) => setTimeout(r, 20));
+    }
+    return 0;
 }"""
 # contrast ratio of two CSS colours (alpha of fg blended over bg), through a canvas so any colour syntax works
 CONTRAST_JS = """([fg, bg]) => {
@@ -106,6 +122,7 @@ class Station(unittest.TestCase):
         page.goto(f"{self.base}/{query}#/song/{self.sid}")
         page.wait_for_function("window.choppad?.song?.session", timeout=30000)
         page.wait_for_selector(".pad .pad-label:not(:empty)")
+        page.evaluate(WATCH_JS)
         return page, errors
 
     def store(self, page, expr):

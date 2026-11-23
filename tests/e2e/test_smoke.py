@@ -64,6 +64,30 @@ def free_port():
         return s.getsockname()[1]
 
 
+WATCH_JS = """() => {
+    // Listen to the master bus all the time, so a short one-shot is caught even when the test process is slow to ask.
+    if (window.__sig) return;
+    const a = window.choppad.audio.analyser, buf = new Float32Array(a.fftSize);
+    window.__sig = { peak: 0, at: -1e9 };
+    setInterval(() => {
+        a.getFloatTimeDomainData(buf);
+        let p = 0;
+        for (const v of buf) p = Math.max(p, Math.abs(v));
+        if (p > 0.001) window.__sig = { peak: p, at: performance.now() };
+    }, 10);
+}"""
+PEAK_JS = """async () => {
+    // peak heard on the master bus in the last 1.5 s, or within the next 2 s
+    const end = performance.now() + 2000;
+    while (performance.now() < end) {
+        const s = window.__sig;
+        if (s && performance.now() - s.at < 1500) return s.peak;
+        await new Promise((r) => setTimeout(r, 20));
+    }
+    return 0;
+}"""
+
+
 @unittest.skipIf(sync_playwright is None, "playwright is not installed for this Python")
 @unittest.skipIf(library_song() is None, "no library song in media/")
 class SongScreenSmoke(unittest.TestCase):
@@ -122,6 +146,7 @@ class SongScreenSmoke(unittest.TestCase):
         page.goto(f"{self.base}/#/song/{self.sid}")
         page.wait_for_function("window.choppad?.song?.session", timeout=30000)
         page.wait_for_selector(".pad .pad-label:not(:empty)")
+        page.evaluate(WATCH_JS)
         return page, errors
 
     @staticmethod
@@ -145,16 +170,7 @@ class SongScreenSmoke(unittest.TestCase):
         st = self.state(page)
         self.assertEqual(st["selected"], 1)
         self.assertIn("selected", page.locator('.pad[data-pad="1"]').get_attribute("class"))
-        self.assertGreater(page.evaluate("""async () => {
-            const a = window.choppad.audio.analyser, buf = new Float32Array(a.fftSize);
-            let peak = 0;
-            for (let i = 0; i < 20; i++) {
-                a.getFloatTimeDomainData(buf);
-                for (const v of buf) peak = Math.max(peak, Math.abs(v));
-                await new Promise((r) => setTimeout(r, 15));
-            }
-            return peak;
-        }"""), 0.001, "the pad hit produced no signal on the master bus")
+        self.assertGreater(page.evaluate(PEAK_JS), 0.001, "the pad hit produced no signal on the master bus")
 
         # bank navigation
         label = page.locator(".bank-label").inner_text()

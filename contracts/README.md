@@ -253,6 +253,9 @@ media/_mega/<mid>/samples/<16hex>.wav     audio the mega bank owns (16-bit PCM)
   `usedPads(project)` (JS) / `used_pads(project)` (Python) return them.
 - **Kept pad** = an override that owns its audio and its sound:
   `overrides["b:p"] = { start: 0, end: <duration>, src: "/media/_mega/<mid>/samples/<hash>.wav", kept: true, params: {<pad params §8/§14>}, from?: { song, start, end } }`.
+  A kept override may also carry `gain` (0 < gain ≤ 4, absent = 1): the level the chop played at before it was kept (the browser plays
+  a song's chops at that song's normalising gain), so keeping a pad does not change how loud it is. The sample file itself stays the raw
+  audio, so exports are unchanged. `slice.keep` takes the same optional `gain`.
   `params` is the pad's sound frozen at keep time; from then on the pad's sound lives in the override, not in `pads[p]` (which other
   banks share). The engine and the exporters use `override.params` when present, else `pads[p]`.
 - Number of banks = `max(len(chops.banks), 1 + highest bank index in overrides)`; a pad beyond the source's banks without an override is empty.

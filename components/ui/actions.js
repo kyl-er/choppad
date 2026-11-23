@@ -350,7 +350,10 @@ function reduceCore(state, action) {
       const hasFrom = fr !== undefined && fr !== null;
       if (hasFrom && !(typeof fr === "object" && typeof fr.song === "string" && fr.song && isNum(fr.start) && isNum(fr.end))) return state;
       const params = { ...DEFAULT_PAD, ...cleanPad(hasParams ? a.params : state.project.pads[a.pad]) };
-      const o = { start: a.start, end: a.end, src: a.src, kept: true, params, ...(hasFrom ? { from: { song: fr.song, start: fr.start, end: fr.end } } : {}) };
+      // gain: the level the pad played at before it was kept (the song's normalising gain), so keeping does not change loudness
+      if (a.gain !== undefined && a.gain !== null && !(isNum(a.gain) && a.gain > 0 && a.gain <= 4)) return state;
+      const o = { start: a.start, end: a.end, src: a.src, kept: true, params, ...(hasFrom ? { from: { song: fr.song, start: fr.start, end: fr.end } } : {}),
+        ...(isNum(a.gain) && a.gain !== 1 ? { gain: a.gain } : {}) };
       const key = `${bank}:${a.pad}`;
       if (eq(state.project.overrides[key], o)) return state;
       return withProject(state, { overrides: { ...state.project.overrides, [key]: o } });
