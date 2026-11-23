@@ -534,7 +534,7 @@ class MegaStepB(unittest.TestCase):
         self.assertEqual(failed, [], failed)
 
     # ------------------------------------------------------------------ 10. what a kept pad does not do
-    def test_10_kept_pads_are_skipped_by_stretch_and_fit_and_a_kit_of_them_says_why(self):
+    def test_10_kept_pads_are_skipped_by_stretch_and_fit_and_a_kit_holds_them(self):
         page, failed = self.tab()
         self.lay_break(page, play=False)
         self.choose(page, self.B)
@@ -554,13 +554,12 @@ class MegaStepB(unittest.TestCase):
         self.assertIn("kept", out["one"]["error"])
         self.assertEqual(out["fit"], {"ok": True, "fitted": 0, "skipped": 4})
         self.assertEqual(out["banked"], 0, "stretchBank leaves the kept pads out")
-        self.assertFalse(out["kit"]["ok"])
-        self.assertIn("kept", out["kit"]["error"], "the server's words are shown")
+        self.assertTrue(out["kit"]["ok"], "since step D a kit holds kept pads (their audio is copied into the kit)")
+        self.assertEqual([("src" in p, "song_id" in p) for p in out["kit"]["kit"]["pads"][:5]], [(True, False)] * 4 + [(False, True)])
         self.assertEqual(out["stretchedKept"], 0)
         self.assertEqual(out["stretchedFree"], 12, "the free pads of the bank were stretched as before")
-        # no request for a kept pad was made (the server would have answered 400): only the kit save was refused
-        self.assertEqual([f for f in failed if "savekit" not in f], [], failed)
-        self.assertEqual(len([f for f in failed if "savekit" in f]), 1)
+        # no request for a kept pad was made (the server would have answered 400)
+        self.assertEqual(failed, [], failed)
 
 
 if __name__ == "__main__":

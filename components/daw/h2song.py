@@ -140,7 +140,7 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
 
     # W3b song mode: with a song in "song" mode and a chain (DawProject carries it in pattern["song"]) every ChopPad pattern is
     # one Hydrogen pattern and the chain is the pattern sequence; otherwise the one pattern, as before.
-    specs, sequence = [(pattern_name, bars, (pattern or {}).get("events") or [])], [pattern_name]
+    specs, sequence = [(pattern_name, bars, (pattern or {}).get("events") or [], beats_per_bar)], [pattern_name]
     song = (pattern or {}).get("song")
     if isinstance(song, dict) and song.get("mode") == "song" and isinstance(song.get("chain"), list) and isinstance(song.get("patterns"), list):
         names, listed, used = {}, [], set()
@@ -154,7 +154,8 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
             used.add(name)
             names[sp["id"]] = name
             sbars = float(sp["bars"]) if isinstance(sp.get("bars"), (int, float)) and sp["bars"] >= 1 else 2.0
-            listed.append((name, sbars, sp.get("events") or []))
+            own = sp.get("beatsPerBar")   # a pattern keeps its own bar length (step D); an old one takes the project's
+            listed.append((name, sbars, sp.get("events") or [], own if isinstance(own, int) and not isinstance(own, bool) and 1 <= own <= 16 else beats_per_bar))
         order = []
         for c in song["chain"]:
             if isinstance(c, dict) and c.get("pattern") in names:
@@ -166,8 +167,8 @@ def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, 
     pats = ET.SubElement(root, "patternList")
     written = dropped_bank = dropped_other = 0
     q = QUANT_BEATS.get(quant, 0.25)
-    for pname, pbars, pevents in specs:
-        psize = pattern_ticks(pbars, beats_per_bar)
+    for pname, pbars, pevents, pbpb in specs:
+        psize = pattern_ticks(pbars, pbpb)
         pat = ET.SubElement(pats, "pattern")
         _txt(pat, "name", pname)
         _txt(pat, "category", "")

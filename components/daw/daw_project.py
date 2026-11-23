@@ -91,9 +91,17 @@ def content_key(pads, bank, fx, choke):
         st = os.stat(path) if path else None
         return [path, st.st_size, int(st.st_mtime)] if st else None
     blob = json.dumps([KIT_FORMAT, bank, fx or {}, bool(choke)] +
-                      [[p["pad"], stat(p["audio"]), p["start"], p["end"], stat(p["stretch"]), p.get("gain_db"), p.get("pitch"), p.get("params")]
+                      [[p["pad"], stat(p["audio"]), p["start"], p["end"], stat(p["stretch"]), p.get("gain_db"), p.get("level", 1.0), p.get("pitch"), p.get("params")]
                        for p in pads], sort_keys=True, default=str)
     return hashlib.sha1(blob.encode()).hexdigest()[:8]
+
+
+def project_beats_per_bar(proj, chops):
+    """Beats per bar of the pattern: its own (`project.pattern.beatsPerBar`, contracts §8 step D), else the chop table's, else 4."""
+    own = ((proj.get("pattern") or {}).get("beatsPerBar"))
+    if isinstance(own, int) and not isinstance(own, bool) and 1 <= own <= 16:
+        return own
+    return int((chops or {}).get("beats_per_bar") or 4)
 
 
 def build_project(media_dir, out_root, *, bank=None, fx="project", project=None, swing=None, quant=None, choke=None):
@@ -113,16 +121,36 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
     meta = _read(os.path.join(media_dir, "meta.json"), {})
     chops = _read(os.path.join(media_dir, "chops.json"))
     proj = project if project is not None else X.song_project(media_dir)  # CHOP-13: the song's mega bank (X.song_project)
+    sid = meta.get("id") or os.path.basename(os.path.abspath(media_dir))
+    return _assemble(sid, meta.get("title") or sid, proj, chops, media_dir, os.path.dirname(os.path.abspath(media_dir)), out_root,
+                     bank=bank, fx=fx, swing=swing, quant=quant, choke=choke, saved_params=False)
+
+
+def build_mega_project(media_root, doc, chops, media_dir, out_root, *, bank=None, fx="project", swing=None, quant=None, choke=None):
+    """The same for a drum pad MEGA BANK (CHOP-13 step D): `doc` is its document, `chops` the chop table of its source (an empty
+    table without one), `media_dir` the source song's folder or None. Kept pads play their sample files at their own `gain`
+    and with their own params, the other pads are the source song's; the tempo is the mega bank's and the bar length the
+    pattern's own. The bridge's song and kit are named after the mega bank (its id keys the song file)."""
+    return _assemble(doc["id"], doc.get("name") or doc["id"], doc["project"], chops, media_dir, media_root, out_root,
+                     bank=bank, fx=fx, swing=swing, quant=quant, choke=choke, saved_params=True)
+
+
+def _assemble(sid, title, proj, chops, media_dir, media_root, out_root, *, bank, fx, swing, quant, choke, saved_params):
+    import choppad_export as X
+
+    n_banks = max(len(chops.get("banks") or []), 1 + max([0] + [int(k.split(":")[0]) for k in (proj.get("overrides") or {})
+                                                                  if re.match(r"^\d+:\d+$", k)]))
     pattern = proj.get("pattern") or {"bars": 2, "events": []}
-    bank = pick_bank(pattern, bank, len(chops["banks"]))
+    bank = pick_bank(pattern, bank, n_banks)
     if fx == "project":
         fx = proj.get("fx")
     swing = max(0.0, min(0.5, float(swing))) if isinstance(swing, (int, float)) and not isinstance(swing, bool) else 0.0
     quant = quant if quant in QUANT_BEATS else "1/16"
     choke = True if choke is None else bool(choke)
-    pads = X.bank_pads(media_dir, bank, proj.get("overrides") or {}, proj.get("pads") or [])
-    sid = meta.get("id") or os.path.basename(os.path.abspath(media_dir))
-    title = meta.get("title") or sid
+    if saved_params:   # a mega bank: nothing is read from "the song's latest mega bank"; everything comes from `proj`
+        pads = X.bank_pads(media_dir, bank, proj.get("overrides") or {}, proj.get("pads") or [], chops=chops, media_root=media_root)
+    else:
+        pads = X.bank_pads(media_dir, bank, proj.get("overrides") or {}, proj.get("pads") or [])
     key = content_key(pads, bank, fx, choke)
     kit_name = f"ChopPad {clean_name(title)} B{bank + 1} {key}"
     kit_dir = os.path.join(out_root, kit_name)
@@ -137,7 +165,7 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
         finally:
             shutil.rmtree(stage, ignore_errors=True)
     by_pad = {p["pad"]: p for p in pads}
-    slots = [Chop(p, os.path.join(kit_dir, f"chop_{p:02d}.wav"), 36 + p, by_pad[p]["gain_db"], by_pad[p]["pitch"])
+    slots = [Chop(p, os.path.join(kit_dir, f"chop_{p:02d}.wav"), 36 + p, X.pad_gain_db(by_pad[p]), by_pad[p]["pitch"])
              if p in by_pad else None for p in range(PADS)]
     # W3b: the project tempo (project "tempo": {bpm, follow}) wins over the song's own tempo
     bpm = float(((proj.get("tempo") or {}).get("bpm")) or chops.get("bpm") or 120.0)
@@ -147,7 +175,7 @@ def build_project(media_dir, out_root, *, bank=None, fx="project", project=None,
     song = proj.get("song")
     if isinstance(song, dict) and song.get("mode") == "song" and song.get("chain") and song.get("patterns"):
         pattern = {**pattern, "song": song}  # W3b: song mode: one Hydrogen pattern per ChopPad pattern, the chain as the sequence
-    return DawProject(song_id=sid, title=title, bpm=bpm, beats_per_bar=int(chops.get("beats_per_bar") or 4), bank=bank,
+    return DawProject(song_id=sid, title=title, bpm=bpm, beats_per_bar=project_beats_per_bar(proj, chops), bank=bank,
                       chops=slots, pattern=pattern, kit_name=kit_name, kit_dir=kit_dir, key=key,
                       swing=swing, quant=quant, choke=choke)
 

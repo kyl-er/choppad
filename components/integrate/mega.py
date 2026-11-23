@@ -236,6 +236,127 @@ def mega_for_song(media_root, song_id):
         return create(media_root, None, song_id, seed if isinstance(seed, dict) else None)
 
 
+class NoSource(Exception):
+    """An operation needs the mega bank's source song and it has none (HTTP 409, a plain sentence)."""
+    http_status = 409
+
+
+NO_SOURCE_MSG = "This mega bank has no source song, so there is nothing to {what}. Pick a song first."
+
+
+class Target:
+    """What one mega-keyed operation acts on: the mega bank document as read at the start of the request, its source song folder
+    (None without one), the source's chop table (an empty table without one), and the player settings the server knows of."""
+
+    def __init__(self, media_root, doc, view_settings=None):
+        self.media_root, self.doc, self.mid = media_root, doc, doc["id"]
+        self.project = doc["project"]
+        self.source = doc.get("source")
+        self.media_dir = song_dir(media_root, self.source) if self.source else None
+        self.chops = chops_of(media_root, doc)
+        self.view_settings = view_settings or {}
+
+    @property
+    def title(self):
+        return self.doc.get("name") or self.mid
+
+    def need_song(self, what):
+        """The source song's folder, or NoSource (409) saying what could not be done."""
+        if not self.media_dir:
+            raise NoSource(NO_SOURCE_MSG.format(what=what))
+        return self.media_dir
+
+    def samples_dir(self):
+        return os.path.join(_dir(self.media_root, self.mid), "samples")
+
+    def exports_dir(self):
+        d = os.path.join(_dir(self.media_root, self.mid), "exports")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
+# ---- sample housekeeping (step D): nothing is ever deleted, an orphaned sample is moved to media/_mega/<mid>/.trash/ ----
+SAMPLE_RE = re.compile(r"^[0-9a-f]{16}\.wav$")
+MEGA_SRC_RE = re.compile(r"^/media/_mega/([A-Za-z0-9_-]{1,64})/samples/([0-9a-f]{16}\.wav)$")
+_PINS = {}   # mega id -> {file name: expiry (monotonic seconds, or None while a `pinned` block is open)}
+
+
+class pinned:
+    """`with pinned(mid, names): ...` -- while the block runs, `sweep_samples` leaves these sample files alone (a kit copy in progress)."""
+
+    def __init__(self, mid, names):
+        self.mid, self.names = mid, list(names)
+
+    def __enter__(self):
+        with _LOCK:
+            pins = _PINS.setdefault(self.mid, {})
+            for n in self.names:
+                pins[n] = (pins.get(n) or 0) + 1 if isinstance(pins.get(n), int) else 1
+        return self
+
+    def __exit__(self, *exc):
+        with _LOCK:
+            pins = _PINS.setdefault(self.mid, {})
+            for n in self.names:
+                if isinstance(pins.get(n), int):
+                    pins[n] -= 1
+                    if pins[n] <= 0:
+                        del pins[n]
+        return False
+
+
+def pin_for(mid, names, seconds=120.0):
+    """Protect freshly uploaded samples for a while: an upload is not referenced by any override until the tab says so."""
+    with _LOCK:
+        pins = _PINS.setdefault(mid, {})
+        for n in names:
+            if not isinstance(pins.get(n), int):
+                pins[n] = time.monotonic() + seconds
+
+
+def _is_pinned(mid, name):
+    v = _PINS.get(mid, {}).get(name)
+    return v is not None and (isinstance(v, int) or v > time.monotonic())
+
+
+def referenced_samples(mid, project):
+    """File names (in samples/) that an override of the project points at: kept pads and resamples uploaded to the mega bank. The
+    overrides are shared by the pattern and every pattern of the song chain (patterns name pads, pads name overrides), so a sample a
+    pad of any of them needs is in this set."""
+    out = set()
+    for o in (project.get("overrides") or {}).values():
+        m = MEGA_SRC_RE.match((o or {}).get("src") or "") if isinstance(o, dict) else None
+        if m and m.group(1) == mid:
+            out.add(m.group(2))
+    return out
+
+
+def sweep_samples(media_root, mid):
+    """Move the sample files of mega bank `mid` that no override refers to into media/_mega/<mid>/.trash/ (never deletes). A sample that
+    a kit copy in progress (`pinned`) or a recent upload (`pin_for`) needs stays. Call it with the mega bank's lock held when the
+    document may change meanwhile (the server does). Returns {moved: [file names], kept: how many files stay}."""
+    with _LOCK:
+        doc = read(media_root, mid)
+        keep = referenced_samples(mid, doc["project"])
+        samples = os.path.join(_dir(media_root, mid), "samples")
+        trash = os.path.join(_dir(media_root, mid), TRASH)
+        moved, stay = [], 0
+        for name in sorted(os.listdir(samples)) if os.path.isdir(samples) else []:
+            if not SAMPLE_RE.match(name):
+                continue
+            if name in keep or _is_pinned(mid, name):
+                stay += 1
+                continue
+            os.makedirs(trash, exist_ok=True)
+            dest, n = os.path.join(trash, name), 1
+            while os.path.exists(dest):   # the same content swept twice: both copies stay in the trash
+                n += 1
+                dest = os.path.join(trash, f"{name[:-4]}-{n}.wav")
+            os.replace(os.path.join(samples, name), dest)
+            moved.append(name)
+        return {"moved": moved, "kept": stay}
+
+
 def used_pads(project):
     """Every (bank, pad) with an override or hit by an event of the pattern or of any song pattern (contracts §15)."""
     return A.used_pads(project)

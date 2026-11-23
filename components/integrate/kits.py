@@ -1,9 +1,15 @@
 """kits: 16 pads whose slices may come from different songs (W3). Stored as media/_kits/<kit-id>/kit.json:
 
-  {"schema": "choppad.kit/1", "name": "...", "pads": [ {song_id, start, end, params, stretch?} | null  x16 ], "fx": {...}}
+  {"schema": "choppad.kit/1", "name": "...", "pads": [ {song_id, start, end, params, stretch?} | KEPT | null  x16 ], "fx": {...}}
 
 `params` are the pad sound parameters (gainDb, pitch, attack, release, reverse, mode); `stretch` = {ratio, url} names a
 rendering made by POST /api/songs/<song_id>/stretch. Plain functions over a media_root; server.py only routes to them.
+
+CHOP-13 step D: an entry may also be a KEPT pad (no `song_id`): {src, start, end, params, gain?, from?} where `src` is
+`/media/_kits/<kit-id>/samples/<16hex>.wav`, audio COPIED into the kit folder, so a kit never depends on a mega bank's files. `gain`
+(0 < gain <= 4) and `from` {song, start, end} are the kept override's own. On input `src` may name a mega bank's sample
+(`/media/_mega/<mid>/samples/<hash>.wav`): it is copied into the kit and rewritten. Loading such a kit into a mega bank copies the
+samples into that mega bank and emits `slice.keep` (POST /api/mega/<mid>/loadkit {kit, bank}). Old kits load as before.
 
   GET    /api/kits                 -> [{id, name, pads, songs}]
   POST   /api/kits {name, pads, fx?} -> kit (201)         POST /api/songs/<id>/savekit {bank, name} builds one from a bank
@@ -19,6 +25,8 @@ import shutil
 import tempfile
 
 SCHEMA = "choppad.kit/1"
+KIT_SAMPLE_URL = re.compile(r"^/media/_kits/([A-Za-z0-9_-]{1,64})/samples/([0-9a-f]{16})\.wav$")
+MEGA_SAMPLE_URL = re.compile(r"^/media/_mega/([A-Za-z0-9_-]{1,64})/samples/([0-9a-f]{16})\.wav$")
 KIT_DIR = "_kits"
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PARAM_KEYS = {"gainDb": (int, float), "pitch": (int, float), "attack": (int, float), "release": (int, float),
@@ -68,6 +76,9 @@ def normalize(doc, media_root, *, partial=None):
             continue
         if not isinstance(p, dict):
             raise ValueError(f"pad {i + 1}: expected an object or null")
+        if p.get("song_id") is None and p.get("src") is not None:   # a kept pad: it owns its audio (step D)
+            pads.append(_kept_entry(media_root, i, p))
+            continue
         sid = p.get("song_id")
         if not _song_exists(media_root, sid):
             raise ValueError(f"pad {i + 1}: song {sid!r} is not in the library")
@@ -101,6 +112,64 @@ def normalize(doc, media_root, *, partial=None):
     if not isinstance(fx, dict):
         raise ValueError("fx must be an object")
     return {"schema": SCHEMA, "name": name, "pads": pads, "fx": {k: v for k, v in fx.items() if k in FX_KEYS and _num(v)}}
+
+
+def _kept_entry(media_root, i, p):
+    """A kept kit pad {src, start, end, params, gain?, from?}: `src` is a file of the kit (stored) or of a mega bank (to be copied)."""
+    src = str(p.get("src") or "")
+    m = KIT_SAMPLE_URL.match(src) or MEGA_SAMPLE_URL.match(src)
+    if not m:
+        raise ValueError(f"pad {i + 1}: a kept pad needs src /media/_kits/<kit>/samples/<hash>.wav (or a mega bank's sample)")
+    folder = "_kits" if KIT_SAMPLE_URL.match(src) else "_mega"
+    if not os.path.isfile(os.path.join(media_root, folder, m.group(1), "samples", m.group(2) + ".wav")):
+        raise ValueError(f"pad {i + 1}: the sound {src} is missing")
+    if not (_num(p.get("start")) and _num(p.get("end")) and 0 <= p["start"] < p["end"]):
+        raise ValueError(f"pad {i + 1}: needs 0 <= start < end (seconds)")
+    params = p.get("params") or {}
+    if not isinstance(params, dict):
+        raise ValueError(f"pad {i + 1}: params must be an object")
+    out = {"src": src, "start": p["start"], "end": p["end"],
+           "params": _clean_params({k: v for k, v in params.items() if k in PARAM_KEYS and isinstance(v, PARAM_KEYS[k])})}
+    if _num(p.get("gain")) and 0 < p["gain"] <= 4 and p["gain"] != 1:
+        out["gain"] = p["gain"]
+    fr = p.get("from")
+    if isinstance(fr, dict) and isinstance(fr.get("song"), str) and fr["song"] and _num(fr.get("start")) and _num(fr.get("end")):
+        out["from"] = {"song": fr["song"], "start": fr["start"], "end": fr["end"]}
+    return out
+
+
+def copy_sample(src_path, dst_path):
+    """Copy a sample file through a temp file and a rename (never a half-written file under its final name)."""
+    if os.path.isfile(dst_path):
+        return
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst_path), prefix=".tmp-", suffix=".part")
+    os.close(fd)
+    try:
+        shutil.copyfile(src_path, tmp)
+        os.replace(tmp, dst_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _materialize(media_root, kid, doc):
+    """Copy the mega samples a kit document names into media/_kits/<kid>/samples/ and point the entries at the copies, so the kit
+    owns its audio. The document is changed in place."""
+    for p in doc["pads"]:
+        if not p or "src" not in p or "song_id" in p:
+            continue
+        m = MEGA_SAMPLE_URL.match(p["src"])
+        k = KIT_SAMPLE_URL.match(p["src"])
+        if m or (k and k.group(1) != kid):   # a mega bank's file, or a file of another kit: the kit gets its own copy
+            folder, owner, h = (("_mega", m.group(1), m.group(2)) if m else (KIT_DIR, k.group(1), k.group(2)))
+            name = h + ".wav"
+            copy_sample(os.path.join(media_root, folder, owner, "samples", name), os.path.join(kits_root(media_root), kid, "samples", name))
+            p["src"] = f"/media/{KIT_DIR}/{kid}/samples/{name}"
+    return doc
 
 
 def _slug(name):
@@ -141,7 +210,8 @@ def list_kits(media_root):
             continue
         used = [p for p in k.get("pads", []) if p]
         out.append({"id": kid, "name": k.get("name", kid), "pads": len(used),
-                    "songs": sorted({p["song_id"] for p in used}), "modified": os.path.getmtime(_path(media_root, kid))})
+                    "songs": sorted({p["song_id"] for p in used if "song_id" in p}), "kept": sum(1 for p in used if "song_id" not in p),
+                    "modified": os.path.getmtime(_path(media_root, kid))})
     return sorted(out, key=lambda k: -k["modified"])
 
 
@@ -152,7 +222,7 @@ def create_kit(media_root, doc):
     while os.path.exists(os.path.join(kits_root(media_root), kid)):
         n += 1
         kid = f"{base}-{n}"
-    _write(media_root, kid, clean)
+    _write(media_root, kid, _materialize(media_root, kid, clean))
     return {"id": kid, **clean}
 
 
@@ -160,6 +230,7 @@ def update_kit(media_root, kid, doc):
     cur = read_kit(media_root, kid)
     cur.pop("id", None)
     clean = normalize(doc, media_root, partial=cur)
+    _materialize(media_root, kid, clean)
     _write(media_root, kid, clean)
     return {"id": kid, **clean}
 
@@ -191,6 +262,65 @@ def kit_from_bank(media_root, song_id, bank, name, *, overrides=None, pads=None,
                 entry[k] = o[k]
         out[p["pad"]] = entry
     return {"name": name, "pads": out, "fx": (proj.get("fx") or {}) if fx is None else fx}
+
+
+def kit_from_mega(t, bank, name, *, overrides=None, pads=None, fx=None):
+    """Build a kit from bank `bank` of the mega bank in Target `t` (what the bank holds now: kept pads, other-song pads, stretch
+    renderings, free pads of the source), with the pad sounds and master fx of the mega bank unless the request carries them.
+    A kept pad (or a pad that plays a sample the mega bank owns) becomes a kept kit entry that names the mega bank's file; create_kit
+    copies the file into the kit, so the kit never depends on the mega bank."""
+    from choppad_export import bank_pads
+    proj = t.project
+    ov = proj.get("overrides") or {} if overrides is None else overrides
+    sounds = proj.get("pads") or [] if pads is None else pads
+    out = [None] * 16
+    for p in bank_pads(t.media_dir, bank, ov, sounds, chops=t.chops, media_root=t.media_root):
+        o = ov.get(f"{bank}:{p['pad']}") or {}
+        params = sounds[p["pad"]] if p["pad"] < len(sounds) and isinstance(sounds[p["pad"]], dict) else {}
+        if o.get("kept") or MEGA_SAMPLE_URL.match(o.get("src") or ""):
+            entry = {"src": o["src"], "start": p["start"], "end": p["end"], "params": dict(o["params"]) if o.get("kept") and isinstance(o.get("params"), dict) else dict(params)}
+            for k in ("gain", "from"):
+                if o.get(k) is not None:
+                    entry[k] = o[k]
+            out[p["pad"]] = entry
+            continue
+        entry = {"song_id": o.get("song") or t.source, "start": p["start"], "end": p["end"], "params": params}
+        if o.get("stretch"):
+            entry["stretch"] = o["stretch"]
+        for k in ("src", "stem"):   # W3b
+            if o.get(k):
+                entry[k] = o[k]
+        out[p["pad"]] = entry
+    return {"name": name, "pads": out, "fx": (proj.get("fx") or {}) if fx is None else fx}
+
+
+def kept_actions(media_root, mid, kit, bank, song, *, copy=True):
+    """The actions that put kit `kit` (a stored kit document) on bank `bank` of mega bank `mid`: one `kit.load` for the pads that name a
+    song, and a `slice.keep` for every kept pad, whose sample is first COPIED into media/_mega/<mid>/samples/ (the kit's file is
+    never touched). `song` = the mega bank's source (kit pads of that song need no `song` of their own). Returns (actions, copied)."""
+    import mega as M   # the sweeper must not move a file while it is being copied
+    acts, copied = [], []
+    songs = [(p if p and "song_id" in p else None) for p in kit["pads"]]
+    if any(songs):
+        acts.append({"type": "kit.load", "bank": bank, "song": song or "", "pads": songs})
+    dst_dir = os.path.join(media_root, "_mega", mid, "samples")
+    names = [KIT_SAMPLE_URL.match(p["src"]).group(2) + ".wav" for p in kit["pads"] if p and "song_id" not in p and KIT_SAMPLE_URL.match(p.get("src") or "")]
+    with M.pinned(mid, names):
+        for pad, p in enumerate(kit["pads"]):
+            m = KIT_SAMPLE_URL.match(p["src"]) if p and "song_id" not in p and p.get("src") else None
+            if not m:
+                continue
+            name = m.group(2) + ".wav"
+            if copy:
+                copy_sample(os.path.join(kits_root(media_root), m.group(1), "samples", name), os.path.join(dst_dir, name))
+            copied.append(name)
+            act = {"type": "slice.keep", "bank": bank, "pad": pad, "src": f"/media/_mega/{mid}/samples/{name}", "start": p["start"], "end": p["end"],
+                   "params": dict(p.get("params") or {})}
+            for k in ("gain", "from"):
+                if p.get(k) is not None:
+                    act[k] = p[k]
+            acts.append(act)
+    return acts, copied
 
 
 def export_kit(media_root, kid, kind, *, hydrogen_root=None):

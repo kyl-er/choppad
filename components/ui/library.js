@@ -129,6 +129,9 @@ export function mountLibrary(root, { onOpen, mega = null }) {
   if (typeof EventSource !== "undefined") {
     es = new EventSource("/api/events");
     es.addEventListener("job", (e) => { try { onJob(norm(JSON.parse(e.data))); } catch { /* a malformed event is skipped */ } });
+    // a mega bank was created, renamed, removed or given another song somewhere else (another tab, an agent): redraw the list
+    let megaTimer = 0;
+    es.addEventListener("mega", () => { clearTimeout(megaTimer); megaTimer = setTimeout(() => refreshMegas(), 150); });
   }
   function addJob(jobId, label) {
     mine.set(jobId, label);

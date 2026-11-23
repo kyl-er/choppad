@@ -34,7 +34,17 @@ Routes
   POST /api/mega/<mid>/actions | transport      as the song endpoints;  GET /api/mega/<mid>/events
   POST /api/mega/<mid>/source {song}   keep the used pads (rendered into samples/), release the rest, set the source
   POST /api/mega/<mid>/keep {bank, pad}   keep one pad now
-  GET  /media/_mega/<mid>/samples/<hash>.wav   a kept pad's audio (Range supported); nothing else from _mega is served
+  POST /api/mega/<mid>/source {song: null}   keep the used pads like a switch and leave the mega bank with NO source
+  CHOP-13 step D: every per-project operation is keyed by mega bank (megaops.py); the song-keyed routes of the same name resolve the
+  song's mega bank and call the same function:
+  POST /api/mega/<mid>/export {kind: hydrogen|sfz|zip, bank, [overrides, pads, fx]}   works with no source song (zip/sfz of a mega bank
+                                 with no source: media/_mega/<mid>/exports/, served at /media/_mega/<mid>/exports/<file>)
+  POST /api/mega/<mid>/savekit | stretch | daw {daw, command: open|sync|play|stop|close}   (409 when nothing to close)
+  POST /api/mega/<mid>/resample  raw 16-bit WAV body -> media/_mega/<mid>/samples/<hash>.wav (survives the song); {url, hash, duration, ...}
+  POST /api/mega/<mid>/regrid | reanalyze | sections | key | advise | stems   act on the SOURCE song; 409 "... Pick a song first." when none
+  `mega` event {change: created|renamed|removed|source, id, name?, source?} on GET /api/events (the library list); DELETE of a mega bank
+                                 a tab has open first sends `mega {change: "removed", id}` on that mega bank's own stream
+  GET  /media/_mega/<mid>/samples/<hash>.wav   a kept pad's audio (Range supported); only samples and exports are served from _mega
 Writes are atomic (temp file + rename). Mutating endpoints read X-ChopPad-Origin and echo it in the event they cause.
 """
 import hashlib
@@ -213,6 +223,9 @@ class ChopPadServer(ThreadingHTTPServer):
         super().shutdown()
 
 
+MEGA_SUBS = ("events", "actions", "transport", "source", "keep", "project", "resample", "regrid", "reanalyze", "sweep", "loadkit")
+# actions that can leave a sample file of the mega bank without an override (a pad released, kept again as something else, ...)
+SWEEP_AFTER = frozenset({"slice.clear", "slice.keep", "slice.set", "slice.setMany", "slice.src", "slice.stem", "slice.stretch", "kit.load"})
 LIBRARY = "*"  # hub key of the library-level stream (GET /api/events): events that belong to no song yet
 
 
@@ -296,8 +309,11 @@ LOCAL_RATE = (80, 40)  # a tab's own pad hits and play/stop handed to a DAW brid
 
 
 def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None, reanalyze=None, actions=None,
-                host: str = "127.0.0.1", on_transport=None, daw_state=None):
+                host: str = "127.0.0.1", on_transport=None, daw_state=None, mega_actions=None):
     actions = actions or {}  # name -> fn(media_dir, body) -> json-able; POST /api/songs/<id>/<name>
+    # CHOP-13 step D: name -> fn(mega.Target, body) -> json-able; POST /api/mega/<mid>/<name>, and the song-keyed route of the same name
+    # (which resolves the song's mega bank and calls the same function). megaops.make_ops builds the real table.
+    mega_actions = mega_actions or {}
     media_root = os.path.abspath(media_root)
     jobs = Jobs()
     hub = Hub()
@@ -305,9 +321,21 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
     view_state = {}  # mega id -> {bank, selected, settings, sections}: what the player looks at (never saved)
     local_buckets, buckets_guard = {}, threading.Lock()  # mega id -> TokenBucket for `local` transport
 
-    def daw_of(sid):
-        """{open, daw, bank} of the DAW bridge holding song `sid` (W2 DawManager.state_for), or "closed"."""
-        return daw_state(sid) if daw_state else {"open": False, "daw": None, "bank": None}
+    def daw_of(key):
+        """{open, daw, bank} of the DAW bridge holding `key` (W2 DawManager.state_for), or "closed"."""
+        return daw_state(key) if daw_state else {"open": False, "daw": None, "bank": None}
+
+    def holder(mid, src=None):
+        """The key a DAW bridge holds for mega bank `mid`: the mega id (step D); a manager keyed by song (the plain hook of the song-keyed
+        tests) is found through the source song."""
+        if not daw_state:
+            return src or mid   # no state hook: the plain song-keyed mirroring of the song-keyed tests
+        if not daw_of(mid).get("open") and src and daw_of(src).get("open"):
+            return src
+        return mid
+
+    def daw_for(mid, src=None):
+        return daw_of(holder(mid, src))
     locks, locks_guard = {}, threading.Lock()
 
     def mega_lock(mid):
@@ -315,9 +343,21 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
         with locks_guard:
             return locks.setdefault(mid, threading.Lock())
 
+    def mega_doc_of(sid):
+        """The song's mega bank (made on first use; the library is told `mega created`). KeyError for an unknown song."""
+        existed = X.latest_mega_doc(media_root, sid) is not None
+        doc = M.mega_for_song(media_root, sid)
+        if not existed:
+            mega_event("created", doc)
+        return doc
+
     def mega_of(sid):
         """Id of the song's mega bank (made on first use). KeyError for an unknown song."""
-        return M.mega_for_song(media_root, sid)["id"]
+        return mega_doc_of(sid)["id"]
+
+    def mega_event(change, doc):
+        """Library-level `mega` event {change: created|renamed|removed|source, id, name, source}: other tabs refresh their list."""
+        hub.publish(LIBRARY, "mega", {"change": change, "id": doc["id"], "name": doc.get("name"), "source": doc.get("source")})
 
     def source_chops_event(sid, origin, chops):
         """A regrid or reanalyze of song `sid`: every mega bank that has it as its source is told."""
@@ -437,8 +477,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if sid == LIBRARY:  # CHOP-11: told about every recent job first, so a job that moved on cannot be missed
                     for j in jobs.snapshot():
                         self.wfile.write(f"event: job\ndata: {json.dumps(job_event(j), separators=(',', ':'))}\n\n".encode())
-                elif dawsid and daw_of(dawsid).get("open"):  # CHOP-11: a tab that connects while a bridge is open is told at once
-                    self.wfile.write(f"event: daw\ndata: {json.dumps(daw_of(dawsid), separators=(',', ':'))}\n\n".encode())
+                elif daw_for(sid, dawsid).get("open"):  # CHOP-11: a tab that connects while a bridge is open is told at once
+                    self.wfile.write(f"event: daw\ndata: {json.dumps(daw_for(sid, dawsid), separators=(',', ':'))}\n\n".encode())
                 self.wfile.flush()
                 last = time.monotonic()
                 while True:
@@ -506,6 +546,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                         taken.append(a)
                     state = nxt
                 self._commit(doc, state, taken, before)
+                if any(a.get("type") in SWEEP_AFTER for a in taken):
+                    M.sweep_samples(media_root, mid)   # under the lock: the document it reads is the one just written
                 listeners = hub.listeners(mid)
             return self._json({"project": A.project_doc(state), "applied": len(taken), "ignored": len(acts) - len(taken),
                                "view": {"bank": state["bank"], "selected": state["selected"]}, "listeners": listeners, "mega": mid})
@@ -548,19 +590,22 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             """POST /api/mega/<mid>/source {song}: option (b) "keep current drum pad" (contracts §15)."""
             body = self._body()
             song = body.get("song") if isinstance(body, dict) else None
-            if not isinstance(song, str) or not M.song_dir(media_root, song):
+            clearing = isinstance(body, dict) and "song" in body and song is None   # step D: leave the mega bank with no source
+            if not clearing and (not isinstance(song, str) or not M.song_dir(media_root, song)):
                 return self._err(404, "unknown song")
             with mega_lock(mid):
                 try:
                     doc = M.read(media_root, mid)
                 except KeyError:
                     return self._err(404, "unknown mega bank")
-                if doc.get("source") == song:  # already the source: nothing to do
+                if doc.get("source") == song:  # already the source (or already none): nothing to do
                     return self._json({"mega": M.summary(media_root, doc), "kept": [], "released": 0, "failed": [], "actions": []})
-                try:
-                    new_chops = read_json(os.path.join(M.song_dir(media_root, song), "chops.json"))
-                except (OSError, ValueError):
-                    return self._err(400, "the song has no chop table")
+                new_chops = None
+                if not clearing:
+                    try:
+                        new_chops = read_json(os.path.join(M.song_dir(media_root, song), "chops.json"))
+                    except (OSError, ValueError):
+                        return self._err(400, "the song has no chop table")
                 state = self._mega_state(doc)
                 before, old_chops = state["project"], state["chops"]
                 acts = []
@@ -569,11 +614,12 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if doc.get("source") and (not tempo or tempo.get("bpm") is None) and A._is_num(old_chops.get("bpm")):
                     acts.append({"type": "tempo.set", "bpm": old_chops["bpm"], "follow": False})
                 keeps, kept, _already, failed = self._keep_actions(doc, state, A.used_pads(before), skip_empty=True)
-                acts += keeps + [{"type": "source.set", "song": song, "chops": new_chops}]
+                acts += keeps + [{"type": "source.set", "song": song, "chops": new_chops}]   # song/chops null = no source
                 state, taken = self._run_batch(doc, state, acts)
                 cells = {(b, p) for b, idx in enumerate(old_chops.get("banks") or []) for p in range(min(16, len(idx)))}
                 owned = {A._override_key(k) for k in state["project"]["overrides"]}
                 doc = self._commit(doc, state, taken, before)
+                mega_event("source", doc)
                 return self._json({"mega": M.summary(media_root, doc), "kept": kept, "released": len(cells - owned), "failed": failed,
                                    "view": {"bank": state["bank"]}, "actions": taken})   # `actions`: the batch broadcast to the other streams
 
@@ -594,10 +640,53 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 acts, kept, already, failed = self._keep_actions(doc, state, [(bank, pad)], skip_empty=False)
                 state, taken = self._run_batch(doc, state, acts)
                 doc = self._commit(doc, state, taken, before)
+                if taken:
+                    M.sweep_samples(media_root, mid)
                 return self._json({"mega": M.summary(media_root, doc), "kept": kept, "already": already, "failed": failed, "actions": taken})
 
-        def _transport(self, mid, dawsid):
-            """`dawsid`: the song a DAW bridge would hold for this mega bank (its source), or None."""
+        def _loadkit(self, mid, body):
+            """POST /api/mega/<mid>/loadkit {kit: id, bank}: a kit on a bank of this mega bank. Kept pads of the kit are COPIED into the mega
+            bank (media/_mega/<mid>/samples/) and become `slice.keep`; the rest is one `kit.load`; the kit's master fx are applied.
+            One batch is saved and broadcast; it is also returned as `actions` (the calling tab applies it, like /keep)."""
+            kid = body.get("kit") if isinstance(body, dict) else None
+            bank = body.get("bank", 0) if isinstance(body, dict) else 0
+            if not isinstance(bank, int) or isinstance(bank, bool) or bank < 0:
+                return self._err(400, "bank must be 0 or more")
+            try:
+                kit = kits.read_kit(media_root, kid if isinstance(kid, str) else "")
+            except KeyError:
+                return self._err(404, "unknown kit")
+            with mega_lock(mid):
+                try:
+                    doc = M.read(media_root, mid)
+                except KeyError:
+                    return self._err(404, "unknown mega bank")
+                try:
+                    acts, copied = kits.kept_actions(media_root, mid, kit, bank, doc.get("source"))
+                except OSError as e:
+                    return self._err(500, f"a sound of the kit could not be copied: {e}")
+                if kit.get("fx"):
+                    acts.append({"type": "fx.set", "params": dict(kit["fx"])})
+                state = self._mega_state(doc)
+                before = state["project"]
+                state, taken = self._run_batch(doc, state, acts)
+                doc = self._commit(doc, state, taken, before)
+                if any(a.get("type") in SWEEP_AFTER for a in taken):
+                    M.sweep_samples(media_root, mid)
+                return self._json({"ok": True, "loaded": sum(1 for p in kit["pads"] if p), "name": kit.get("name"), "kept": copied, "actions": taken,
+                                   "mega": M.summary(media_root, doc)})
+
+        def _sweep(self, mid):
+            """POST /api/mega/<mid>/sweep: move the samples no override uses to media/_mega/<mid>/.trash/ (never deletes)."""
+            with mega_lock(mid):
+                try:
+                    return self._json(M.sweep_samples(media_root, mid))
+                except KeyError:
+                    return self._err(404, "unknown mega bank")
+
+        def _transport(self, mid, src):
+            """`src`: the source song of the mega bank (a DAW manager keyed by song is found through it), or None."""
+            dawsid = holder(mid, src)
             body = self._body()
             cmd = body.get("command") if isinstance(body, dict) else None
             if cmd not in TRANSPORT_COMMANDS:
@@ -627,7 +716,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             if body.get("local") is True:
                 return self._local_transport(mid, dawsid, msg)
             listeners = hub.publish(mid, "transport", msg)
-            if on_transport and dawsid:  # W2: mirror to open DAW bridges (never lets a DAW problem fail the request)
+            if on_transport:  # W2: mirror to open DAW bridges (never lets a DAW problem fail the request)
                 on_transport(dawsid, msg)
             return self._json({"ok": True, "listeners": listeners})
 
@@ -635,7 +724,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
         def _local_transport(self, mid, dawsid, msg):
             """`local: true`: the tab already did it. NOT published to the other tabs (they would play it too); handed to
             the DAW bridge when one is open, rate limited per mega bank. Answers at once; never waits on the DAW."""
-            if not dawsid or not daw_of(dawsid).get("open"):
+            if not daw_of(dawsid).get("open"):
                 return self._json({"ok": True, "delivered": False, "reason": "no bridge open"})
             with buckets_guard:
                 bucket = local_buckets.setdefault(mid, TokenBucket(*LOCAL_RATE))
@@ -683,7 +772,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             view = view_state.get(doc["id"]) or {}
             src = doc.get("source")
             return {"mega": M.summary(media_root, doc), "project": doc["project"], "chops": M.chops_of(media_root, doc),
-                    "view": {k: view.get(k) for k in ("bank", "selected")}, "daw": daw_of(src) if src else {"open": False, "daw": None, "bank": None}}
+                    "view": {k: view.get(k) for k in ("bank", "selected")}, "daw": daw_for(doc["id"], src)}
 
         def _mega_routes(self, method, p):
             """True when `p` is under /api/mega: it has then been answered."""
@@ -707,12 +796,15 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                         doc = M.create(media_root, body.get("name"), src)
                     except ValueError as e:
                         return self._err(400, str(e)) or True
+                    mega_event("created", doc)
                     return self._json(self._mega_view(doc), 201) or True
                 return self._err(405, "method not allowed") or True
-            m = re.match(r"^/api/mega/([^/]+)(?:/(events|actions|transport|source|keep|project))?$", p)
-            if not m:
+            m = re.match(r"^/api/mega/([^/]+)(?:/([a-z]+))?$", p)
+            if not m or (m.group(2) and m.group(2) not in MEGA_SUBS and m.group(2) not in mega_actions):
                 return self._err(404, "not found")
             mid, sub = m.group(1), m.group(2)
+            if method == "POST" and sub == "resample":  # a raw WAV body, not JSON
+                return self._mega_resample(mid) or True
             body = self._body() if method in ("POST", "PUT") else None  # read now: an error answer must not leave it on the connection
             if method == "GET" and sub is None:
                 doc = self._mega_doc_or_404(mid)
@@ -733,17 +825,30 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                         doc = M.rename(media_root, mid, body.get("name") if isinstance(body, dict) else None)
                 except ValueError as e:
                     return self._err(400, str(e)) or True
+                mega_event("renamed", doc)
                 return self._json({"mega": M.summary(media_root, doc)}) or True
             if method == "PUT" and sub == "project":
                 return self._put_project(mid, body) or True
             if method == "DELETE" and sub is None:
-                if not self._mega_doc_or_404(mid):
+                doc = self._mega_doc_or_404(mid)
+                if not doc:
                     return True
                 with mega_lock(mid):
+                    # allowed while a tab has it open: that tab (and any other on its stream) is told first and leaves cleanly; it must
+                    # not write again (a write would answer 404). The DAW bridge holding it is closed.
+                    hub.publish(mid, "mega", {"change": "removed", "id": mid, "name": doc.get("name")})
+                    if daw_for(mid, doc.get("source")).get("open") and "daw" in mega_actions:
+                        try:
+                            mega_actions["daw"](M.Target(media_root, doc), {"daw": daw_for(mid, doc.get("source")).get("daw"), "command": "close"})
+                        except Exception:  # noqa: BLE001 - a bridge that does not close must not keep a mega bank alive
+                            pass
                     M.delete(media_root, mid)
                 view_state.pop(mid, None)
+                with buckets_guard:
+                    local_buckets.pop(mid, None)
+                mega_event("removed", doc)
                 return self._json({"ok": True}) or True
-            if method == "POST" and sub in ("actions", "transport", "source", "keep"):
+            if method == "POST" and sub in ("actions", "transport", "source", "keep", "regrid", "reanalyze", "sweep", "loadkit") or (method == "POST" and sub in mega_actions):
                 doc = self._mega_doc_or_404(mid)
                 if not doc:
                     return True
@@ -751,8 +856,52 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._apply_actions(mid, body) or True
                 if sub == "transport":
                     return self._transport(mid, doc.get("source")) or True
+                if sub in ("regrid", "reanalyze"):
+                    return self._source_regrid(doc, sub, body) or True
+                if sub == "sweep":
+                    return self._sweep(mid) or True
+                if sub == "loadkit":
+                    return self._loadkit(mid, body) or True
+                if sub in mega_actions:
+                    return self._mega_action(doc, sub, body) or True
                 return (self._source(mid) if sub == "source" else self._keep(mid)) or True
             return self._err(405, "method not allowed") or True
+
+        def _mega_action(self, doc, name, body):
+            """Run mega-keyed operation `name` (megaops) on exactly this mega bank; errors as the song-keyed routes answer them, a
+            missing source song as 409 with a plain sentence."""
+            t = M.Target(media_root, doc, (view_state.get(doc["id"]) or {}).get("settings"))
+            try:
+                return self._json(mega_actions[name](t, body if isinstance(body, dict) else {}))
+            except ValueError as e:  # bad input for the action (stretch, export of a mixed kit, ...)
+                return self._err(400, str(e))
+            except Exception as e:  # noqa: BLE001 - shown in the UI
+                return self._err(getattr(e, "http_status", None) or (502 if name == "advise" else 500),
+                                 str(e) if hasattr(e, "http_status") else f"{type(e).__name__}: {e}")
+
+        def _source_regrid(self, doc, op, body):
+            """/api/mega/<mid>/regrid | reanalyze: these belong to the mega bank's SOURCE song (409 when there is none)."""
+            if not doc.get("source") or not M.song_dir(media_root, doc["source"]):
+                return self._err(409, M.NO_SOURCE_MSG.format(what="re-grid" if op == "regrid" else "re-analyse"))
+            body = body if isinstance(body, dict) else {}
+            return self._regrid_song(doc["source"], body, reanalyze_only=op == "reanalyze")
+
+        def _mega_resample(self, mid):
+            """POST /api/mega/<mid>/resample (raw 16-bit WAV body) -> the sample is stored under the mega bank, so it survives the song."""
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > rendered.MAX_BYTES:
+                self.close_connection = True
+                return self._err(413, f"the WAV must be at most {rendered.MAX_BYTES // 2**20} MB")
+            data = self.rfile.read(n)
+            doc = self._mega_doc_or_404(mid)
+            if not doc:
+                return True
+            try:
+                up = rendered.save_mega_sample(os.path.join(media_root, M.ROOT, mid, "samples"), mid, data)
+            except ValueError as e:
+                return self._err(400, str(e))
+            M.pin_for(mid, [up["hash"] + ".wav"])   # not an override's yet: the sweeper leaves it alone for a while
+            return self._json(up)
 
         def _song_dir(self, sid):
             if not ID_RE.match(sid or ""):
@@ -820,7 +969,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 return self._static(CAPTURE_WORKLET_JS)
             if p.startswith("/media/"):
                 parts = p[len("/media/"):].split("/")
-                if parts[0] == M.ROOT:  # CHOP-13: only the kept samples of a mega bank are served from _mega
+                if parts[0] == M.ROOT:  # CHOP-13: only the samples (and, step D, the exports) of a mega bank are served from _mega
+                    if len(parts) == 4 and parts[2] == "exports" and M.ID_RE.match(parts[1]) \
+                            and re.match(r"^[A-Za-z0-9_-]{1,80}-bank\d{1,4}\.(zip|sfz)$", parts[3]):
+                        return self._media(os.path.join(media_root, M.ROOT, parts[1], "exports", parts[3]))
                     if len(parts) != 4 or parts[2] != "samples" or not M.ID_RE.match(parts[1]) \
                             or not re.match(r"^[0-9a-f]{16}\.wav$", parts[3]):
                         return self._err(404, "not found")
@@ -863,12 +1015,12 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 if not d:
                     return self._err(404, "unknown song")
                 load = lambda n: read_json(os.path.join(d, n))  # noqa: E731
-                mdoc = M.mega_for_song(media_root, m.group(1))  # CHOP-13: the project is the mega bank's (made on first use)
+                mdoc = mega_doc_of(m.group(1))  # CHOP-13: the project is the mega bank's (made on first use)
                 return self._json({"meta": load("meta.json"), "analysis": load("analysis.json"),
                                    "chops": load("chops.json"), "peaks": compute_peaks(d), "project": mdoc["project"],
                                    "mega": mdoc["id"],
                                    "view": {k: (view_state.get(mdoc["id"]) or {}).get(k) for k in ("bank", "selected")},
-                                   "daw": daw_of(m.group(1))})
+                                   "daw": daw_for(mdoc["id"], m.group(1))})
             m = re.match(r"^/api/jobs/([0-9a-f]+)$", p)
             if m:
                 j = jobs.get(m.group(1))
@@ -916,21 +1068,19 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._err(404, "unknown song")
                 mid = mega_of(m.group(1))
                 return self._apply_actions(mid) if m.group(2) == "actions" else self._transport(mid, m.group(1))
+            m = re.match(r"^/api/songs/([^/]+)/([a-z]+)$", p)   # step D: the song's mega bank does it (the same code as /api/mega/<mid>/<name>)
+            if m and m.group(2) in mega_actions:
+                if not self._song_dir(m.group(1)):
+                    self._body()
+                    return self._err(404, "unknown song")
+                return self._mega_action(mega_doc_of(m.group(1)), m.group(2), self._body())
             m = re.match(r"^/api/songs/([^/]+)/regrid$", p)
             if p == "/api/regrid" or m:
                 body = self._body()
                 sid = m.group(1) if m else body.get("id")
-                d = self._song_dir(sid)
-                if not d:
+                if not self._song_dir(sid):
                     return self._err(404, "unknown song")
-                try:
-                    chops = regrid(d, grid=body.get("grid") or "1/4", meter=body.get("meter"),
-                                   beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1,
-                                   **({"mode": body["mode"], "sensitivity": body.get("sensitivity")} if body.get("mode") else {}))
-                except (ValueError, KeyError) as e:
-                    return self._err(400, str(e))
-                source_chops_event(sid, self._origin(), chops)
-                return self._json(chops)
+                return self._regrid_song(sid, body)
             m = re.match(r"^/api/songs/([^/]+)/([a-z]+)$", p)
             if m and m.group(2) in actions:
                 d = self._song_dir(m.group(1))
@@ -948,15 +1098,29 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                                      str(e) if hasattr(e, "http_status") else f"{type(e).__name__}: {e}")
             m = re.match(r"^/api/songs/([^/]+)/reanalyze$", p)
             if m and reanalyze:
-                d = self._song_dir(m.group(1))
-                if not d:
+                if not self._song_dir(m.group(1)):
                     return self._err(404, "unknown song")
-                body = self._body()
+                return self._regrid_song(m.group(1), self._body(), reanalyze_only=True)
+            return self._err(404, "not found")
+
+        def _regrid_song(self, sid, body, reanalyze_only=False):
+            """Regrid (or reanalyze) song `sid` and tell every mega bank that has it as its source (the `chops` event)."""
+            d = self._song_dir(sid)
+            if reanalyze_only:
+                if not reanalyze:
+                    return self._err(404, "not found")
                 bpm = body.get("bpm")
                 analysis, chops = reanalyze(d, bpm=float(bpm) if bpm else None, meter=body.get("meter"))
-                source_chops_event(m.group(1), self._origin(), chops)
+                source_chops_event(sid, self._origin(), chops)
                 return self._json({"analysis": analysis, "chops": chops})
-            return self._err(404, "not found")
+            try:
+                chops = regrid(d, grid=body.get("grid") or "1/4", meter=body.get("meter"),
+                               beat_offset=int(body.get("beat_offset") or 0), bpm_mult=body.get("bpm_mult") or 1,
+                               **({"mode": body["mode"], "sensitivity": body.get("sensitivity")} if body.get("mode") else {}))
+            except (ValueError, KeyError) as e:
+                return self._err(400, str(e))
+            source_chops_event(sid, self._origin(), chops)
+            return self._json(chops)
 
         def _upload(self):
             if pipeline is None:
@@ -1011,9 +1175,14 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
 
     srv = ChopPadServer((host, port), Handler, hub)
 
-    def announce_daw(sid):
-        """A bridge opened or closed for `sid`: tell every tab on it (`daw` event {open, daw, bank})."""
-        for mid in M.megas_with_source(media_root, sid):
-            hub.publish(mid, "daw", daw_of(sid))
+    def announce_daw(key):
+        """A bridge opened or closed for `key` (a mega bank id; a song id from a song-keyed manager): tell every tab on it
+        (`daw` event {open, daw, bank})."""
+        try:
+            doc = M.read(media_root, key)
+            hub.publish(key, "daw", daw_for(key, doc.get("source")))
+        except KeyError:
+            for mid in M.megas_with_source(media_root, key):
+                hub.publish(mid, "daw", daw_for(mid, key))
     srv.announce_daw = announce_daw
     return srv

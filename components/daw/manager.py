@@ -16,6 +16,7 @@ from hydrogen import HydrogenBridge, state_root  # noqa: E402
 
 DAWS = ("hydrogen", "ardour")
 COMMANDS = ("open", "sync", "play", "stop")
+MEGA_COMMANDS = COMMANDS + ("close",)   # a mega-keyed request may also close the bridge this server started
 NOTE_LENGTH_S = 0.15  # mirrored hits are one-shots: note-off this long after note-on
 
 
@@ -29,13 +30,15 @@ class DawError(Exception):
 
 class DawManager:
     def __init__(self, state_dir=None, *, bridges=None, midi_factory=None, project_builder=None, on_change=None):
+        # CHOP-13 step D: the key a bridge holds is the id of a drum pad MEGA BANK (command_mega). The song id keyed `command` below
+        # stays for the song-keyed callers (tests, the plain server hook): a key is just a string.
         self.state_dir = state_dir or state_root()
         self._factories = bridges or {"hydrogen": lambda: HydrogenBridge(self.state_dir),
                                       "ardour": lambda: ArdourBridge(self.state_dir)}
         self._midi_factory = midi_factory
         self._build = project_builder or daw_project.build_project
         self.bridges = {}    # daw name -> bridge (once created)
-        self.open = {}       # daw name -> song id currently loaded in it
+        self.open = {}       # daw name -> key (mega bank id, or song id for `command`) currently loaded in it
         self.projects = {}   # daw name -> DawProject last pushed
         self.midi = None
         self.midi_error = None
@@ -54,7 +57,7 @@ class DawManager:
 
     def _changed(self, *sids):
         if self.on_change:
-            for sid in dict.fromkeys(sids):
+            for sid in dict.fromkeys(k for k in sids if k is not None):   # (no one held it before: nobody to tell)
                 try:
                     self.on_change(sid)
                 except Exception:  # noqa: BLE001 - a broken listener must not break the DAW command
@@ -101,18 +104,68 @@ class DawManager:
 
     # ---- the endpoint ----
     def command(self, sid, media_dir, body):
+        """Song-keyed (contracts §11 as built): the bridge holds the song `sid`."""
         if not isinstance(body, dict):
             raise DawError("body must be {daw, command}")
+        return self._command(sid, {"song": sid}, lambda: self._project(media_dir, body), body, COMMANDS)
+
+    def command_mega(self, mid, build, body, extra=None):
+        """Mega-keyed (CHOP-13 step D): the bridge holds the mega bank `mid`. `build(out_root, bank, **player_settings)` returns the
+        DawProject (daw_project.build_mega_project). Also takes command "close": shuts the bridge this server started."""
+        if not isinstance(body, dict):
+            raise DawError("body must be {daw, command}")
+        view = body.get("view_settings") if isinstance(body.get("view_settings"), dict) else {}
+        settings = {k: body.get(k, view.get(k)) for k in ("swing", "quant", "choke") if body.get(k, view.get(k)) is not None}
+
+        def make():
+            try:
+                return build(os.path.join(self.state_dir, "kits"), body.get("bank"), **settings)
+            except FileNotFoundError as e:
+                raise DawError(f"song is missing {os.path.basename(str(e.filename))}; import it again", 409)
+        return self._command(mid, {"mega": mid, **(extra or {})}, make, body, MEGA_COMMANDS)
+
+    def close_key(self, key, daw=None):
+        """Close the bridge holding `key` (the Hydrogen / Ardour this server started; an attached one is left running).
+        DawError 409 when nothing holds it."""
+        with self._lock:
+            names = [d for d, held in self.open.items() if held == key and (daw is None or d == daw)]
+            if not names:
+                raise DawError(f"{daw or 'no daw'} is not open for this; nothing to close", 409)
+            for d in names:
+                b = self.bridges.pop(d, None)
+                if b is not None:
+                    try:
+                        b.close()
+                    except Exception:  # noqa: BLE001 - a bridge that cannot close is still forgotten
+                        pass
+                self.open.pop(d, None)
+                self.projects.pop(d, None)
+            if not self.open and self.midi is not None:
+                try:
+                    self.midi.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.midi = None
+        self._changed(key)
+        return {"ok": True, "closed": names}
+
+    def _command(self, sid, who, make_project, body, commands):
         daw, cmd = body.get("daw"), body.get("command")
+        if cmd not in commands:
+            if daw not in DAWS:
+                raise DawError(f"daw must be one of {', '.join(DAWS)}")
+            raise DawError(f"command must be one of {', '.join(commands)}")
+        if cmd == "close":
+            if daw is not None and daw not in DAWS:
+                raise DawError(f"daw must be one of {', '.join(DAWS)}")
+            return {"daw": daw, "command": "close", **who, **self.close_key(sid, daw)}
         if daw not in DAWS:
             raise DawError(f"daw must be one of {', '.join(DAWS)}")
-        if cmd not in COMMANDS:
-            raise DawError(f"command must be one of {', '.join(COMMANDS)}")
         with self._lock:
             bridge = self._bridge(daw)
-            out = {"ok": True, "daw": daw, "command": cmd, "song": sid}
+            out = {"ok": True, "daw": daw, "command": cmd, **who}
             if cmd in ("open", "sync"):
-                project = self._project(media_dir, body)
+                project = make_project()
                 before = self.open.get(daw)
                 try:
                     if cmd == "open" or daw not in self.open:

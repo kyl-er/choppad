@@ -698,6 +698,34 @@ class MegaStepC(unittest.TestCase):
         self.assertEqual(failed, [], failed)
 
     # ------------------------------------------------------------------ j. layout, names, keyboard, themes
+    def test_o_changes_made_somewhere_else_reach_the_open_screen(self):
+        """An agent (or another tab) renames the open mega bank, clears its song, then removes it: the screen follows
+        each time without a reload and without an error."""
+        page, failed = self.tab()
+        mid = self.sid_mega(page)
+        origin = page.evaluate("performance.timeOrigin")
+        # renamed elsewhere: the library list shows the new name
+        code, _ = c2.api(self.base, f"/api/mega/{mid}", {"name": "Renamed by an agent"}, method="PUT")
+        self.assertEqual(code, 200)
+        page.wait_for_function("[...document.querySelectorAll('#sidebar .megas li')].some((li) => li.textContent.includes('Renamed by an agent'))", timeout=10000)
+        # a second mega bank created elsewhere appears in the list
+        code, made = c2.api(self.base, "/api/mega", {"name": "Made by an agent", "source": self.B})
+        self.assertIn(code, (200, 201))
+        page.wait_for_function("[...document.querySelectorAll('#sidebar .megas li')].some((li) => li.textContent.includes('Made by an agent'))", timeout=10000)
+        # its song cleared elsewhere: the source parts say so
+        code, _ = c2.api(self.base, f"/api/mega/{mid}/source", {"song": None})
+        self.assertEqual(code, 200)
+        page.wait_for_function(f"window.choppad?.song?.session && {S}.source === null", timeout=20000)
+        page.wait_for_selector(".wave .no-song:not([hidden])", timeout=20000)
+        self.assertIn("pick a song to chop", page.locator(".wave .no-song").inner_text().lower())
+        # removed elsewhere: the screen leaves for the library, the list no longer has it
+        code, _ = c2.api(self.base, f"/api/mega/{mid}", method="DELETE")
+        self.assertEqual(code, 200)
+        page.wait_for_function("window.choppad.song == null || !window.choppad.song.session", timeout=10000)
+        page.wait_for_function("![...document.querySelectorAll('#sidebar .megas li')].some((li) => li.textContent.includes('Renamed by an agent'))", timeout=10000)
+        self.assertEqual(page.evaluate("performance.timeOrigin"), origin, "the page was reloaded")
+        self.assertEqual(failed, [], failed)
+
     def test_j_no_horizontal_scroll_every_control_is_named_and_reachable_both_themes(self):
         named = [".path .seg", "#sidebar .row-open", "#sidebar .mega-ren", "#sidebar .mega-del", "#sidebar .mega-new", ".keep-key",
                  ".mchoice .mc-opt", ".mchoice .mc-cancel", ".mchoice .mc-rem"]

@@ -537,13 +537,15 @@ class Core2(unittest.TestCase):
         st, out = api(self.base, f"/api/songs/{self.sid}/export", {"kind": "sfz", "bank": 0})
         self.assertEqual(st, 200, out)
         line = [l for l in open(out["path"]).read().splitlines() if "key=45 " in l][0]
-        self.assertIn(f"sample=resample/{r['url'].rsplit('/', 1)[1]}", line)
+        self.assertRegex(r["url"], r"^/media/_mega/[\w-]+/samples/[0-9a-f]{16}\.wav$")   # step D: stored under the mega bank, not the song
+        self.assertIn(f"/samples/{r['url'].rsplit('/', 1)[1]} ", line)   # the region plays that file (a path relative to the song's folder)
         st, out = api(self.base, f"/api/songs/{self.sid}/export", {"kind": "zip", "bank": 0})
         self.assertEqual(st, 200, out)
         # a kit made from the bank keeps it; loading the kit on another bank puts the resample there
         kit = page.evaluate(f"{S}.saveBankAsKit('resample kit')")
         self.assertTrue(kit["ok"], kit)
-        self.assertEqual(kit["kit"]["pads"][9]["src"], r["url"])
+        self.assertEqual(kit["kit"]["pads"][9]["src"].rsplit("/", 1)[1], r["url"].rsplit("/", 1)[1])   # the kit holds its own copy of the file
+        self.assertIn("/_kits/", kit["kit"]["pads"][9]["src"])
         page.evaluate(f"{S}.setBank(1)")
         page.evaluate(f"{S}.loadKit({json.dumps(kit['kit']['id'])})")
         self.assertEqual(page.evaluate(f"{S}.store.get().project.overrides['1:9'].src"), r["url"])
@@ -551,7 +553,8 @@ class Core2(unittest.TestCase):
         # fitting to a tempo leaves a resample alone
         page.evaluate(f"{S}.store.dispatch({{ type: 'tempo.set', bpm: 90 }})")
         fit = page.evaluate(f"{S}.fitToTempo({{ scope: 'bank' }})")
-        self.assertTrue(any(s["pad"] == 9 and "resample" in s["reason"] for s in fit["skipped"]), fit)
+        # (loaded from a kit, the resample is a kept pad of the mega bank since step D: it owns its audio and is skipped for that reason)
+        self.assertTrue(any(s["pad"] == 9 and ("resample" in s["reason"] or "kept" in s["reason"]) for s in fit["skipped"]), fit)
         self.assertEqual(page.evaluate(f"{S}.store.get().project.overrides['1:9'].stretch ?? null"), None)
         # an empty pattern, bad arguments
         bad = page.evaluate(f"{S}.resample({{ bars: 0, source: 'pattern', pad: 1 }})")

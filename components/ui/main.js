@@ -193,6 +193,18 @@ async function route() {
     current = view;
     // another tab (or an agent) changed the source: the address, the library marks and the mega list follow
     view.session.on("source", () => { syncUrl(); library.refreshMegas(); });
+    // the open mega bank was removed (another tab, or an agent): the session has stopped writing; leave the screen
+    view.session.on("mega-removed", () => { if (current === view) { closeOpen(); library.refreshMegas(); location.hash = "#/"; } });
+    // its source was cleared elsewhere: open it again, so the video, waveform and strips show "Pick a song to chop"
+    view.session.on("source-cleared", () => {
+      if (current !== view) return;
+      const mid = view.session.mega;
+      closeOpen();
+      syncedHash = null;
+      history.replaceState(null, "", `#/mega/${mid}`);
+      library.refreshMegas();
+      route();
+    });
     if (!classic) {
       let t = 0;   // used pads and last change are shown in the mega list: refresh it a moment after the pattern or the pads change
       view.session.store.subscribe((s, prev) => {

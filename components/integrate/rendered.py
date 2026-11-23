@@ -12,6 +12,7 @@ import hashlib
 import io
 import os
 import re
+import tempfile
 import wave
 
 MAX_BYTES = 120 * 2**20
@@ -20,9 +21,8 @@ STEMS = ("drums", "bass", "vocals", "other")
 RESAMPLE_URL = re.compile(r"^/media/([A-Za-z0-9_-]{1,64})/resample/([0-9a-f]{16})\.wav$")
 
 
-def save_resample(media_dir, data):
-    """Store a WAV (PCM 16-bit, mono or stereo) under resample/. Returns {url, hash, duration, sample_rate, channels}.
-    Raises ValueError (clear message) for anything that is not a usable WAV."""
+def _checked_wav(data):
+    """(channels, sample_rate, frames) of a usable WAV body, else ValueError with a plain message."""
     if not data or len(data) > MAX_BYTES:
         raise ValueError(f"the body must be a WAV file of at most {MAX_BYTES // 2**20} MB")
     try:
@@ -36,17 +36,44 @@ def save_resample(media_dir, data):
         raise ValueError("the WAV needs a sample rate of 8-192 kHz and some audio")
     if n / sr > MAX_SECONDS:
         raise ValueError(f"the WAV is longer than {MAX_SECONDS} s")
+    return ch, sr, n
+
+
+def _store(out_dir, data):
+    """Write `data` as <out_dir>/<hash>.wav through a temp file and a rename (once per content). Returns the hash."""
     h = hashlib.sha1(data).hexdigest()[:16]
-    out_dir = os.path.join(media_dir, "resample")
     path = os.path.join(out_dir, f"{h}.wav")
     if not os.path.isfile(path):
         os.makedirs(out_dir, exist_ok=True)
-        tmp = path + ".part"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(dir=out_dir, prefix=".tmp-", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    return h
+
+
+def save_resample(media_dir, data):
+    """Store a WAV (PCM 16-bit, mono or stereo) under resample/. Returns {url, hash, duration, sample_rate, channels}.
+    Raises ValueError (clear message) for anything that is not a usable WAV."""
+    ch, sr, n = _checked_wav(data)
+    h = _store(os.path.join(media_dir, "resample"), data)
     sid = os.path.basename(os.path.abspath(media_dir))
     return {"url": f"/media/{sid}/resample/{h}.wav", "hash": h, "duration": n / sr, "sample_rate": sr, "channels": ch}
+
+
+def save_mega_sample(samples_dir, mid, data):
+    """CHOP-13 step D: a resample upload for a mega bank is stored under the mega bank (media/_mega/<mid>/samples/), so it
+    survives the song. Same checks as `save_resample`; the url is /media/_mega/<mid>/samples/<hash>.wav."""
+    ch, sr, n = _checked_wav(data)
+    h = _store(samples_dir, data)
+    return {"url": f"/media/_mega/{mid}/samples/{h}.wav", "hash": h, "duration": n / sr, "sample_rate": sr, "channels": ch}
 
 
 def resample_path(media_root, url):

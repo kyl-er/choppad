@@ -6,7 +6,10 @@ http://127.0.0.1:<port>/?id=<id> with /media/<id>/* static. See contracts/README
 
 Agent verbs (clients of a running server): `choppad songs | show ID | import SRC | regrid ID | assign ID | pad ID P |
 pattern ID set|add|clear|show | fx ID | play ID pattern|song|stop | hit ID P | export ID hydrogen|sfz |
-daw open|sync|play|stop ID [--daw hydrogen|ardour] | station [ID] [--daw ...]`.
+daw open|sync|play|stop|close ID [--daw hydrogen|ardour] | station [ID] [--daw ...] |
+mega list|show|new|rename|remove|source|keep|release|sweep`.
+Every verb that takes a song ID also takes `--mega MID` (a drum pad mega bank): it then acts on exactly that mega bank. With only a song
+ID it keeps its meaning: the song's most recently updated mega bank.
 `choppad <verb> --help` for each; `--server URL` or $CHOPPAD_SERVER picks the server (default http://127.0.0.1:8960).
 """
 
@@ -132,32 +135,6 @@ def _advise(media_dir, body):
     return advise(media_dir, force=bool(body.get("force")))
 
 
-def _export(media_dir, body):
-    """kind=hydrogen: install the bank as a Hydrogen drumkit (with body.fx baked in via pedalboard);
-    kind=sfz: write <id>-bank<N>.sfz next to audio.wav (zero-copy, so no fx)."""
-    from choppad_export import bank_pads, export_sfz, render_bank_kit
-    bank = int(body.get("bank") or 0)
-    sid = os.path.basename(media_dir)
-    title = json.load(open(os.path.join(media_dir, "meta.json"))).get("title", sid)
-    if body.get("kind") == "hydrogen":
-        name = re.sub(r"[^\w -]+", "", f"ChopPad {title} B{bank + 1}")[:60].strip()
-        out = os.path.expanduser(f"~/.local/share/hydrogen/data/drumkits/{name}")
-        # the same pad -> audio path the DAW bridge uses (custom slice, other song, stretch, fx bake; gain/pitch in the kit)
-        _, baked = render_bank_kit(bank_pads(media_dir, bank, body.get("overrides"), body.get("pads")), out, name, fx=body.get("fx"),
-                                   choke=body.get("choke", True) is not False)
-        note = "Restart Hydrogen or use Drumkits > Rescan to see it."
-        if baked:
-            note = "Tone/reverb baked into the samples. " + note
-        return {"path": out, "kit": name, "note": note}
-    if body.get("kind") == "zip":
-        from choppad_export import export_zip
-        path = export_zip(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
-        return {"path": os.path.abspath(path), "url": f"/media/{sid}/{os.path.basename(path)}",
-                "note": "16 WAVs (one per pad, 2.5 ms fade-in / 3 ms fade-out by default); each pad's filter and envelope are baked in, pitch, gain and master fx are not."}
-    path = export_sfz(media_dir, bank=bank, overrides=body.get("overrides"), sounds=body.get("pads"))
-    return {"path": os.path.abspath(path) if path else os.path.join(media_dir, f"{sid}-bank{bank}.sfz")}
-
-
 # ---- W3: key detection ----
 def _key(media_dir, body):
     """POST /api/songs/<id>/key -> {tonic, mode, confidence}; detected once and cached in analysis.json["key"]."""
@@ -171,59 +148,6 @@ def _key(media_dir, body):
     return analysis["key"]
 
 
-# ---- W3: time-stretch ----
-def _refuse_kept(media_dir, bank, pad):
-    """CHOP-13: a kept pad owns its audio, so there is no slice of the song to stretch (ValueError)."""
-    from server import load_project
-    if ((load_project(media_dir).get("overrides") or {}).get(f"{bank}:{pad}") or {}).get("kept"):
-        raise ValueError(f"pad {pad + 1} on bank {bank + 1} is kept (it owns its audio) and has no slice of the song to stretch")
-
-
-def _pad_slice(media_dir, bank, pad, project=None):
-    """(start, end) of the slice on (bank, pad): the custom slice if the project has one, else the grid/transient chop."""
-    chops = json.load(open(os.path.join(media_dir, "chops.json")))
-    from server import load_project
-    ov = ((project or load_project(media_dir)).get("overrides") or {}).get(f"{bank}:{pad}")
-    if ov and ov.get("end", 0) > ov.get("start", 0) and not ov.get("song"):
-        return float(ov["start"]), float(ov["end"])
-    try:
-        ch = chops["chops"][chops["banks"][bank][pad]]
-    except (IndexError, TypeError):
-        raise ValueError(f"pad {pad} on bank {bank} is empty")
-    return ch["start"], ch["end"]
-
-
-def _stretch(media_dir, body):
-    """POST /api/songs/<id>/stretch {bank, pad, ratio | target_bpm [, start, end, source_bpm]}
-    Renders the pad's slice at `ratio` x its length (same pitch) into media/<id>/stretch/<hash>.wav (cached).
-    target_bpm: the slice is fitted so the song's tempo (or source_bpm) becomes target_bpm.
-    `stem` (W3b): cut the slice from that stem of the song instead of the full mix.
-    Returns {url, duration, ratio, hash, start, end}."""
-    sid = os.path.basename(media_dir)
-    try:
-        if body.get("pad") is not None:
-            _refuse_kept(media_dir, int(body.get("bank") or 0), int(body["pad"]))
-        if body.get("start") is not None and body.get("end") is not None:
-            start, end = float(body["start"]), float(body["end"])
-        else:
-            start, end = _pad_slice(media_dir, int(body.get("bank") or 0), int(body.get("pad") or 0))
-        if body.get("ratio") is not None:
-            ratio = float(body["ratio"])
-        elif body.get("target_bpm") is not None:
-            src = float(body.get("source_bpm") or json.load(open(os.path.join(media_dir, "chops.json")))["bpm"])
-            ratio = _ratio_for_tempo(src, float(body["target_bpm"]))
-        else:
-            raise _StretchError("ratio or target_bpm required")
-        stem = body.get("stem")
-        if stem is not None and stem not in ("drums", "bass", "vocals", "other"):
-            raise _StretchError("stem must be drums, bass, vocals or other")
-        r = _stretch_slice(media_dir, start, end, ratio, f"stems/{stem}.wav" if stem else "audio.wav")
-    except (_StretchError, ValueError) as e:
-        raise ValueError(str(e))
-    return {"url": f"/media/{sid}/stretch/{r['file']}", "duration": r["duration"], "ratio": r["ratio"], "hash": r["hash"],
-            "start": start, "end": end}
-
-
 # ---- W3b: stems ----
 def _stems(media_dir, body):
     """POST /api/songs/<id>/stems {force?} -> {stems: [...], urls: {name: url}, backend}. Needs a stems backend (components/stems:
@@ -233,17 +157,6 @@ def _stems(media_dir, body):
     sid = os.path.basename(media_dir)
     return {"stems": list(paths), "urls": {n: f"/media/{sid}/stems/{n}.wav" for n in paths},
             "backend": (os.environ.get("CHOPPAD_STEMS_BACKEND") or "none").lower()}
-
-
-# ---- W3: kits ----
-def _savekit(media_dir, body):
-    """POST /api/songs/<id>/savekit {bank, name [, overrides, pads, fx]} -> the new kit (what the bank holds now)."""
-    from kits import create_kit, kit_from_bank
-    media_root = os.path.dirname(os.path.abspath(media_dir))
-    name = str(body.get("name") or "").strip() or f"{os.path.basename(media_dir)} bank {int(body.get('bank') or 0) + 1}"
-    doc = kit_from_bank(media_root, os.path.basename(media_dir), int(body.get("bank") or 0), name,
-                        overrides=body.get("overrides"), pads=body.get("pads"), fx=body.get("fx"))
-    return create_kit(media_root, doc)
 
 
 def make_server(media_root: str, port: int = 8960):
@@ -259,12 +172,12 @@ def make_server(media_root: str, port: int = 8960):
     else:
         daw = DawManager()
 
-    def _daw(media_dir, body):
-        return daw.command(os.path.basename(media_dir), media_dir, body)
-    srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze,
-                actions={"sections": _sections, "advise": _advise, "export": _export, "stretch": _stretch,
-                         "savekit": _savekit, "key": _key, "daw": _daw, "stems": _stems},
-                on_transport=daw.on_transport, daw_state=daw.state_for)
+    import megaops
+    source_ops = {"sections": _sections, "advise": _advise, "key": _key, "stems": _stems}
+    # the project operations (export, savekit, stretch, daw, and the source-song ones) are keyed by mega bank (megaops.py): the
+    # song-keyed routes resolve the song's mega bank and call the same functions. The source-song ones also stay song-keyed.
+    srv = _make(media_root, port, pipeline=run_pipeline, regrid=regrid, reanalyze=reanalyze, actions=source_ops,
+                mega_actions=megaops.make_ops(daw, source_ops), on_transport=daw.on_transport, daw_state=daw.state_for)
     srv.daw = daw
     daw.on_change = lambda sid: srv.announce_daw(sid)  # `daw` events when a bridge opens or closes
     _shutdown = srv.shutdown
@@ -281,13 +194,33 @@ def make_server(media_root: str, port: int = 8960):
 # Thin HTTP clients of a running server (`choppad --serve`); the logic lives in components/control/choppad_client.py.
 # ---------------------------------------------------------------------------------------------------------------
 VERBS = ("songs", "show", "import", "regrid", "assign", "pad", "pattern", "fx", "play", "hit", "export", "daw", "station",
-         "tempo", "resample", "song", "stems")
+         "tempo", "resample", "song", "stems", "mega")
+NO_SONG_ID = ("songs", "import", "mega", "daw", "station")   # verbs whose first positional is not a song id (daw and station: optional)
+
+
+def split_mega(argv):
+    """`--mega MID` / `--mega=MID` out of `argv`: (argv without it, MID or None). When there is one, a placeholder song id takes the
+    place of the id so the verb's own positionals line up; the verb then acts on the mega bank."""
+    argv, mega = list(argv), None
+    for i, x in enumerate(argv):
+        if x == "--mega" and i + 1 < len(argv):
+            mega = argv[i + 1]
+            del argv[i:i + 2]
+            break
+        if x.startswith("--mega="):
+            mega = x[len("--mega="):]
+            del argv[i]
+            break
+    if mega and argv and argv[0] not in NO_SONG_ID:
+        argv.insert(1, "-")
+    return argv, mega
 
 
 def build_verb_parser():
     import choppad_client as cc
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--server", default=None, help="server URL (default $CHOPPAD_SERVER or http://127.0.0.1:8960)")
+    common.add_argument("--mega", default=None, metavar="MID", help="act on this drum pad mega bank instead of a song's (then leave the song ID out)")
     p = argparse.ArgumentParser(prog="choppad", description="Drive a running ChopPad server (start it with `choppad <url> --serve`).")
     sub = p.add_subparsers(dest="verb", required=True)
     add = lambda name, help_: sub.add_parser(name, parents=[common], help=help_, description=help_)  # noqa: E731
@@ -353,9 +286,9 @@ def build_verb_parser():
     s.add_argument("pad", type=int)
     s.add_argument("--velocity", type=float, default=1.0)
     s.add_argument("--bank", type=int)
-    s = add("export", "export a bank as a Hydrogen kit or an SFZ file")
+    s = add("export", "export a bank as a Hydrogen kit, an SFZ file or a zip of 16 WAVs")
     s.add_argument("id")
-    s.add_argument("kind", choices=["hydrogen", "sfz"])
+    s.add_argument("kind", choices=["hydrogen", "sfz", "zip"])
     s.add_argument("--bank", type=int, default=0)
     # --- W3b sampler core ---
     s = add("tempo", "project tempo: show it, set it (--bpm), go back to the song's tempo (--song), fit pads to it (--fit)")
@@ -387,16 +320,25 @@ def build_verb_parser():
                    help="pattern = offline render of the step pattern (default); master = live recording of the master bus")
     s.add_argument("--bank", type=int, help="bank of the pad (default: the bank on screen)")
     s.add_argument("--wait", type=float, default=120, help="seconds to wait for the browser (default 120)")
+    # --- CHOP-13 step D: drum pad mega banks ---
+    s = add("mega", "drum pad mega banks: list | show MID | new [--source SONG] [--name N] | rename MID NAME | remove MID | "
+                    "source MID SONG|none | keep MID --bank B --pad P | release MID --bank B --pad P | sweep MID")
+    s.add_argument("op", choices=["list", "show", "new", "rename", "remove", "source", "keep", "release", "sweep"])
+    s.add_argument("args", nargs="*", help="show/remove/keep/release/sweep MID; rename MID NAME; source MID SONG|none")
+    s.add_argument("--source", help="new: the song that feeds the new mega bank (default none)")
+    s.add_argument("--name", help="new: its name")
+    s.add_argument("--bank", type=int, help="keep/release: bank (0-based)")
+    s.add_argument("--pad", type=int, help="keep/release: pad 0-15")
     # --- W2 DAW bridge (components/daw) ---
     s = add("daw", "DAW bridge: open a song in Hydrogen or Ardour, re-sync it after edits, drive its transport")
-    s.add_argument("op", choices=["open", "sync", "play", "stop"])
-    s.add_argument("id", nargs="?", help="song id (required)")
+    s.add_argument("op", choices=["open", "sync", "play", "stop", "close"])
+    s.add_argument("id", nargs="?", help="song id (or --mega MID); close shuts the bridge this server started")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
     s.add_argument("--bank", type=int, help="bank to export (default: the bank the pattern plays, else 0)")
     s.add_argument("--swing", type=float, help="0..0.5, bake this swing into the DAW pattern (the browser's swing is not saved)")
     s.add_argument("--quant", choices=["off", "1/8", "1/16"], help="the step swing refers to (default 1/16)")
     s.add_argument("--choke", action=argparse.BooleanOptionalAction, default=None, help="pads cut each other off (default on)")
-    s = add("station", "start ChopPad (if it is not running), open a song in the DAW wired to it, print the URL")
+    s = add("station", "start ChopPad (if it is not running), open a song (or --mega MID) in the DAW wired to it, print the URL")
     s.add_argument("id", nargs="?", help="song id (default: the newest song in the library)")
     s.add_argument("--daw", choices=["hydrogen", "ardour"], default="hydrogen")
     s.add_argument("--bank", type=int)
@@ -425,12 +367,15 @@ def _station(a, c, out, err):
             import signal
             signal.signal(signal.SIGINT, signal.default_int_handler)   # a backgrounded job inherits SIGINT=ignored
             signal.signal(signal.SIGTERM, signal.default_int_handler)  # so `kill` also closes the DAW cleanly
-        sid = a.id or next(iter(c.songs()), {}).get("id")
+        if getattr(a, "mega", None):
+            sid = cc.MegaRef(a.mega)
+        else:
+            sid = a.id or next(iter(c.songs()), {}).get("id")
         if not sid:
             raise cc.ControlError("the library is empty; import a song first (`choppad import <url|file>`)")
         r = c.daw(sid, a.daw, "open", a.bank)
         out(json.dumps({k: r[k] for k in r if k != "detail"}, separators=(",", ":")))
-        out(f"ChopPad: {base}/#/song/{sid}")
+        out(f"ChopPad: {base}/#/mega/{sid}" if isinstance(sid, cc.MegaRef) else f"ChopPad: {base}/#/song/{sid}")
         if r.get("detail"):
             out(f"{a.daw}: " + json.dumps({k: v for k, v in r["detail"].items() if k in ("song", "osc_port", "headless", "file", "pid", "tracks", "regions")}))
         if r.get("not_implemented"):
@@ -455,18 +400,72 @@ def _station(a, c, out, err):
     return 0
 
 
+def _mega_verb(a, c, out, err, j):
+    """`choppad mega ...`: the drum pad mega banks of the server (list, show, new, rename, remove, source, keep, release, sweep)."""
+    import choppad_client as cc
+    args = list(a.args)
+
+    def one(what):
+        if not args:
+            raise cc.ControlError(f"mega {a.op} needs {what}")
+        return args[0]
+    if a.op == "list":
+        rows = [{"id": m["id"], "name": m["name"], "source": m.get("source") or "-", "used": m["used_pads"], "banks": m["banks"],
+                 "song": m.get("source_title") or ""} for m in c.megas()]
+        out(cc.format_table(rows, ["id", "name", "source", "used", "banks", "song"]))
+    elif a.op == "show":
+        j(c.mega_show(one("a mega bank id")))
+    elif a.op == "new":
+        j(c.mega_new(a.source, a.name))
+    elif a.op == "rename":
+        mid = one("a mega bank id")
+        if len(args) < 2:
+            raise cc.ControlError("mega rename needs the new name")
+        j(c.mega_rename(mid, " ".join(args[1:])))
+    elif a.op == "remove":
+        j(c.mega_remove(one("a mega bank id")))
+        err("(moved to media/_mega/.trash/ on the server; nothing is deleted)")
+    elif a.op == "source":
+        mid = one("a mega bank id")
+        if len(args) < 2:
+            raise cc.ControlError("mega source needs a song id, or `none` to leave the mega bank with no source")
+        r = c.mega_source(mid, args[1])
+        j({"mega": r["mega"], "kept": len(r.get("kept") or []), "released": r.get("released"), "failed": r.get("failed")})
+    elif a.op in ("keep", "release"):
+        if a.bank is None or a.pad is None:
+            raise cc.ControlError(f"mega {a.op} needs --bank and --pad")
+        mid = one("a mega bank id")
+        r = c.mega_keep(mid, a.bank, a.pad) if a.op == "keep" else c.mega_release(mid, a.bank, a.pad)
+        j({k: r[k] for k in ("kept", "already", "failed", "applied", "ignored") if k in r})
+    elif a.op == "sweep":
+        j(c.mega_sweep(one("a mega bank id")))
+    return 0
+
+
 def run_verb(argv, client=None, out=None, err=None):
     """Run one verb; returns the exit code. `client` and the streams are injectable for tests."""
     import choppad_client as cc
     out = out or (lambda s: print(s))
     err = err or (lambda s: print(s, file=sys.stderr))
+    argv, mega = split_mega(argv)
     a = build_verb_parser().parse_args(argv)
+    a.mega = mega
     j = lambda o: out(json.dumps(o, separators=(",", ":")))  # noqa: E731
+    if mega and a.verb not in ("mega", "songs", "import", "station", "daw"):
+        a.id = cc.MegaRef(mega)   # every verb below takes `a.id`: a mega bank id there means "this mega bank"
+    elif mega and a.verb == "daw":
+        a.id = cc.MegaRef(mega)
     if a.verb == "daw" and not a.id:  # explicit on purpose: a DAW should never open the "newest song" by accident
-        err("daw: a song id is required (see `choppad songs`); `choppad station` opens the newest song. "
+        err("daw: a song id or --mega MID is required (see `choppad songs`, `choppad mega list`); `choppad station` opens the newest song. "
             "DAW bridge: components/daw, workstream W2")
         return 2
     c = client or cc.Client(a.server)
+    if a.verb == "mega":
+        try:
+            return _mega_verb(a, c, out, err, j)
+        except cc.ControlError as e:
+            err(f"choppad: {e}")
+            return 1
     if a.verb == "station":
         try:
             return _station(a, c, out, err)
@@ -547,6 +546,9 @@ def run_verb(argv, client=None, out=None, err=None):
         elif a.verb == "tempo":
             j(c.tempo(a.id, a.bpm, a.song, a.follow, a.fit))
         elif a.verb == "daw":
+            if a.op == "close":
+                j(c.daw_close(a.id, a.daw))
+                return 0
             r = c.daw(a.id, a.daw, a.op, a.bank, **{k: getattr(a, k) for k in ("swing", "quant", "choke") if getattr(a, k) is not None})
             j(r)
             if r.get("not_implemented"):

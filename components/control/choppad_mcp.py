@@ -23,6 +23,8 @@ _S = lambda desc, **kw: {"type": "string", "description": desc, **kw}  # noqa: E
 _N = lambda desc, **kw: {"type": "number", "description": desc, **kw}  # noqa: E731
 _I = lambda desc, **kw: {"type": "integer", "description": desc, **kw}  # noqa: E731
 _ID = _S("song id from `library`")
+_MEGA = _S("drum pad mega bank id from `mega_list`: act on exactly this mega bank instead of a song's")
+_MID = _S("drum pad mega bank id from `mega_list`")
 _PAD = _I("pad 0..15 (the 4x4 grid, row-major from the bottom-left)", minimum=0, maximum=15)
 _BANK = _I("bank number (0-based)", minimum=0)
 _DAW_SETTINGS = {  # player settings that are not saved with the project; the browser's swing/choke are not known to the server
@@ -72,8 +74,9 @@ def build_tools(client, progress=lambda: None):
         _tool("library", "List the songs in the library (id, title, bpm, meter, banks, duration).", {}, [],
               lambda a: [{"id": s["id"], "title": s["title"], "bpm": round(s["bpm"], 1), "meter": s["meter"],
                           "banks": s["banks"], "duration_s": round(s["duration_s"] or 0)} for s in c.songs()]),
-        _tool("song_summary", "One song in a few lines: title, bpm, meter, key if known, duration, bank count, sections, "
-              "pattern size, current bank.", {"id": _ID}, ["id"], lambda a: c.summary(a["id"])),
+        _tool("song_summary", "One song (or mega bank) in a few lines: title, bpm, meter, key if known, duration, bank count, sections, "
+              "pattern size, current bank, the mega bank it lives in (name) and which pads are kept and which song they came from.",
+              {"id": _ID}, ["id"], lambda a: c.summary(a["id"])),
         _tool("chop_table", "The 16 pads of one bank: bar.beat label, start/end seconds, and whether the slice is custom. "
               "Default bank = the one on screen.", {"id": _ID, "bank": _BANK}, ["id"],
               lambda a: c.chop_rows(a["id"], a.get("bank"))),
@@ -170,10 +173,47 @@ def build_tools(client, progress=lambda: None):
               {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"]),
                "command": _S("play or stop", enum=["play", "stop"])}, ["id", "daw", "command"],
               lambda a: c.daw(a["id"], a["daw"], a["command"])),
-        _tool("export", "Export one bank as a Hydrogen drum kit or an SFZ file; returns where it was written.",
-              {"id": _ID, "kind": _S("hydrogen or sfz", enum=["hydrogen", "sfz"]), "bank": _BANK}, ["id", "kind"],
+        _tool("daw_close", "Shut the DAW bridge this server started for the song or mega bank (an instance that was already running is "
+              "left alone). Errors when none is open.",
+              {"id": _ID, "daw": _S("hydrogen or ardour", enum=["hydrogen", "ardour"])}, ["id"],
+              lambda a: c.daw_close(a["id"], a.get("daw"))),
+        _tool("export", "Export one bank as a Hydrogen drum kit, an SFZ file or a zip of 16 WAVs; returns where it was written. A mega bank "
+              "with kept pads exports them from their own files, with or without a source song.",
+              {"id": _ID, "kind": _S("hydrogen, sfz or zip", enum=["hydrogen", "sfz", "zip"]), "bank": _BANK}, ["id", "kind"],
               lambda a: c.export(a["id"], a["kind"], a.get("bank", 0))),
+        # ---- CHOP-13 step D: drum pad mega banks (SONG -> MEGA BANK -> pad banks) ----
+        _tool("mega_list", "List the drum pad mega banks: id, name, source song, used pads, banks. A mega bank is what is being made "
+              "(pads, sounds, patterns, fx, tempo); a song feeds it.", {}, [],
+              lambda a: [{"id": m["id"], "name": m["name"], "source": m.get("source"), "song": m.get("source_title"),
+                          "used_pads": m["used_pads"], "banks": m["banks"]} for m in c.megas()]),
+        _tool("mega_show", "One mega bank in a few lines: name, source, tempo, pattern, and which pads are kept and where from.",
+              {"mega": _MID}, ["mega"], lambda a: c.mega_show(a["mega"])),
+        _tool("mega_new", "Make a new empty mega bank, optionally fed by a song.", {"source": _ID, "name": _S("name")}, [],
+              lambda a: c.mega_new(a.get("source"), a.get("name"))),
+        _tool("mega_rename", "Rename a mega bank.", {"mega": _MID, "name": _S("new name")}, ["mega", "name"],
+              lambda a: c.mega_rename(a["mega"], a["name"])),
+        _tool("mega_remove", "Remove a mega bank (its folder is moved to media/_mega/.trash/, nothing is deleted). Open tabs are told.",
+              {"mega": _MID}, ["mega"], lambda a: c.mega_remove(a["mega"])),
+        _tool("mega_source", "Set the song that feeds a mega bank: the pads it uses (recorded or in the pattern) are KEPT as their own "
+              "sounds, the others show the new song. song='none' leaves the mega bank with no source song. Open tabs follow.",
+              {"mega": _MID, "song": _S("song id, or 'none'")}, ["mega", "song"],
+              lambda a: (lambda r: {"mega": r["mega"], "kept": len(r.get("kept") or []), "released": r.get("released"), "failed": r.get("failed")})(
+                  c.mega_source(a["mega"], a["song"]))),
+        _tool("mega_keep", "Keep one pad now: its audio as played is copied into the mega bank, so it stays when the song changes.",
+              {"mega": _MID, "bank": _BANK, "pad": _PAD}, ["mega", "bank", "pad"],
+              lambda a: {k: v for k, v in c.mega_keep(a["mega"], a["bank"], a["pad"]).items() if k in ("kept", "already", "failed")}),
+        _tool("mega_release", "Give a kept pad back to the source song's chop (its kept sound is moved to the mega bank's .trash).",
+              {"mega": _MID, "bank": _BANK, "pad": _PAD}, ["mega", "bank", "pad"],
+              lambda a: _watch(c.mega_release(a["mega"], a["bank"], a["pad"]))),
+        _tool("mega_sweep", "Move the samples of a mega bank that no pad uses to its .trash folder (never deletes).",
+              {"mega": _MID}, ["mega"], lambda a: c.mega_sweep(a["mega"])),
     ]
+    for t in T:   # every tool that takes a song id also takes a mega bank: `mega` instead of `id`
+        props = t["inputSchema"]["properties"]
+        if props.get("id") is _ID:
+            props["mega"] = _MEGA
+            t["inputSchema"]["required"] = [r for r in t["inputSchema"]["required"] if r != "id"]
+            t["description"] += " Give `id` (a song: its most recently updated mega bank) or `mega` (exactly that mega bank)."
     return {t["name"]: t for t in T}
 
 
@@ -192,6 +232,11 @@ class McpServer:
         if not t:
             return {"content": [{"type": "text", "text": f"unknown tool {name!r}"}], "isError": True}
         args = args or {}
+        if "mega" in t["inputSchema"]["properties"] and "id" in t["inputSchema"]["properties"]:   # a song id or a mega bank
+            if args.get("mega") is not None:
+                args = {**args, "id": cc.MegaRef(args["mega"])}
+            elif args.get("id") is None:
+                return {"content": [{"type": "text", "text": "give `id` (a song) or `mega` (a drum pad mega bank)"}], "isError": True}
         missing = [k for k in t["inputSchema"]["required"] if args.get(k) is None]
         if missing:
             return {"content": [{"type": "text", "text": f"missing argument(s): {', '.join(missing)}"}], "isError": True}

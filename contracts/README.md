@@ -297,6 +297,36 @@ media/_mega/<mid>/samples/<16hex>.wav     audio the mega bank owns (16-bit PCM)
 - **Cache eviction** never removes a song that is the `source` of a mega bank with used pads, or that an override still refers to
   (`song`, or a `stretch.url` / `src` under `/media/<song>/`). `media/_mega` is never evicted (§13: `_` folders).
 
+- As built (step D): every per-project operation also exists under `/api/mega/<mid>/…` and acts on exactly that mega bank: `export
+  {kind: hydrogen|sfz|zip, bank}`, `savekit`, `loadkit {kit, bank}`, `stretch`, `daw {daw, command: open|sync|play|stop|close}`, `sweep`,
+  `resample` (raw 16-bit WAV body, stored in the mega bank's `samples/`, so it survives the song). `regrid`, `reanalyze`, `sections`,
+  `key`, `advise` and `stems` act on `mega.source` and answer 409 with a plain sentence when there is none. The song-keyed routes remain
+  as wrappers that resolve the song's mega bank (the song-keyed `resample` still stores under the song). A zip or sfz is written next
+  to the song when there is a source, else to `media/_mega/<mid>/exports/` (served at `/media/_mega/<mid>/exports/<file>`).
+- `POST /api/mega/<mid>/source {song: null}` keeps the used pads like a switch and leaves the mega bank with no source
+  (`source.set {song: null, chops: null}`: empty chop table, bank clamped).
+- `GET /api/events` also carries `mega {change: "created"|"renamed"|"removed"|"source", id, name?, source?}`. `DELETE /api/mega/<mid>` first
+  sends `mega {change: "removed", id, name}` on that mega bank's own stream and closes a DAW bridge holding it.
+- The DAW bridge holds a mega bank: its `daw` event and state are keyed by mega id, a transport hit or play mirrors only to the bridge
+  holding that mega bank, `close` shuts the bridge this server started (409 when none is open). Kit and song come from the mega bank:
+  kept pads from their samples at their own gain, sound and pitch, free pads from the source song, the mega bank's tempo, the pattern's
+  own bar length.
+- `mega.sweep_samples` moves sample files that no override uses to `media/_mega/<mid>/.trash/` (never deletes; samples pinned by a kit
+  copy or a fresh upload are skipped). It runs after a batch that could orphan one and on `POST …/sweep`. A pad released while a
+  pattern still hits it then plays the song's chop.
+- Kits (§13) may hold kept pads: `{src, start, end, params, gain?, from?}` with the audio copied into `media/_kits/<kit-id>/samples/`,
+  so a kit never depends on a mega bank's files; `savekit` works on a bank with kept pads; `loadkit` copies the samples into the mega
+  bank and returns the batch (`kit.load?`, `slice.keep…`, `fx.set?`) as `actions`. Old kits load unchanged.
+- **The pattern's own bar length:** `pattern: { bars, beatsPerBar?, events }` (integer 1..16; also in every `project.song.patterns[*]`).
+  A pattern without one gets it when it first receives a hit or its bars are set (from the action's `beatsPerBar`, else the chop
+  table's, else 4); `pattern.setBars` drops hits past `bars × the pattern's own beatsPerBar`; `pattern.clear` removes it;
+  `pattern.load`, `song.addPattern` with `copy`, `song.load`, `song.selectPattern`, `song.removePattern` and `diff_project` carry it.
+  Absent in old documents (readers use the chop table). The sequencer, offline renders, MIDI export, the Hydrogen song and
+  `DawProject.beats_per_bar` use it, so a song in another meter does not change the loop.
+- CLI and MCP: every verb and tool that takes a song also takes `--mega <mid>` / `mega`; `choppad mega list|show|new|rename|remove|source|
+  keep|release|sweep` and the `mega_*` tools; `daw close`. See `docs/agent-control.md`.
+- Session (step D): the project calls use the mega routes; events `mega-removed {id, name}` (writes stop) and `source-cleared {}`.
+
 **Browser (step B).** The engine, sequencer and master bus live as long as a mega bank is open, not as long as a song: `session.setSource(song)`
 loads the next song's audio, video, peaks and analysis while the pattern and kept pads keep playing; kept pads play from their sample files.
 Routes: `#/mega/<mid>`; `#/song/<id>` opens that song's mega bank.

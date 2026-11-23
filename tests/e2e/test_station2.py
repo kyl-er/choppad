@@ -361,7 +361,7 @@ class Station2(unittest.TestCase):
         page.locator(".rs-go").click()
         page.wait_for_function(f"{S}.store.get().project.overrides['0:5']?.src", timeout=30000)
         src = self.store(page, "project.overrides['0:5'].src")
-        self.assertRegex(src, r"^/media/[\w-]+/resample/[0-9a-f]{16}\.wav$")
+        self.assertRegex(src, r"^/media/_mega/[\w-]+/samples/[0-9a-f]{16}\.wav$")   # step D: a resample is stored under the mega bank
         page.wait_for_function("document.querySelector('.rs-out')?.textContent.includes('NOW PLAYS')", timeout=20000)
         self.assertIn("PAD 6 (BANK 1) NOW PLAYS", page.locator(".rs-out").inner_text())
         pad = page.locator(".pad[data-pad='5']")
