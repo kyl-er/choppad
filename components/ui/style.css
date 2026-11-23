@@ -363,7 +363,7 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 .hd .song { display: flex; align-items: center; gap: 10px; overflow: visible; text-overflow: clip; }
 .path { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .path .sep { font-style: normal; font-size: 11px; color: var(--muted); }
-.path .seg { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: 24ch; padding: 1px 6px; border: 1px solid transparent; text-align: left; line-height: 1.1; }
+.path .seg { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: 32ch; padding: 1px 6px; border: 1px solid transparent; text-align: left; line-height: 1.1; }
 .path .seg:hover { border-color: var(--ink); background: var(--key); }
 .path .seg small { font: 600 7.5px/1 var(--font-mono); letter-spacing: .12em; color: var(--muted); white-space: nowrap; }
 .path .seg b { font: 700 12px/1.15 var(--font-mono); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -380,7 +380,8 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 .mega:hover { background: var(--faint); }
 .mega.active { box-shadow: inset 3px 0 0 var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
 .mega .title { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mega .meta { font: 10px var(--font-mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mega .meta { font: 10px var(--font-mono); color: var(--muted); overflow: hidden; white-space: normal; }
+.mega .mega-song { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mega-tag { position: absolute; right: 7px; top: 5px; font: 700 8px/1 var(--font-mono); letter-spacing: .08em; padding: 2px 4px; background: var(--key-on); color: var(--key-on-ink); }
 .mega-tag[hidden] { display: none; }
 .mega-act { position: absolute; right: 5px; bottom: 4px; display: flex; gap: 3px; }
@@ -429,7 +430,8 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 
 /* kept pads: a heavier inner frame and the KEPT tag (not colour alone), the song it came from in the label */
 .pad.kept::after { inset: 3px; border: 2px solid currentColor; opacity: .85; }
-.pad.kept .pad-label { text-transform: uppercase; letter-spacing: 0; }
+.pad.kept .pad-label { font-size: 10.5px; letter-spacing: 0; }
+.padkeys { gap: 4px; } .padkeys .lvl-key, .padkeys .keep-key { padding: 2px 5px; letter-spacing: .04em; font-size: 9.5px; gap: 3px; }
 .keep-key { display: flex; flex: none; align-items: center; gap: 5px; padding: 2px 7px; white-space: nowrap; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); font: 600 10px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
 .keep-key i { font-style: normal; font-size: 11px; } .keep-key.on { background: var(--key-on); color: var(--key-on-ink); }
 
@@ -452,3 +454,4 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 .bo-head { font-weight: 700; opacity: .75; border-bottom: 1px dotted currentColor; position: sticky; top: 0; background: var(--lcd-bg); }
 .bo-row.on { background: var(--lcd-ink); color: var(--lcd-bg); } button.bo-row:hover { background: color-mix(in srgb, var(--lcd-ink) 16%, transparent); } button.bo-row.on:hover { background: var(--lcd-ink); }
 .kept-out b { font-weight: 700; }
+.wave .no-song { flex-direction: row; gap: 14px; } .wave .no-song span { display: none; } .wave .no-song button { margin-top: 0; }

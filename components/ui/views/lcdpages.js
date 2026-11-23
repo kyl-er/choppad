@@ -297,7 +297,7 @@ export function buildPages(ctx) {
       // the three levels: song (above), mega bank and drum pad bank (here)
       const ml = `MEGA BANK ${env.nav.megaInfo(session.mega)?.name ?? "—"} ▸ BANK ${bankName(bank, bankCount(project, chops))}`;
       if (megaLine.textContent !== ml) megaLine.textContent = ml;
-      set(bpmLabel, user ? "TEMPO · YOURS" : session.source ? "TEMPO · FOLLOWS SONG" : "TEMPO · DEFAULT");
+      set(bpmLabel, user ? "YOUR TEMPO" : session.source ? "SONG TEMPO" : "TEMPO");
       set(bpm, T.toFixed(1));
       set(meter, `${chops.beats_per_bar}/4`);
       const k = analysis.key;

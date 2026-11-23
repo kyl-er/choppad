@@ -71,7 +71,7 @@ export function createPadGrid(grid, session, { velocity = () => 1, onDown, songT
       el.classList.toggle("selected", p === selected);
       let label = c ? (c.custom ? "★ " + fmt(c.start) : session.chopLabel(c)) : "";
       let time = c ? (c.custom ? `${(c.end - c.start).toFixed(2)}s` : fmt(c.start)) + (c.stretch ? ` ×${c.stretch.ratio.toFixed(2)}` : "") + (c.song ? " ♪" : "") : "";
-      if (o?.kept) { label = from ? shortSong(from).slice(0, 9) : "kept"; time = from ? fmt(o.from.start) : `${(o.end - o.start).toFixed(2)}s`; }   // where it came from, not where it is now
+      if (o?.kept) { label = from ? (shortSong(from).length > 8 ? shortSong(from).slice(0, 7) + "…" : shortSong(from)) : "kept"; time = from ? fmt(o.from.start) : `${(o.end - o.start).toFixed(2)}s`; }   // where it came from, not where it is now
       if (sx) [label, time] = fmtLevel(sx.mode, sixteenLevel(sx.mode, p));   // 16 levels: the pad shows its level, not the bar.beat
       const l = els[p].querySelector(".pad-label"), t = els[p].querySelector(".pad-time");
       if (l.textContent !== label) l.textContent = label;

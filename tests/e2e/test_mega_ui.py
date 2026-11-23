@@ -157,11 +157,14 @@ class MegaStepC(unittest.TestCase):
         if not os.environ.get("MEGA_SHOTS"):
             return
         os.makedirs(SHOTS, exist_ok=True)
+        start = page.evaluate("document.documentElement.dataset.theme")
         for t in ([theme] if theme else ["light", "dark"]):
-            page.evaluate(f"document.documentElement.dataset.theme = '{t}'")
-            page.wait_for_timeout(250)
+            if page.evaluate("document.documentElement.dataset.theme") != t:
+                page.locator('[data-act="theme"]').click()   # through the header key, so the waveform is redrawn in the new colours
+            page.wait_for_timeout(900)
             page.screenshot(path=os.path.join(SHOTS, f"mega-{name}-{t}.png"), clip=clip)
-        page.evaluate("document.documentElement.dataset.theme = 'light'")
+        if page.evaluate("document.documentElement.dataset.theme") != start:
+            page.locator('[data-act="theme"]').click()
 
     # ------------------------------------------------------------------ a. the library
     def test_a_the_library_shows_songs_and_mega_banks_and_manages_them(self):
@@ -279,7 +282,7 @@ class MegaStepC(unittest.TestCase):
             pad = page.locator(f".pad[data-pad='{p}']")
             self.assertIn("kept", pad.get_attribute("class"))
             self.assertEqual(pad.locator(".pad-tag").inner_text(), "KEPT")
-            self.assertEqual(pad.locator(".pad-label").text_content(), short(self.meta[self.A]["title"])[:9], "the song it came from")
+            self.assertEqual(pad.locator(".pad-label").text_content(), (short(self.meta[self.A]["title"]) if len(short(self.meta[self.A]["title"])) <= 8 else short(self.meta[self.A]["title"])[:7] + "…"), "the song it came from")
             self.assertIn(self.meta[self.A]["title"], pad.get_attribute("title"))
             self.assertIn(f"kept from {self.meta[self.A]['title']}", pad.get_attribute("aria-label"))
         free = page.locator(".pad[data-pad='8']")
@@ -572,6 +575,7 @@ class MegaStepC(unittest.TestCase):
         self.assertEqual(labels, ["SONG", "DRUM PAD MEGA BANK", "DRUM PAD BANK"], "the owner's names")
         # until the first change of song the bank follows its song's tempo
         self.assertEqual(page.locator(".s-meta .s-tempo").inner_text(), f"TEMPO {self.chops[self.A]['bpm']:.1f} · following {short(title_a)}")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.text_content(), "SONG TEMPO")
         self.shot(page, "header-path", clip={"x": 0, "y": 0, "width": 1500, "height": 60})
         # the LCD MAIN page shows the same three names
         self.goto_lcd(page, "MAIN", "song")
@@ -602,13 +606,95 @@ class MegaStepC(unittest.TestCase):
         head = page.locator(".s-meta .s-tempo")
         # (the first change of song fixed the tempo the bank was running at: it is the user's from then on)
         self.assertEqual(head.inner_text(), f"TEMPO {self.chops[self.A]['bpm']:.1f} · yours")
-        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.text_content(), "TEMPO · YOURS")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.text_content(), "YOUR TEMPO")
         page.evaluate(f"{S}.setTempo(93)")
         page.wait_for_function("document.querySelector('.s-tempo').textContent === 'TEMPO 93.0 · yours'", timeout=10000)
-        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.text_content(), "TEMPO · YOURS")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.text_content(), "YOUR TEMPO")
         self.assertEqual(page.locator(".lcd-main .bpm").inner_text(), "93.0")
         self.goto_lcd(page, "GRID", "grid")
         self.assertIn(f"CHOP TEMPO {self.chops[self.B]['bpm']:.1f}", page.locator(".lcd-body .lcd-info").inner_text().upper())
+        self.assertEqual(failed, [], failed)
+
+    # ------------------------------------------------------------------ k. a second tab whose load fails
+    def test_k_a_second_tab_that_cannot_load_the_new_song_says_so_and_retries(self):
+        ctx = self.browser.new_context(viewport={"width": 1500, "height": 1000})
+        self.addCleanup(ctx.close)
+        p1, f1 = self.tab(ctx=ctx)
+        self.record_break(p1, keep_playing=False)
+        mid = self.sid_mega(p1)
+        p2, f2 = self.tab(f"#/mega/{mid}", ctx=ctx)
+        blocked = []
+        p2.route(f"**/media/{self.B}/audio.wav", lambda route: (blocked.append(1), route.abort()))
+        self.click_song(p1, self.B)
+        self.panel(p1).wait_for(timeout=10000)
+        p1.keyboard.press("b")
+        self.wait_source(p1, self.B)
+        err = p2.locator('.mline[data-kind="error"]')
+        err.wait_for(timeout=30000)
+        self.assertIn("Couldn't load", err.inner_text())
+        self.assertIn(short(self.meta[self.B]["title"]), err.inner_text())
+        self.assertEqual(p2.evaluate(f"{S}.source"), self.A, "the tab is still on the old song, and says so")
+        self.assertEqual(self.megas()[0]["source"], self.B, "while the server says song B")
+        self.assertTrue(blocked)
+        self.assertEqual(err.locator(".ml-act").inner_text(), "Retry")
+        p2.unroute(f"**/media/{self.B}/audio.wav")
+        err.locator(".ml-act").click()
+        self.wait_source(p2, self.B)
+        self.assertEqual(p2.locator('.mline[data-kind="error"]').count(), 0, "the error goes away")
+        self.assertEqual(p2.locator(".s-title").inner_text(), self.meta[self.B]["title"])
+        self.assertEqual(p2.locator(".pad.kept").count(), 4, "the kept pads came with it")
+        self.assertEqual(p2.evaluate(f"[0, 1, 2, 3].map((p) => !!{S}.engine.getPadBuffer(0, p))"), [True] * 4)
+        self.assertEqual([f for f in f1 if "no-such" in f], [])
+        self.assertEqual([f for f in f2 if "ERR_FAILED" not in f and "audio.wav" not in f], [], f2)
+
+    # ------------------------------------------------------------------ l. the pattern keeps its bar length
+    def test_l_a_song_in_another_meter_does_not_change_the_loop_length(self):
+        path = os.path.join(self.root, self.B, "chops.json")
+        doc = json.load(open(path))
+        doc["beats_per_bar"] = 3
+        json.dump(doc, open(path, "w"))
+        page, failed = self.tab()
+        self.record_break(page)
+        loop = page.evaluate(f"({{ bpb: {S}.seq.state.beatsPerBar, beats: {S}.seq.loopBeats(), steps: document.querySelectorAll('.stepgrid i[data-pad=\"0\"]').length }})")
+        self.assertEqual(loop["beats"], 8)
+        self.click_song(page, self.B)
+        self.panel(page).wait_for(timeout=10000)
+        page.keyboard.press("b")
+        self.wait_source(page, self.B)
+        self.assertEqual(page.evaluate(f"{S}.store.get().chops.beats_per_bar"), 3, "the song itself is in 3/4")
+        after = page.evaluate(f"({{ bpb: {S}.seq.state.beatsPerBar, beats: {S}.seq.loopBeats(), own: {S}.patternBeatsPerBar, steps: document.querySelectorAll('.stepgrid i[data-pad=\"0\"]').length }})")
+        self.assertEqual(after, {"bpb": 4, "beats": 8, "own": 4, "steps": loop["steps"]}, "the loop is still 8 beats (32 steps)")
+        self.assertTrue(page.evaluate(f"{S}.seq.state.playing"))
+        self.assertEqual(failed, [], failed)
+
+    # ------------------------------------------------------------------ m. the result line says which pads could not be kept
+    def test_m_the_result_line_names_pads_that_could_not_be_kept_and_why(self):
+        page, failed = self.tab()
+        page.evaluate("window.choppad.song.env.actions.say('Kept 3 pads from X; 13 free pads now play Y.', { failed: [{ bank: 0, pad: 3, reason: 'its source song is gone' }] })")
+        line = page.locator(".mline:not([hidden])")
+        self.assertEqual(line.get_attribute("data-kind"), "warn")
+        self.assertIn("Kept 3 pads", line.inner_text())
+        self.assertIn("Pad 4 (bank A) not kept: its source song is gone", line.inner_text())
+        line.locator(".ml-x").click()
+        self.assertEqual(page.locator(".mline:not([hidden])").count(), 0)
+        self.assertEqual(failed, [], failed)
+
+    # ------------------------------------------------------------------ n. the classic screen
+    def test_n_the_classic_screen_opens_and_switches_songs_keeping_the_used_pads(self):
+        page, failed = self.tab("?ui=classic#/song/" + self.A)
+        self.assertEqual(page.locator(".megas, .mchoice, .path").count(), 0, "the classic screen gets no new interface")
+        self.assertEqual(page.locator("#sidebar li.song").count(), 2)
+        page.evaluate(f"""async () => {{ const s = {S};
+            s.store.dispatch({{ type: 'pattern.load', pattern: {{ bars: 2, events: [0, 1, 2, 3].map((p) => ({{ beat: 2 * p, pad: p, bank: 0, vel: 1, pass: -1 }})) }} }});
+            await s.remote.flush(); }}""")
+        mid = self.sid_mega(page)
+        page.locator(f'#sidebar li.song[data-id="{self.B}"]').click()
+        page.wait_for_function(f"window.choppad.song?.session?.source === {json.dumps(self.B)}", timeout=60000)
+        page.wait_for_selector(".pad .pad-label:not(:empty), .pads button, .pad", timeout=30000)
+        self.assertEqual(page.evaluate(f"{S}.mega"), mid, "the same mega bank: option (b), not a new bank")
+        self.assertEqual(page.evaluate(f"Object.entries({S}.store.get().project.overrides).filter(([k, o]) => o.kept).map(([k]) => k).sort()"), ["0:0", "0:1", "0:2", "0:3"])
+        self.assertEqual(len(self.megas()), 1)
+        self.assertEqual(page.locator(".mchoice").count(), 0)
         self.assertEqual(failed, [], failed)
 
     # ------------------------------------------------------------------ j. layout, names, keyboard, themes

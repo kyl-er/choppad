@@ -236,9 +236,9 @@ export function mountLibrary(root, { onOpen, mega = null }) {
       li.className = "mega" + (m.id === activeMega ? " active" : "");
       li.dataset.id = m.id;
       const song = m.source ? esc(m.source_title ?? m.source) : "no song yet";
-      li.innerHTML = `<button type="button" class="row-open mega-open" aria-label="Open drum pad mega bank ${esc(m.name)}, ${m.source ? "song " + esc(m.source_title ?? m.source) : "no song"}, ${m.used_pads} pads used"${m.id === activeMega ? ' aria-current="true"' : ""}>
+      li.innerHTML = `<button type="button" class="row-open mega-open" title="${esc(m.name)}" aria-label="Open drum pad mega bank ${esc(m.name)}, ${m.source ? "song " + esc(m.source_title ?? m.source) : "no song"}, ${m.used_pads} pads used"${m.id === activeMega ? ' aria-current="true"' : ""}>
           <span class="title">${esc(m.name)}</span>
-          <span class="meta"><span class="mega-song">♪ ${song}</span> · ${m.used_pads} pad${m.used_pads === 1 ? "" : "s"} used · ${ago(m.updated)}</span></button>
+          <span class="meta"><span class="mega-song">♪ ${song}</span><span class="mega-used">${m.used_pads} pad${m.used_pads === 1 ? "" : "s"} used · ${ago(m.updated)}</span></span></button>
         <span class="mega-tag"${m.id === activeMega ? "" : " hidden"}>OPEN</span>
         <span class="mega-act"><button type="button" class="mega-ren" aria-label="Rename ${esc(m.name)}" title="Rename">✎</button><button type="button" class="mega-del" aria-label="Move ${esc(m.name)} to trash" title="Move to trash">×</button></span>`;
       li.querySelector(".mega-open").addEventListener("click", () => { if (m.id !== activeMega) mega.open(m.id); });

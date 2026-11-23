@@ -387,7 +387,7 @@ class MegaStepB(unittest.TestCase):
         self.assertIsNone(before["user"], "no user tempo yet")
         self.assertAlmostEqual(before["seq"], bpm_a, places=3)
         self.assertIn("SONG", page.locator(".s-meta").inner_text())
-        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "TEMPO · FOLLOWS SONG")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "SONG TEMPO")
         self.choose(page, self.B)
         after = page.evaluate(f"({{ user: {S}.store.get().project.tempo, seq: {S}.seq.state.bpm, tempo: {S}.tempoBpm, song: {S}.store.get().chops.bpm }})")
         self.assertAlmostEqual(after["user"]["bpm"], bpm_a, places=3, msg="the first switch writes the tempo it was running at")
@@ -397,7 +397,7 @@ class MegaStepB(unittest.TestCase):
         self.assertTrue(page.evaluate(f"{S}.seq.state.playing"))
         head = page.locator(".s-meta").inner_text()
         self.assertIn(f"USER {bpm_a:.1f} BPM (song {bpm_b:.1f})", head)
-        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "TEMPO · YOURS")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "YOUR TEMPO")
         self.assertEqual(page.locator(".lcd-main .bpm").inner_text(), f"{bpm_a:.1f}")
         # the user sets a tempo; switching back to A does not change it, and A's own tempo is only for A's grid
         page.evaluate(f"{S}.setTempo(93)")

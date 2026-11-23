@@ -69,3 +69,32 @@ Every feature of contracts §14 now has a home; presentation only (state, action
 - The LCD is 125 px tall inside: the chain editor and result lists scroll inside their own box (mouse wheel over them scrolls when they overflow; the data wheel works as usual elsewhere).
 - Pads are 57 px wide at 1500x1000: the `M<n>` badge and the FIT / RS / stem tag share the bottom edge, and a tagged pad moves its label up a little.
 - SONG key (`.play`) still plays the original recording; the chain plays on the PLAY key in song mode.
+
+# Drum pad mega banks, step C (CHOP-13): the interface
+
+Owner's words: three levels, SONG / DRUM PAD MEGA BANKS / then drum pad banks; "load up a drum break ... then load up a new song and play the loop and bass and keep my drum loops"; "i dont want it to completely refresh everytime we load up a song"; tempo "set by user and should stay" but "the chop should be tempo of the song". Tests: `tests/e2e/test_mega_ui.py` (one test per point below, driven through the screen). Screenshots in `shots/mega-*.png` (light and dark, made with `MEGA_SHOTS=1`).
+
+## Where things are
+| What | Place |
+|---|---|
+| SONGS and DRUM PAD MEGA BANKS lists | `library.js` (the classic screen gets no mega list). Rows are buttons (keyboard). The open bank has an `OPEN` tag, not only a colour. Rename: pencil, inline, Enter / Esc. Remove: `×` asks in the row ("Move to trash?", focus on "Keep it"), then says "moved to trash". `+ New mega bank` makes an empty bank on the current song and opens it. |
+| Path SONG ▸ DRUM PAD MEGA BANK ▸ DRUM PAD BANK | header (`shell.js`): three buttons, each opens its picker (SONGS list, mega list, bank keys). Names are the owner's. |
+| The choice on a song change | `views/songchoice.js`: a non-modal panel over the right-hand column (never the pads); A / B / Esc, remember-my-choice tick, focus goes into the panel and back. It asks only when `usedPads(project)` is not empty and the song is one of the library; otherwise the source changes at once. (B) = `session.setSource`, (A) = `POST /api/mega {source}` + open. |
+| What happened | one status line (`role=status`) under the panel's place: "Kept 4 pads from X; 12 free pads now play Y." plus any `failed` pad with its reason; "Ask me again" when a choice is remembered. |
+| Kept pads | grid: heavier inner frame, `KEPT` tag, the source song's short name as the label, the song and time in the title / aria-label. LCD PAD 9 "kept": kept or not, source song, where in it, level; KEEP and RELEASE. `KEEP` key beside 16 LEVELS. RELEASE asks first when the sequence plays the pad (same panel). |
+| Bank overview | LCD MAIN 2 "mega banks": per drum pad bank, KEPT / USED (not yet kept) / FREE, rows jump to the bank. |
+| No source song | `session.source` is null; kept pads and the sequence play; video, waveform and LCD say "Pick a song to chop" with a button to the SONGS list. Tempo 120 until a song or the user gives one. |
+| Tempo | header `TEMPO 101.0 · yours` / `TEMPO 101.0 · following <song>`; LCD big number `YOUR TEMPO` / `SONG TEMPO`; the song's tempo is the "chop tempo" on the GRID page. Logic unchanged. |
+
+## Decisions
+- The header keeps the older long form of the tempo (`USER 93.0 BPM (song 101.0)` / `SONG 101.0 BPM`) in a visually hidden span: screen readers get it, and the station tests that read it still hold.
+- A kept pad's label is the song it came from, not the bar.beat of a chop it no longer is (the time shown is its start in that song).
+- "Free pads" in the result line counts the pads of the bank on screen that play the new song.
+- A remembered choice lives in `sessionStorage` (this tab); "A" remembered means every later song change makes a new bank.
+- A bank removed while open: the screen closes it first (pending edits flushed), then opens the next most recent bank, or the welcome screen.
+- Second tab whose load of the new song fails: the status line turns to an error ("Couldn't load X ... Still on Y") with Retry (`session.retrySource()`); it stays until the retry works.
+
+## Known limits
+- The pattern's bar length is kept through a source change only for the life of the session (`session.patternBeatsPerBar`); after a reload it is the open song's again. Saving it needs `pattern.beatsPerBar` in both reducers (see the report of step C).
+- A mega bank that lost its song cannot be set back to "no song" by a failed switch: the server has no call that clears `source`.
+- The classic screen (`?ui=classic`) still remounts on a song change and always keeps the used pads (option B); it has no mega list and no panel.
