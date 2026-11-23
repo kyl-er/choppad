@@ -525,6 +525,35 @@ class MegaStepB(unittest.TestCase):
         self.assertTrue(gone, "a forced garbage collection reclaimed song A's AudioBuffer: nothing holds it any more")
         self.assertEqual(failed, [], failed)
 
+    # ------------------------------------------------------------------ 10. what a kept pad does not do
+    def test_10_kept_pads_are_skipped_by_stretch_and_fit_and_a_kit_of_them_says_why(self):
+        page, failed = self.tab()
+        self.lay_break(page, play=False)
+        self.choose(page, self.B)
+        self.assertIsNone(page.evaluate("window.__failed"))
+        out = page.evaluate(f"""async () => {{
+            const s = {S};
+            await s.setTempo(90);
+            const one = await s.stretchPad(0, 0, {{ ratio: 1.2 }});
+            const fit = await s.fitToTempo({{ scope: 'pattern' }});
+            const bank = await s.stretchBank({{ ratio: 1.2 }});
+            const kit = await s.saveBankAsKit('mine');
+            return {{ one, fit: {{ ok: fit.ok, fitted: fit.fitted.length, skipped: fit.skipped.length }}, banked: bank.filter((r) => r.pad < 4).length, kit,
+                     stretchedKept: Object.entries(s.store.get().project.overrides).filter(([k, o]) => o.kept && o.stretch).length,
+                     stretchedFree: Object.entries(s.store.get().project.overrides).filter(([k, o]) => !o.kept && o.stretch).length }};
+        }}""")
+        self.assertFalse(out["one"]["ok"])
+        self.assertIn("kept", out["one"]["error"])
+        self.assertEqual(out["fit"], {"ok": True, "fitted": 0, "skipped": 4})
+        self.assertEqual(out["banked"], 0, "stretchBank leaves the kept pads out")
+        self.assertFalse(out["kit"]["ok"])
+        self.assertIn("kept", out["kit"]["error"], "the server's words are shown")
+        self.assertEqual(out["stretchedKept"], 0)
+        self.assertEqual(out["stretchedFree"], 12, "the free pads of the bank were stretched as before")
+        # no request for a kept pad was made (the server would have answered 400): only the kit save was refused
+        self.assertEqual([f for f in failed if "savekit" not in f], [], failed)
+        self.assertEqual(len([f for f in failed if "savekit" in f]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
