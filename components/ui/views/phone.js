@@ -1,6 +1,7 @@
 // Phone pad mode (?mode=pad): a full-screen 4x4 pad grid with bank keys, for a phone browser on the LAN or USB.
 // Same session as the station: touch plays the pad, multi-touch plays several. Nothing depends on hover.
 import { createPadGrid } from "./pads.js";
+import { bankCount } from "/actions.js";
 import { createDisposer } from "./util.js";
 
 export function mount(root, session, env) {
@@ -32,12 +33,13 @@ export function mount(root, session, env) {
   banks.innerHTML = [0, 1, 2, 3].map((i) => `<button type="button" class="bkey" data-bank="${i}">${"ABCD"[i]}</button>`).join("");
   banks.addEventListener("click", (e) => { const b = e.target.closest("[data-bank]"); if (b) session.setBank(Math.floor(st().bank / 4) * 4 + Number(b.dataset.bank), true); });
   function render() {
-    const { bank, chops } = st(), g0 = Math.floor(bank / 4) * 4;
-    $(".ph-bank").textContent = `Bank ${bank + 1}/${chops.banks.length}`;
-    banks.querySelectorAll("[data-bank]").forEach((b) => { const real = g0 + Number(b.dataset.bank); b.classList.toggle("on", real === bank); b.disabled = real >= chops.banks.length; });
-    $(".ph-prev").disabled = bank <= 0; $(".ph-next").disabled = bank >= chops.banks.length - 1;
+    const { bank, chops, project } = st(), g0 = Math.floor(bank / 4) * 4, n = bankCount(project, chops);
+    $(".ph-title").textContent = meta.title;
+    $(".ph-bank").textContent = `Bank ${bank + 1}/${n}`;
+    banks.querySelectorAll("[data-bank]").forEach((b) => { const real = g0 + Number(b.dataset.bank); b.classList.toggle("on", real === bank); b.disabled = real >= n; });
+    $(".ph-prev").disabled = bank <= 0; $(".ph-next").disabled = bank >= n - 1;
   }
-  d.add(store.subscribe((s, prev) => { if (s.bank !== prev.bank || s.chops !== prev.chops) render(); }));
+  d.add(store.subscribe((s, prev) => { if (s.bank !== prev.bank || s.chops !== prev.chops || s.project.overrides !== prev.project.overrides) render(); }));
   render();
   session.setBank(0, true);
   return { destroy() { d.run(); root.innerHTML = ""; } };

@@ -1,7 +1,7 @@
 // FIG. 7: section strip, bank strip and the waveform (wavesurfer, reused through waveform.js) of the current bank.
 // Clicking a section or bank jumps there; dragging or resizing a pad's region re-slices it.
 import { createWaveform } from "/waveform.js";
-import { PADS } from "/actions.js";
+import { PADS, bankCount } from "/actions.js";
 import { createDisposer, cssVar, fmt, sectionIsLive } from "./util.js";
 
 export function mount(root, session, env) {
@@ -19,15 +19,18 @@ export function mount(root, session, env) {
     wave: cssVar("--wf-ink"), progress: cssVar("--wf-progress"), cursor: cssVar("--acc-o"), region: cssVar("--wf-region"),
     custom: cssVar("--wf-custom"), label: cssVar("--wf-label"), sel: cssVar("--acc-b"), selFill: cssVar("--wf-sel-fill"), play: cssVar("--acc-o"),
   });
-  const wave = createWaveform(waveEl, {
+  // The container (`.wave`) lives as long as the view; the wavesurfer inside it is made again when the source song changes.
+  const makeWave = () => createWaveform(waveEl, {
     peaks: peaks.peaks, duration: peaks.duration_s, media: video, style: readStyle(),
     onPadClick: (p) => session.hit(p, env.noteVar.get() / 127),
     onSliceEdit: (p, start, end) => {
+      if (engine.getSlice(st().bank, p)?.kept) return;   // a kept pad owns its audio: dragging a region must not re-slice it
       store.dispatch({ type: "slice.set", bank: st().bank, pad: p, start, end }, { from: "wave" });
       store.dispatch({ type: "pad.select", pad: p });
     },
     onUserSeek: (t) => { if (session.songPlaying) session.playSong(t); else if (st().settings.follow) session.followTo(t); },
   });
+  let wave = makeWave();
   d.add(() => wave.destroy());
   const ro = new ResizeObserver(() => { wave.setHeight(Math.max(40, waveEl.clientHeight - 4)); fitZoom(); });
   ro.observe(waveEl);
@@ -35,7 +38,7 @@ export function mount(root, session, env) {
   d.add(env.theme.on(() => wave.setStyle(readStyle())));
 
   // ---- bank strip + sections
-  const dur = meta.duration_s;
+  let dur = meta.duration_s;
   function renderBankStrip() {
     const { chops } = st(), track = $(".banks-track");
     track.innerHTML = "";
@@ -77,7 +80,8 @@ export function mount(root, session, env) {
     const out = [];
     for (let p = 0; p < PADS; p++) {
       const c = engine.getSlice(bank, p);
-      if (c) out.push({ pad: p, start: c.start, end: c.end, bar: c.bar, custom: !!c.custom, label: `${p + 1}  ${c.custom ? "★" : session.chopLabel(c)}` });
+      // a kept pad owns its audio and is not a slice of the open song: no region, so nothing offers to re-slice it
+      if (c && !c.kept) out.push({ pad: p, start: c.start, end: c.end, bar: c.bar, custom: !!c.custom, label: `${p + 1}  ${c.custom ? "★" : session.chopLabel(c)}` });
     }
     return out;
   };
@@ -87,13 +91,13 @@ export function mount(root, session, env) {
     wave.zoom(z > 0 ? z : width / ((range[1] - range[0]) * 1.02), range[0]);
   }
   function renderBank(redrawRegions = true) {
-    const { chops, bank, selected } = st();
+    const { chops, bank, selected, project } = st();
     const ids = chops.banks[bank] ?? [];
-    const first = chops.chops[ids[0]], last = chops.chops[ids.at(-1)];
-    $(".bank-n").textContent = String(bank + 1);
-    $(".bank-bars").textContent = `${first.bar + 1}–${last.bar + 1}`;
+    const first = chops.chops[ids[0]], last = chops.chops[ids.at(-1)];   // undefined on a bank past the song's own (kept pads only)
+    $(".bank-n").textContent = `${bank + 1}/${bankCount(project, chops)}`;
+    $(".bank-bars").textContent = first ? `${first.bar + 1}–${last.bar + 1}` : "—";
     root.querySelectorAll(".bank-seg").forEach((s, n) => s.classList.toggle("active", n === bank));
-    if (redrawRegions) { wave.showSlices(slicesOf(bank)); range = [first.start, last.end]; fitZoom(); }
+    if (redrawRegions) { wave.showSlices(slicesOf(bank)); if (first) range = [first.start, last.end]; fitZoom(); }
     wave.markSelected(selected);
   }
   d.add(env.zoom.on(() => fitZoom()));
@@ -106,6 +110,16 @@ export function mount(root, session, env) {
   const onHit = (e) => wave.flash(e.detail.pad);
   session.on("hit", onHit);
   d.add(() => session.off("hit", onHit));
+  // the source song changed (the session emits it after swapping buffer, peaks, chops): same view, same container, new wavesurfer
+  const onSource = () => {
+    dur = meta.duration_s;
+    wave.destroy();
+    wave = makeWave();
+    renderBankStrip(); renderSections(); renderBank();
+    $(".banks-head").style.left = "0%"; $(".sec-head").style.left = "0%";
+  };
+  session.on("source", onSource);
+  d.add(() => session.off("source", onSource));
 
   // ---- playhead: strips, section highlight, follow
   let lastSec = -2;

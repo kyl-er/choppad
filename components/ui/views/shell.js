@@ -2,6 +2,7 @@
 // things that are not song state: the shared ticker, theme, wave zoom, master volume, note variation, toasts.
 // It composes the views; it never touches sound, the store or the network itself.
 import { createCell, createDisposer, createTicker, remember, store as stored } from "./util.js";
+import { bankCount } from "/actions.js";
 import * as lcd from "./lcd.js";
 import * as pads from "./pads.js";
 import * as transport from "./transport.js";
@@ -30,11 +31,11 @@ export function createEnv({ audio, input, library = null }) {
   };
   const message = createCell(null);
   let toastEl = null, toastT = 0;
-  const toast = (text) => {
+  const toast = (text, ms = 2200) => {
     message.set({ text, t: performance.now() });
     if (!toastEl) { toastEl = document.createElement("div"); toastEl.className = "toast"; toastEl.setAttribute("role", "status"); document.body.append(toastEl); }
     toastEl.textContent = text; toastEl.classList.add("show");
-    clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove("show"), 2200);
+    clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove("show"), ms);
   };
   // follow the OS theme until the person picks one
   const mq = globalThis.matchMedia?.("(prefers-color-scheme: dark)");
@@ -101,16 +102,30 @@ export function mountShell(root, session, env) {
   const slot = (n) => root.querySelector(`[data-slot="${n}"]`);
 
   const fillHeader = () => {
-    const { chops, bank } = st();
+    const { chops, bank, project } = st();
+    const nb = bankCount(project, chops);
     root.querySelector(".s-title").textContent = meta.title;
-    const T = session.tempoBpm;   // the project tempo when it differs from the song's own
-    const tempo = Math.abs(T - chops.bpm) > 0.005 ? `${T.toFixed(1)} BPM (song ${chops.bpm.toFixed(1)})` : `${chops.bpm.toFixed(1)} BPM`;
-    root.querySelector(".s-meta").textContent = ` · ${tempo} · ${chops.beats_per_bar}/4 · BANK ${bank + 1}/${chops.banks.length}`;
+    // tempo (contracts §15): the user's own tempo, once set, stays through every song change; else the open song's
+    const T = session.tempoBpm, user = project.tempo?.bpm != null;
+    const tempo = user ? (Math.abs(T - chops.bpm) > 0.005 ? `USER ${T.toFixed(1)} BPM (song ${chops.bpm.toFixed(1)})` : `USER ${T.toFixed(1)} BPM`) : `SONG ${chops.bpm.toFixed(1)} BPM`;
+    const sm = root.querySelector(".s-meta");
+    sm.textContent = ` · ${tempo} · ${chops.beats_per_bar}/4 · BANK ${bank + 1}/${nb}`;
+    sm.dataset.tempo = user ? "user" : "song";
     root.querySelector(".tb-song").textContent = String(meta.id ?? session.id).slice(0, 14);
-    root.querySelector(".tb-banks").textContent = String(chops.banks.length);
+    root.querySelector(".tb-banks").textContent = String(nb);
+    root.querySelector(".sheet").dataset.source = session.source;
   };
-  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.project.tempo !== prev.project.tempo) fillHeader(); }));
+  d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.project.tempo !== prev.project.tempo || s.project.overrides !== prev.project.overrides) fillHeader(); }));
   fillHeader();
+  // a source change keeps this whole sheet; only what shows the song is updated (each source-dependent view does the same)
+  const onSource = () => { fillHeader(); if (!analysis.key) session.detectKey().then((k) => { if (k) window.choppad?.library?.refresh?.(); }); };
+  const sheet = root.querySelector(".sheet");
+  const onSourceError = (e) => { sheet.dataset.sourceError = e.detail.error; env.toast(`Couldn't load that song: ${e.detail.error}`, 6000); };
+  const onSourceLoading = () => { sheet.dataset.loading = "1"; };
+  const onSourceDone = () => { delete sheet.dataset.loading; };
+  session.on("source", onSource); session.on("source", onSourceDone); session.on("source-error", onSourceDone);
+  session.on("source-error", onSourceError); session.on("source-loading", onSourceLoading);
+  d.add(() => { session.off("source", onSource); session.off("source", onSourceDone); session.off("source-error", onSourceDone); session.off("source-error", onSourceError); session.off("source-loading", onSourceLoading); });
   // DAW bridge and tab role: the session keeps them from the song stream; there is no event for them, so look 4 times a second
   const dawEl = root.querySelector(".daw-st"), roleEl = root.querySelector(".role-st");
   let lastLook = 0;

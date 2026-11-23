@@ -5,17 +5,18 @@ import { cellToPad } from "/layout.js";
 import { createWaveform } from "/waveform.js";
 import { DEFAULT_FX, PRESETS } from "/fx.js";
 import { PADS, stepOf } from "/actions.js";
-import { openSong } from "/session.js";
+import { openMega, openSong } from "/session.js";
 
 const BAR_HUES = [140, 210, 35, 300];
 const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 /** Returns { destroy(), state, session }. Throws if the song can't be loaded. */
-export async function mountSong(root, { id, audio, input }) {
+export async function mountSong(root, { id, mega = null, audio, input }) {
   const { ctx, master, analyser } = audio;
   root.innerHTML = `<p class="loading">Loading song…</p>`;
-  const session = await openSong({ id, audio, onProgress: (t) => { const el = root.querySelector(".loading"); if (el) el.textContent = t; } });
+  const onProgress = (t) => { const el = root.querySelector(".loading"); if (el) el.textContent = t; };
+  const session = mega ? await openMega({ mid: mega, audio, onProgress }) : await openSong({ id, audio, onProgress });
   const { meta, analysis, peaks, store, engine, seq, video } = session;
   const dispatch = (action, m) => store.dispatch(action, m);
   const st = () => store.get();
@@ -187,7 +188,7 @@ export async function mountSong(root, { id, audio, input }) {
     const ids = chops.banks[bank] ?? [];
     renderPads();
     const first = chops.chops[ids[0]], last = chops.chops[ids.at(-1)];
-    $(".bank-label").textContent = `Bank ${bank + 1}/${chops.banks.length} · bars ${first.bar + 1}–${last.bar + 1}`;
+    $(".bank-label").textContent = `Bank ${bank + 1}/${Math.max(chops.banks.length, bank + 1)}${first ? ` · bars ${first.bar + 1}–${last.bar + 1}` : ""}`;
     root.querySelectorAll(".bank-seg").forEach((s, n) => s.classList.toggle("active", n === bank));
     const slices = [];
     for (let p = 0; p < 16; p++) {
@@ -196,7 +197,7 @@ export async function mountSong(root, { id, audio, input }) {
     }
     if (redrawRegions) {
       wave.showSlices(slices);
-      fitZoom(first.start, last.end);
+      if (first) fitZoom(first.start, last.end);
     }
     renderInspector();
     renderSteps();
@@ -332,7 +333,7 @@ export async function mountSong(root, { id, audio, input }) {
     el.addEventListener(k === "reverse" || k === "mode" ? "change" : "input", () => {
       const v = k === "reverse" ? el.checked : k === "mode" ? (el.value || null)
         : k === "attack" || k === "release" ? Number(el.value) / 1000 : Number(el.value);
-      dispatch({ type: "pad.set", pad: st().selected, params: { [k]: v } });
+      dispatch({ type: "pad.set", pad: st().selected, bank: st().bank, params: { [k]: v } });
     });
   }
   insp.querySelector(".grab").addEventListener("click", () => {
@@ -344,7 +345,7 @@ export async function mountSong(root, { id, audio, input }) {
   });
   insp.querySelector(".unslice").addEventListener("click", () => dispatch({ type: "slice.clear", bank: st().bank, pad: st().selected }));
   insp.querySelector(".all").addEventListener("click", () => dispatch({ type: "pad.copyToAll", pad: st().selected }));
-  insp.querySelector(".resetpad").addEventListener("click", () => dispatch({ type: "pad.reset", pad: st().selected }));
+  insp.querySelector(".resetpad").addEventListener("click", () => dispatch({ type: "pad.reset", pad: st().selected, bank: st().bank }));
 
   // ---- tap tempo ----
   let taps = [];

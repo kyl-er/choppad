@@ -347,7 +347,7 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 .pad.tagged .pad-label, .pad.custom .pad-label, .pad.foreign .pad-label { font-size: 12px; }
 .pad.tagged .pad-time { font-size: 8.5px; line-height: 1.05; margin-bottom: 9px; }
 .pad.handstretched .pad-time::before { content: "≈ "; }
-.pad.resampled .pad-tag { background: transparent; color: inherit; border: 1px solid currentColor; }
+.pad.resampled .pad-tag, .pad.kept .pad-tag { background: transparent; color: inherit; border: 1px solid currentColor; }
 .pad.hit .pad-tag { background: var(--on-o); color: var(--acc-o); }
 .pad.levels { border-style: dashed; } .pad.levels .pad-label { font-size: 15px; } .pad.levels .pad-time { text-transform: uppercase; font-size: 8.5px; }
 .padkeys { display: flex; align-items: center; gap: 6px; min-height: 20px; } .padkeys .bank-label { flex: 1; min-width: 0; text-align: left; }
