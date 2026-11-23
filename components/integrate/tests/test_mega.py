@@ -820,6 +820,11 @@ class ExportThroughSongRoute(Rig):
                     self.assertEqual(w.readframes(w.getnframes()), want[i])
             with wave.open(io.BytesIO(z.read("pad05.wav"))) as w:
                 self.assertNotEqual(w.readframes(w.getnframes()), want[0])
+        # a kept pad has no slice of the song to stretch (with or without start/end in the request)
+        for extra in ({}, {"start": 0, "end": 0.5}):
+            code, r = self.call("/api/songs/B/stretch", {"bank": 0, "pad": 0, "ratio": 0.5, **extra})
+            self.assertEqual(code, 400, r)
+            self.assertIn("kept", r["error"])
         # saving a kit from a mega bank that has kept pads is refused clearly (kits of kept pads are step D)
         code, r = self.call("/api/songs/B/savekit", {"bank": 0, "name": "k"})
         self.assertEqual(code, 400)
