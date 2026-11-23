@@ -11,11 +11,11 @@ import { bankCount } from "/actions.js";
 /** Returns { session, state, destroy() }. Opens the mega bank `mega`, or the mega bank of song `id`. Throws if it can't be loaded.
  *  `library` is { host, park } from main.js. The screen it builds lives as long as the mega bank is open: a change of the source
  *  song goes to `session.setSource` and every view updates itself (see views/*: the `source` event). */
-export async function mountSong(root, { id, mega = null, audio, input, library = null }) {
+export async function mountSong(root, { id, mega = null, audio, input, library = null, nav = null }) {
   root.innerHTML = `<p class="loading">Loading song…</p>`;
   const onProgress = (t) => { const el = root.querySelector(".loading"); if (el) el.textContent = t; };
   const session = mega ? await openMega({ mid: mega, audio, onProgress }) : await openSong({ id, audio, onProgress });
-  const env = createEnv({ audio, input, library });
+  const env = createEnv({ audio, input, library, nav });
   root.innerHTML = "";
   const phoneMode = new URLSearchParams(location.search).get("mode") === "pad";
   const view = phoneMode ? phone.mount(root, session, env) : mountShell(root, session, env);
@@ -32,7 +32,7 @@ export async function mountSong(root, { id, mega = null, audio, input, library =
 }
 
 /** The screen with no song open (library + welcome note). */
-export function mountHome(root, { audio, input, library = null }) {
-  const view = mountWelcome(root, createEnv({ audio, input, library }));
+export function mountHome(root, { audio, input, library = null, nav = null }) {
+  const view = mountWelcome(root, createEnv({ audio, input, library, nav }));
   return { destroy: () => view.destroy() };
 }

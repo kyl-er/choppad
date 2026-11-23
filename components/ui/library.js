@@ -2,7 +2,20 @@
 const fmtTime = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
-export function mountLibrary(root, { onOpen }) {
+// "3 min ago" for the mega bank list (`updated` is epoch seconds)
+const ago = (t) => {
+  if (!Number.isFinite(t)) return "";
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 45) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(t * 1000).toISOString().slice(0, 10);
+};
+
+/** `mega` (the new screen only; the classic screen passes none and gets no list): { open(mid), currentSource(), beforeRemove(mid),
+ *  removed(mid, wasOpen) }. The library owns the lists and the requests behind them (GET/POST/PUT/DELETE /api/mega): the screen only
+ *  hears `open(mid)` (a real change of mega bank). After every refresh of the list a `choppad:megas` event is sent on `window`. */
+export function mountLibrary(root, { onOpen, mega = null }) {
   root.innerHTML = `
     <div class="brand">Chop<span>Pad</span></div>
     <form class="import">
@@ -12,16 +25,23 @@ export function mountLibrary(root, { onOpen }) {
     <label class="file-pick muted small">…or drop an mp3 / wav anywhere, or <u>choose a file</u>
       <input type="file" accept="audio/*,video/*,.mp3,.wav,.flac,.ogg,.m4a,.aiff" multiple hidden></label>
     <div class="jobs"></div>
-    <div class="section-h">Library</div>
-    <ul class="songs"></ul>
+    <div class="section-h" id="lib-h-songs">${mega ? "Songs" : "Library"}</div>
+    <ul class="songs" aria-labelledby="lib-h-songs"></ul>${mega ? `
+    <div class="section-h" id="lib-h-megas">Drum pad mega banks</div>
+    <ul class="megas" aria-labelledby="lib-h-megas"></ul>
+    <button type="button" class="mega-new" aria-label="New drum pad mega bank on the current song">+ New mega bank</button>` : ""}
     <div class="section-h">Kits</div>
     <ul class="kits" style="list-style:none;padding:0;margin:0"></ul>`;
   const form = root.querySelector(".import");
   const jobsEl = root.querySelector(".jobs");
   const list = root.querySelector(".songs");
   const kitList = root.querySelector(".kits");
+  const megaList = root.querySelector(".megas");
   let active = null;
   let songs = [];
+  let megas = [];
+  let activeMega = null;
+  let megasReady = null;
 
   // Kits: 16 pads from any songs. Click one to put it on the open song's current bank.
   async function refreshKits() {
@@ -63,8 +83,8 @@ export function mountLibrary(root, { onOpen }) {
       const li = document.createElement("li");
       li.className = "song" + (s.id === active ? " active" : "");
       li.dataset.id = s.id;
-      li.innerHTML = `<div class="title">${esc(s.title)}</div>
-        <div class="meta">${s.bpm.toFixed(1)} BPM · ${esc(s.meter)}${s.key ? ` · <span class="key">${esc(s.key.tonic)} ${s.key.mode === "minor" ? "min" : "maj"}</span>` : ""} · ${fmtTime(s.duration_s)} · ${s.banks} banks</div>`;
+      li.innerHTML = `<button type="button" class="row-open" aria-label="Chop ${esc(s.title)}"${s.id === active ? ' aria-current="true"' : ""}><span class="title">${esc(s.title)}</span>
+        <span class="meta">${s.bpm.toFixed(1)} BPM · ${esc(s.meter)}${s.key ? ` · <span class="key">${esc(s.key.tonic)} ${s.key.mode === "minor" ? "min" : "maj"}</span>` : ""} · ${fmtTime(s.duration_s)} · ${s.banks} banks</span></button>`;
       li.addEventListener("click", () => onOpen(s.id));
       list.append(li);
     }
@@ -181,13 +201,153 @@ export function mountLibrary(root, { onOpen }) {
     [...e.dataTransfer.files].forEach(upload);
   });
 
+  // ---- drum pad mega banks (GET /api/mega: name, source song, how many pads are used, when it last changed)
+  function setActiveMega(mid) {
+    activeMega = mid;
+    for (const li of megaList?.querySelectorAll(".mega") ?? []) {
+      const on = li.dataset.id === mid;
+      li.classList.toggle("active", on);
+      const b = li.querySelector(".mega-open");
+      if (on) b?.setAttribute("aria-current", "true"); else b?.removeAttribute("aria-current");
+      const tag = li.querySelector(".mega-tag");
+      if (tag) tag.hidden = !on;
+    }
+  }
+  async function refreshMegas() {
+    if (!megaList) return [];
+    const job = (async () => {
+      try {
+        const r = await fetch("/api/mega");
+        const list = await r.json();
+        megas = Array.isArray(list) ? list : [];
+      } catch { /* keep the last list */ }
+      // a row being renamed or asked about keeps its state: the list is redrawn only when nothing in it is being edited
+      if (!megaList.querySelector(".mega.editing, .mega.asking")) drawMegas();
+      window.dispatchEvent(new CustomEvent("choppad:megas", { detail: { megas } }));
+      return megas;
+    })();
+    megasReady ??= job;
+    return job;
+  }
+  function drawMegas() {
+    megaList.innerHTML = megas.length ? "" : `<li class="empty">No mega banks yet. They are made when you open a song.</li>`;
+    for (const m of megas) {
+      const li = document.createElement("li");
+      li.className = "mega" + (m.id === activeMega ? " active" : "");
+      li.dataset.id = m.id;
+      const song = m.source ? esc(m.source_title ?? m.source) : "no song yet";
+      li.innerHTML = `<button type="button" class="row-open mega-open" aria-label="Open drum pad mega bank ${esc(m.name)}, ${m.source ? "song " + esc(m.source_title ?? m.source) : "no song"}, ${m.used_pads} pads used"${m.id === activeMega ? ' aria-current="true"' : ""}>
+          <span class="title">${esc(m.name)}</span>
+          <span class="meta"><span class="mega-song">♪ ${song}</span> · ${m.used_pads} pad${m.used_pads === 1 ? "" : "s"} used · ${ago(m.updated)}</span></button>
+        <span class="mega-tag"${m.id === activeMega ? "" : " hidden"}>OPEN</span>
+        <span class="mega-act"><button type="button" class="mega-ren" aria-label="Rename ${esc(m.name)}" title="Rename">✎</button><button type="button" class="mega-del" aria-label="Move ${esc(m.name)} to trash" title="Move to trash">×</button></span>`;
+      li.querySelector(".mega-open").addEventListener("click", () => { if (m.id !== activeMega) mega.open(m.id); });
+      li.querySelector(".mega-ren").addEventListener("click", () => rename(li, m));
+      li.querySelector(".mega-del").addEventListener("click", () => askRemove(li, m));
+      megaList.append(li);
+    }
+  }
+  function rename(li, m) {
+    li.classList.add("editing");
+    const t = li.querySelector(".title");
+    const input = document.createElement("input");
+    input.type = "text"; input.className = "mega-name"; input.value = m.name; input.maxLength = 80; input.autocomplete = "off";
+    input.setAttribute("aria-label", `New name for drum pad mega bank ${m.name}`);
+    t.replaceWith(input);
+    li.querySelector(".mega-open").disabled = true;
+    input.focus(); input.select();
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      li.classList.remove("editing");
+      const name = input.value.trim();
+      if (save && name && name !== m.name) {
+        try {
+          const r = await fetch(`/api/mega/${m.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) });
+          if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        } catch (err) { say(`Couldn't rename: ${err.message}`); }
+      }
+      await refreshMegas();
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false).then(() => megaList.querySelector(`.mega[data-id="${m.id}"] .mega-ren`)?.focus()); }
+    });
+    input.addEventListener("blur", () => finish(true));
+  }
+  function askRemove(li, m) {
+    if (li.classList.contains("asking")) return;
+    li.classList.add("asking");
+    const row = document.createElement("div");
+    row.className = "mega-ask";
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", `Move ${m.name} to trash?`);
+    row.innerHTML = `<span>Move “${esc(m.name)}” to trash?</span><span class="mega-ask-b"><button type="button" class="mega-yes">Move to trash</button><button type="button" class="mega-no">Keep it</button></span>`;
+    li.append(row);
+    const no = row.querySelector(".mega-no");
+    no.focus();
+    const close = () => { li.classList.remove("asking"); row.remove(); li.querySelector(".mega-del")?.focus(); };
+    no.addEventListener("click", close);
+    row.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } });
+    row.querySelector(".mega-yes").addEventListener("click", async () => {
+      const wasOpen = m.id === activeMega;
+      try {
+        await mega.beforeRemove?.(m.id);
+        const r = await fetch(`/api/mega/${m.id}`, { method: "DELETE" });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+        say(`“${m.name}” moved to trash (media/_mega/.trash).`);
+      } catch (err) { say(`Couldn't move to trash: ${err.message}`); li.classList.remove("asking"); row.remove(); return; }
+      li.classList.remove("asking");
+      await refreshMegas();
+      mega.removed?.(m.id, wasOpen);
+    });
+  }
+  async function createMega({ source = null, name } = {}) {
+    const r = await fetch("/api/mega", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...(source ? { source } : {}), ...(name ? { name } : {}) }) });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    await refreshMegas();
+    return body.mega;
+  }
+  // a line under the mega list: what just happened to a bank (moved to trash, rename failed)
+  const note = document.createElement("div");
+  note.className = "mega-note muted"; note.setAttribute("role", "status");
+  let noteT = 0;
+  function say(text) { note.textContent = text; clearTimeout(noteT); noteT = setTimeout(() => { note.textContent = ""; }, 9000); }
+  if (mega) {
+    megaList.after(note);
+    root.querySelector(".mega-new").addEventListener("click", async () => {
+      try {
+        const m = await createMega({ source: mega.currentSource?.() ?? null });
+        say(`New mega bank “${m.name}”.`);
+        mega.open(m.id);
+      } catch (err) { say(`Couldn't make a mega bank: ${err.message}`); }
+    });
+    refreshMegas();
+  }
+
   refresh();
   refreshKits();
   return {
     refresh, refreshKits,
     setActive(id) {
       active = id;
-      for (const li of list.querySelectorAll(".song")) li.classList.toggle("active", li.dataset.id === id);
+      for (const li of list.querySelectorAll(".song")) {
+        const on = li.dataset.id === id;
+        li.classList.toggle("active", on);
+        const b = li.querySelector(".row-open");
+        if (on) b?.setAttribute("aria-current", "true"); else b?.removeAttribute("aria-current");
+      }
     },
+    songInfo: (id) => songs.find((s) => s.id === id) ?? null,
+    focusSongs() { (list.querySelector(".song.active .row-open") ?? list.querySelector(".row-open"))?.focus(); },
+    // ---- drum pad mega banks
+    refreshMegas, megasReady: () => megasReady ?? Promise.resolve(),
+    megas: () => megas,
+    megaInfo: (mid) => megas.find((m) => m.id === mid) ?? null,
+    setActiveMega,
+    focusMegas() { (megaList?.querySelector(".mega.active .mega-open") ?? megaList?.querySelector(".mega-open") ?? root.querySelector(".mega-new"))?.focus(); },
+    createMega,
   };
 }

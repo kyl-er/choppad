@@ -66,18 +66,26 @@ export async function openSong({ id, audio, onProgress = () => {} }) {
   return openMega({ mid: data.mega, audio, onProgress });
 }
 
+/** What a mega bank with no source song shows and plays under: no title, no length, one silent frame of audio. Kept pads and the
+ *  pattern work as ever; `setSource` brings a song in later. The chop table has no tempo of its own, so 120 stands in until a
+ *  song (or the user) gives one. */
+function noSong(ctx, chops) {
+  return { meta: { id: null, title: "", duration_s: 0 }, analysis: {}, peaks: { duration_s: 0, peaks: [] }, buffer: ctx.createBuffer(1, 1, ctx.sampleRate),
+    chops: { ...chops, bpm: chops?.bpm ?? 120, beats_per_bar: chops?.beats_per_bar ?? 4, chops: chops?.chops ?? [], banks: chops?.banks ?? [] } };
+}
+
 /** Open mega bank `mid` and its source song. The returned session lives as long as the mega bank is open: `setSource` changes
- *  the song without making anything new. Throws if the mega bank or its song can't be loaded (a bank with no source song is
- *  not openable yet: step C adds choosing one). `onProgress(text)` is optional. */
+ *  the song without making anything new. Throws if the mega bank or its song can't be loaded. A mega bank with no source song
+ *  (`source: null`) opens too: `session.source` is null, kept pads and the sequence play, the song parts are empty.
+ *  `onProgress(text)` is optional. */
 export async function openMega({ mid, audio, onProgress = () => {} }) {
   const { ctx, master, fx } = audio;
   onProgress("Loading mega bank…");
   const res = await fetch(`/api/mega/${mid}`);
   if (!res.ok) throw new Error(`mega bank ${mid}: HTTP ${res.status}`);
   const data = await res.json();
-  const first = data.mega.source;
-  if (!first) throw new Error("this mega bank has no source song yet: choose a song for it first");
-  const loaded = await fetchSong(first, ctx, onProgress);
+  const first = data.mega.source ?? null;
+  const loaded = first ? await fetchSong(first, ctx, onProgress) : noSong(ctx, data.chops);
   // meta / analysis / peaks are the same objects for the whole life of the session: a source change replaces their content in
   // place, so a view that holds them (`const { meta } = session`) always reads the open song's.
   const meta = loaded.meta, analysis = loaded.analysis, peaks = loaded.peaks;
@@ -90,7 +98,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   video.muted = true;
   video.playsInline = true;
   video.preload = "auto";
-  video.src = `/media/${sourceId}/video.mp4`;
+  if (sourceId) video.src = `/media/${sourceId}/video.mp4`;
 
   // W3: a pad can play a time-stretched rendering of its slice, a slice of another song (kits) or a file of the mega bank (kept
   // pads). Buffers are fetched and decoded once (cached by url) and handed to the engine; none of this happens on the trigger path.
@@ -106,7 +114,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     }
     return loading.get(url);
   };
-  decoded.set(`/media/${sourceId}/audio.wav`, buffer);
+  if (sourceId) decoded.set(`/media/${sourceId}/audio.wav`, buffer);
   const events = new EventTarget();
   const emit = (type, detail) => events.dispatchEvent(new CustomEvent(type, { detail }));
   const store = createStore(reduce, initialState({ project: data.project, chops: loaded.chops, source: sourceId, mega: mid }));
@@ -133,15 +141,20 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     timers.add(t);
   }
   const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b, ev) => { engine.trigger(p, vel, when, b, ev); flashAt(when, p, b); } });
+  // The pattern is stored in beats; its bar length is the one it was made with. It follows the chop table only when the table is
+  // changed under the same song (regrid / reanalyze: `adoptChops`), never when the SOURCE song changes (a song in another meter
+  // must not change the loop length). Not saved with the pattern: after a reload it is the open song's again (that needs a
+  // reducer field, reported for step D).
+  let patternBpb = loaded.chops.beats_per_bar ?? 4;
   const syncSeqTempo = () => {   // the project tempo when set, else the song's own
     const st = store.get();
     seq.setBpm(projectBpm(st));
-    seq.state.beatsPerBar = st.chops.beats_per_bar;
+    seq.state.beatsPerBar = patternBpb;
     giveSong(st);
   };
   /** Song mode: the sequencer plays the chain (bar-accurate, one beat clock); otherwise it loops the edited pattern. */
   function giveSong(st = store.get()) {
-    seq.setSong(st.project.song?.mode === "song" ? songTimeline(st.project, st.chops.beats_per_bar) : null);
+    seq.setSong(st.project.song?.mode === "song" ? songTimeline(st.project, patternBpb) : null);
   }
 
   // ---- state -> engine, sequencer, fx, disk ----
@@ -383,6 +396,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
 
   // ---- regrid / tempo ----
   function adoptChops(chops) {
+    patternBpb = chops.beats_per_bar ?? patternBpb;   // the same song's table changed (regrid, meter): the pattern follows, as before
     const t = position();
     store.dispatch({ type: "chops.replace", chops });
     followTo(t);
@@ -390,6 +404,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   let lastGrid = null; // the grid to return to when switching back from transient mode
   /** change: { grid } | { meter } | { mult } | { shift } | { bar1: true } | { mode: "grid"|"transient", sensitivity? } */
   async function regrid(change) {
+    if (!sourceId) return false;
     const { chops } = store.get();
     let mode = chops.mode ?? "grid";
     let sensitivity = chops.sensitivity ?? 0.5;
@@ -419,6 +434,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   }
   /** Re-run the analysis with a forced tempo (tap tempo). */
   async function reanalyze(bpm) {
+    if (!sourceId) return false;
     const r = await postJson(`/api/songs/${sourceId}/reanalyze`, { bpm, meter: meterOverride });
     if (!r.ok) return false;
     const out = await r.json();
@@ -440,13 +456,13 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   /** Standard MIDI File of the whole chain (song mode's playing order; just the edited pattern when there is no chain). */
   const songMidi = () => {
     const st = store.get();
-    const bpb = st.chops.beats_per_bar;
+    const bpb = patternBpb;
     const tl = songTimeline(st.project, bpb, { force: true });
     return patternToMidi({ bars: tl.total / bpb, events: timelineEvents(tl) }, { bpm: projectBpm(st), beatsPerBar: bpb });
   };
   const patternMidi = () => {
     const st = store.get();
-    return patternToMidi(st.project.pattern, { bpm: projectBpm(st), beatsPerBar: st.chops.beats_per_bar });
+    return patternToMidi(st.project.pattern, { bpm: projectBpm(st), beatsPerBar: patternBpb });
   };
   /** Offline render of `events` (absolute beats from 0, with their pad, bank, vel, pitch, cutoff) through the pad sounds and the
    *  master fx, at the project tempo. `beats` = length of the take; `tail` adds room for the last hit and the reverb to ring out
@@ -480,7 +496,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   /** Offline render of the whole chain (every pattern as often as the chain says), WAV bytes, or null when there is nothing to play. */
   async function renderSongWav() {
     const st = store.get();
-    const tl = songTimeline(st.project, st.chops.beats_per_bar, { force: true });
+    const tl = songTimeline(st.project, patternBpb, { force: true });
     const events = timelineEvents(tl);
     if (!events.length) return null;
     return encodeWav(await renderEvents(events, { beats: tl.total }));
@@ -493,16 +509,17 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   }
   /** Offline render of the pattern through the pad sounds and master fx. Returns WAV bytes, or null when empty. */
   async function renderPatternWav() {
-    const { chops, project } = store.get();
+    const { project } = store.get();
     const pat = project.pattern;
     if (!pat.events.length) return null;
-    return encodeWav(await renderEvents(pat.events, { beats: pat.bars * chops.beats_per_bar }));
+    return encodeWav(await renderEvents(pat.events, { beats: pat.bars * patternBpb }));
   }
 
   // ---- stems (components/stems): drums, bass, vocals and other of the song, from a backend the server is set up with ----
   /** Split the song into stems (the server asks its backend, which can take minutes; cached after the first time). Resolves
    *  { ok, stems: ["drums", ...] } and puts the list in session.meta.stems, or { ok: false, status, error } (501 = no backend set up). */
   async function separateStems({ force = false } = {}) {
+    if (!sourceId) return { ok: false, error: "pick a song first" };
     try {
       const r = await postJson(`/api/songs/${sourceId}/stems`, force ? { force: true } : {});
       const body = await r.json().catch(() => ({}));
@@ -566,7 +583,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   async function resample({ bars, seconds, source = "pattern", pad, bank, play = true } = {}) {
     try {
       const st = store.get();
-      const bpm = projectBpm(st), bpb = st.chops.beats_per_bar;
+      const bpm = projectBpm(st), bpb = patternBpb;
       const secs = Number.isFinite(seconds) && seconds > 0 ? seconds : Number.isFinite(bars) && bars > 0 ? (bars * bpb * 60) / bpm : 0;
       if (!(secs >= 0.05 && secs <= 300)) return { ok: false, error: "give bars or seconds (at most 300 s)" };
       if (pad !== undefined && !(Number.isInteger(pad) && pad >= 0 && pad < PADS)) return { ok: false, error: "pad must be 0..15" };
@@ -594,6 +611,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
 
   // ---- server features ----
   async function loadSections() {
+    if (!sourceId) return;
     try {
       const r = await postJson(`/api/songs/${sourceId}/sections`);
       if (r.ok) store.dispatch({ type: "sections.set", sections: (await r.json()).sections });
@@ -602,6 +620,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   let ai = null;
   /** Ask the audio model about the song. Returns its answer; throws with the server's error text. */
   async function advise() {
+    if (!sourceId) throw new Error("pick a song first");
     const r = await postJson(`/api/songs/${sourceId}/advise`);
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || r.status);
@@ -619,6 +638,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   }
   /** kind: "hydrogen" | "sfz" | "zip" (16 WAVs; also returns `url` to download). Returns { ok, path, url?, note, error }. */
   async function exportBank(kind) {
+    if (!sourceId) return { ok: false, error: "pick a song first" };
     const { bank, project } = store.get();
     const r = await postJson(`/api/songs/${sourceId}/export`, { kind, bank, fx: project.fx, overrides: project.overrides, pads: project.pads });
     const body = await r.json().catch(() => ({}));
@@ -627,7 +647,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
 
   // ---- key (analysis.key, detected once on the server) ----
   async function detectKey() {
-    if (analysis.key) return analysis.key;
+    if (analysis.key || !sourceId) return analysis.key ?? null;
     const r = await postJson(`/api/songs/${sourceId}/key`);
     if (!r.ok) return null;
     analysis.key = await r.json();
@@ -838,11 +858,11 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   // where a kept pad plays the wrong audio. Any failure before step 4 leaves the old source exactly as it was.
   let sourceChain = Promise.resolve();   // source changes (and the remote batches that must wait for them), in order
   let switches = 0;                      // source changes queued or running
-  let lastSourceError = null;
+  let lastSourceError = null;   // { song, error, retry: { song, actions } }
   const keptOf = (actions) => actions.filter((a) => a.type === "slice.keep");
   /** Drop every decoded buffer nothing refers to any more (the old song's audio once no un-kept override uses it, ...). */
   function collectBuffers() {
-    const keep = new Set([`/media/${sourceId}/audio.wav`]);
+    const keep = new Set(sourceId ? [`/media/${sourceId}/audio.wav`] : []);
     for (const o of Object.values(store.get().project.overrides)) { const u = sourceOf(o)?.url; if (u) keep.add(u); }
     for (const u of [...decoded.keys()]) if (!keep.has(u)) decoded.delete(u);
   }
@@ -872,11 +892,10 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
       return { ok: true, song: songId, same: true };
     }
     const from = sourceId;
-    let posted = false, out = {};
+    let posted = false, reverted = false, acts = given, out = {};
     emit("source-loading", { song: songId });
     try {
       const next = await fetchSong(songId, ctx);
-      let acts = given;
       if (!acts) {
         await flush();   // the server must know every hit recorded so far: those pads are "used"
         const r = await postJson(`/api/mega/${mid}/source`, { song: songId });
@@ -891,9 +910,12 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
       commitSwap(songId, next, acts);
       return { ok: true, song: songId, ...out };
     } catch (e) {
-      if (posted) { try { await postJson(`/api/mega/${mid}/source`, { song: from }); } catch { /* the next resync sets it right */ } }
+      // the tab goes back to the old song, so the server must too (a mega bank that had no song cannot go back: no endpoint clears
+      // the source, so a retry must take the server's batch as it is)
+      if (posted && from) { try { await postJson(`/api/mega/${mid}/source`, { song: from }); reverted = true; } catch { /* the next resync sets it right */ } }
       const error = String(e?.message ?? e);
-      lastSourceError = { song: songId, error };
+      const retry = { song: songId, actions: given ?? (posted && !reverted ? acts : null) };
+      lastSourceError = { song: songId, error, retry };
       emit("source-error", { song: songId, error });
       return { ok: false, song: songId, error };
     }
@@ -906,6 +928,29 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     const run = sourceChain.then(() => changeSource(songId, actions));
     sourceChain = run.then(() => {}, () => {});
     return run.finally(() => { switches--; });
+  }
+
+  /** Keep one pad now (the KEEP key): the server renders its audio as played into the mega bank and the pad becomes a kept override.
+   *  The calling tab does not get the batch on its stream, so it is applied here (buffer decoded first, then one dispatch).
+   *  Waits behind a source change that is loading. Resolves { ok, kept, already, failed, error }. */
+  function keepPad(bank, pad) {
+    const run = sourceChain.then(async () => {
+      try {
+        await flush();
+        const r = await postJson(`/api/mega/${mid}/keep`, { bank, pad });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}`, kept: [], already: [], failed: [] };
+        const acts = body.actions ?? [];
+        await Promise.all(keptOf(acts).map((a) => loadBuffer(a.src)));
+        for (const a of acts) store.dispatch(a, remoteMeta);
+        const kept = body.kept ?? [], already = body.already ?? [], failed = body.failed ?? [];
+        return { ok: kept.length + already.length > 0, kept, already, failed, error: failed[0]?.reason };
+      } catch (e) {
+        return { ok: false, error: String(e?.message ?? e), kept: [], already: [], failed: [] };
+      }
+    });
+    sourceChain = run.then(() => {}, () => {});
+    return run;
   }
 
   /** After a dropped connection: events were missed, so compare with what the server has and apply the difference. */
@@ -943,7 +988,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     apply({ type: "song.load", song: want.song ?? null });
     apply({ type: "tempo.set", bpm: want.tempo?.bpm ?? null, follow: want.tempo?.follow ?? true });
     apply({ type: "pattern.load", pattern: want.pattern });
-    if (JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
+    if (d.mega.source && JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
   }
   /** The DAW bridge endpoint (POST /api/songs/<id>/daw): command "open" | "sync" | "play" | "stop" for "hydrogen" | "ardour".
    *  open and sync take the bank on screen and this tab's swing / quant / choke. Resolves { ok, ...server answer } or { ok: false, error }. */
@@ -995,6 +1040,11 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     meta, analysis, peaks, video, store, engine, seq,
     setSource,
     get lastSourceError() { return lastSourceError; },
+    /** Try the source change that failed again (a tab that followed another tab's switch takes the same batch again). */
+    retrySource() { const r = lastSourceError?.retry; return r ? setSource(r.song, r.actions ? { actions: r.actions } : {}) : Promise.resolve({ ok: false, error: "nothing to retry" }); },
+    keepPad,
+    /** Bar length (beats) of the pattern: the one it was made with; not the open song's when a song of another meter came in. */
+    get patternBeatsPerBar() { return patternBpb; },
     get switching() { return switches > 0; },
     /** urls of the decoded buffers held right now (tests: what stays in memory) */
     heldBuffers: () => [...decoded.keys()],
