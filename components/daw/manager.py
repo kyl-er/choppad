@@ -57,7 +57,7 @@ class DawManager:
 
     def _changed(self, *sids):
         if self.on_change:
-            for sid in dict.fromkeys(sids):
+            for sid in dict.fromkeys(k for k in sids if k is not None):   # (no one held it before: nobody to tell)
                 try:
                     self.on_change(sid)
                 except Exception:  # noqa: BLE001 - a broken listener must not break the DAW command
