@@ -71,7 +71,7 @@ export function mountLibrary(root, { onOpen }) {
   }
 
   // ---- import jobs: every job the server runs is shown from the library stream (GET /api/events, `job` events {job, state, step,
-  // progress, song?, error?}); polling GET /api/jobs/<id> is the fallback when there is no stream or it goes quiet ----
+  // progress, song?, error?}); polling GET /api/jobs/<id> is the fallback when there is no stream or it is disconnected ----
   const rows = new Map();    // job id -> { row, fill, stage, finished }
   const mine = new Map();    // jobs this tab started -> label; only those open the song when done
   const seen = new Map();    // job id -> time of the last news (event or poll)
@@ -118,7 +118,10 @@ export function mountLibrary(root, { onOpen }) {
     const poll = async () => {
       const r = rows.get(jobId);
       if (r?.finished) return;
-      if (Date.now() - (seen.get(jobId) ?? 0) > 3000) {   // no news from the stream: ask
+      // Ask only when the stream cannot tell us: it is missing or not connected. A connected stream that is quiet just
+      // means the current step is slow (analysing a long song takes more than a few seconds).
+      const streamUp = es && es.readyState === 1;
+      if (!streamUp && Date.now() - (seen.get(jobId) ?? 0) > 3000) {
         try { onJob(norm(await fetch(`/api/jobs/${jobId}`).then((x) => x.json()))); } catch { /* try again */ }
       }
       setTimeout(poll, 1000);
