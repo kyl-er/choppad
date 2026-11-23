@@ -242,6 +242,17 @@ def kit_pads(media_root, kit):
     for pad, p in enumerate(kit.get("pads") or []):
         if not p:
             continue
+        if "song_id" not in p and p.get("src"):   # CHOP-13 step D: a kept pad: its audio is a file of the kit
+            m = re.match(r"^/media/_kits/([A-Za-z0-9_-]{1,64})/samples/([0-9a-f]{16}\.wav)$", p["src"])
+            audio = os.path.join(media_root, "_kits", m.group(1), "samples", m.group(2)) if m else ""
+            if not os.path.isfile(audio):
+                raise ValueError(f"the sound {p['src']} of this kit is missing")
+            pr = p.get("params") or {}
+            pads.append({"pad": pad, "start": p["start"], "end": p["end"], "audio": audio, "sr": _sample_rate(audio), "stretch": None, "kept": True,
+                         "params": pr, "level": float(p["gain"]) if _num(p.get("gain")) and 0 < p["gain"] <= 4 else 1.0,
+                         "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
+                         "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
+            continue
         audio = _song_audio(media_root, p["song_id"])
         if p.get("src"):                          # W3b: a resample or a stem of that song
             audio = _resample_path(media_root, p["src"])

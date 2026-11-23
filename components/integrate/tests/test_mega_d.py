@@ -418,5 +418,219 @@ class DeleteWhileOpen(DRig):
         return self.post(f"/api/mega/{mid}/actions", {"actions": [{"type": "pad.select", "pad": 1}]})
 
 
+class Kits(DRig):
+    """A kit may hold kept pads: their audio is COPIED into the kit folder, so the kit never depends on a mega bank's files."""
+    def make_kit(self):
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0, 1), {"type": "pad.set", "pad": 1, "params": {"gainDb": -4, "pitch": 3}})
+        self.switch(mid, "B")                                       # pads 1, 2 are kept (from A); the other 14 are B's chops
+        code, kit = self.post(f"/api/mega/{mid}/savekit", {"bank": 0, "name": "Break Kit"})
+        self.assertEqual(code, 200, kit)
+        return mid, kit
+
+    def test_savekit_of_kept_pads_copies_their_audio_into_the_kit(self):
+        mid, kit = self.make_kit()
+        for pad in (0, 1):
+            p = kit["pads"][pad]
+            self.assertNotIn("song_id", p)
+            self.assertRegex(p["src"], rf"^/media/_kits/{kit['id']}/samples/[0-9a-f]{{16}}\.wav$")
+            mine = os.path.join(self.root, "_mega", mid, "samples", os.path.basename(p["src"]))
+            copy = os.path.join(self.root, "_kits", kit["id"], "samples", os.path.basename(p["src"]))
+            self.assertTrue(os.path.isfile(mine) and os.path.isfile(copy))
+            self.assertEqual(TM.slurp(mine), TM.slurp(copy))
+            self.assertEqual((p["start"], p["from"]["song"]), (0, "A"))
+            self.assertAlmostEqual(p["gain"], 0.891 / 0.5, places=2)       # the level it played at, kept with it
+        self.assertEqual((kit["pads"][1]["params"]["gainDb"], kit["pads"][1]["params"]["pitch"]), (-4, 3))   # its own sound
+        self.assertEqual((kit["pads"][2]["song_id"], kit["pads"][5]["song_id"]), ("B", "B"))
+        stored = json.load(open(os.path.join(self.root, "_kits", kit["id"], "kit.json")))
+        self.assertEqual(stored["pads"], kit["pads"])
+        self.assertEqual(self.call("/api/kits")[1][0]["kept"], 2)
+
+    def test_the_kit_does_not_depend_on_the_mega_bank_and_exports(self):
+        mid, kit = self.make_kit()
+        want = X.pad_pcm({**X.bank_pads(os.path.join(self.root, "A"), 0, {}, [])[0], "params": {}}, {})[3]
+        self.assertEqual(self.call(f"/api/mega/{mid}", method="DELETE")[0], 200)   # the mega bank and its samples go (to .trash)
+        for kind in ("zip", "sfz", "hydrogen"):
+            code, r = self.call(f"/api/kits/{kit['id']}/export", {"kind": kind})
+            self.assertEqual(code, 200, (kind, r))
+        code, r = self.call(f"/api/kits/{kit['id']}/export", {"kind": "zip"})
+        self.assertEqual(zip_pad(r["path"], "pad01.wav"), want)
+        self.assertEqual(len(zipfile.ZipFile(r["path"]).namelist()), 16)
+        # a kit entry whose sound is missing is refused clearly
+        os.remove(os.path.join(self.root, "_kits", kit["id"], "samples", os.path.basename(kit["pads"][0]["src"])))
+        code, r = self.call(f"/api/kits/{kit['id']}/export", {"kind": "zip"})
+        self.assertEqual(code, 400)
+        self.assertIn("missing", r["error"])
+
+    def test_loading_the_kit_into_a_mega_bank_copies_the_samples_and_emits_slice_keep(self):
+        mid, kit = self.make_kit()
+        other = self.new_mega("B", "Other")
+        s = self.stream(f"/api/mega/{other}/events", "tab2")
+        code, r = self.post(f"/api/mega/{other}/loadkit", {"kit": kit["id"], "bank": 0})
+        self.assertEqual(code, 200, r)
+        self.assertEqual([a["type"] for a in r["actions"]], ["kit.load", "slice.keep", "slice.keep"])
+        keeps = [a for a in r["actions"] if a["type"] == "slice.keep"]
+        self.assertEqual([(a["bank"], a["pad"]) for a in keeps], [(0, 0), (0, 1)])
+        for a in keeps:
+            self.assertRegex(a["src"], rf"^/media/_mega/{other}/samples/")
+            self.assertTrue(os.path.isfile(os.path.join(self.root, "_mega", other, "samples", os.path.basename(a["src"]))))
+            self.assertEqual(TM.slurp(os.path.join(self.root, "_mega", other, "samples", os.path.basename(a["src"]))),
+                             TM.slurp(os.path.join(self.root, "_kits", kit["id"], "samples", os.path.basename(a["src"]))))
+        self.assertEqual(keeps[1]["params"]["gainDb"], -4)
+        ov = self.get(other)["project"]["overrides"]
+        self.assertTrue(ov["0:0"]["kept"] and ov["0:1"]["kept"])
+        self.assertAlmostEqual(ov["0:0"]["gain"], 1.782, places=2)
+        self.assertEqual(ov["0:0"]["from"]["song"], "A")
+        self.assertNotIn("song", ov["0:2"])                    # the kit's pad 3 is song B's chop and the mega bank's source is B
+        self.assertEqual(self.get(other)["project"]["pads"][1]["gainDb"], 0)    # the kept pad's sound lives in its override
+        self.assertEqual(len(s.wait(1)), 1)
+        self.assertEqual([a["type"] for a in s.of("actions")[0]["actions"]], ["kit.load", "slice.keep", "slice.keep"])
+        # the kit is untouched, and a kit load twice changes nothing more
+        self.assertEqual(len(os.listdir(os.path.join(self.root, "_kits", kit["id"], "samples"))), 2)
+        code, again = self.post(f"/api/mega/{other}/loadkit", {"kit": kit["id"], "bank": 0})
+        self.assertEqual(code, 200)
+        self.assertNotIn("slice.keep", [a["type"] for a in again["actions"]])        # the pads are kept already: nothing is copied again
+        self.assertEqual(len(os.listdir(os.path.join(self.root, "_mega", other, "samples"))), 2)
+        self.assertEqual(self.post(f"/api/mega/{other}/loadkit", {"kit": "nope", "bank": 0})[0], 404)
+        self.assertEqual(self.post(f"/api/mega/{other}/loadkit", {"kit": kit["id"], "bank": -1})[0], 400)
+        self.assertEqual(self.post("/api/mega/nope/loadkit", {"kit": kit["id"]})[0], 404)
+
+    def test_old_kits_still_load_and_kit_bodies_are_checked(self):
+        pads = [None] * 16
+        pads[0] = {"song_id": "A", "start": 1.0, "end": 1.5}
+        code, kit = self.call("/api/kits", {"name": "Old", "pads": pads})
+        self.assertEqual(code, 201, kit)
+        mid = self.new_mega("B")
+        code, r = self.post(f"/api/mega/{mid}/loadkit", {"kit": kit["id"], "bank": 0})
+        self.assertEqual((code, [a["type"] for a in r["actions"]]), (200, ["kit.load"]))
+        self.assertEqual(self.get(mid)["project"]["overrides"]["0:0"], {"start": 1.0, "end": 1.5, "song": "A"})
+        for bad in ({"src": "/media/_kits/x/samples/0123456789abcdef.wav", "start": 0, "end": 1},      # file does not exist
+                    {"src": "/media/B/audio.wav", "start": 0, "end": 1},
+                    {"src": "/media/_mega/m0123456789a/samples/0123456789abcdef.wav", "start": 1, "end": 1}):
+            code, r = self.call("/api/kits", {"name": "Bad", "pads": [bad]})
+            self.assertEqual(code, 400, (bad, r))
+
+    def test_a_mega_bank_resample_goes_into_the_kit_as_a_kept_pad(self):
+        mid = self.new_mega("A")
+        up = json.loads(TM.urllib.request.urlopen(TM.urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/mega/{mid}/resample", data=wav_bytes(1.0), headers={"Content-Type": "audio/wav"}, method="POST")).read())
+        self.acts(mid, {"type": "slice.src", "bank": 0, "pad": 4, "src": up["url"], "start": 0, "end": up["duration"]})
+        code, kit = self.post(f"/api/mega/{mid}/savekit", {"bank": 0, "name": "Resample kit"})
+        self.assertEqual(code, 200, kit)
+        self.assertRegex(kit["pads"][4]["src"], r"^/media/_kits/")
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "_kits", kit["id"], "samples", up["hash"] + ".wav")))
+
+
+class Sweep(DRig):
+    def samples(self, mid):
+        return sorted(os.listdir(os.path.join(self.root, "_mega", mid, "samples")))
+
+    def trash(self, mid):
+        d = os.path.join(self.root, "_mega", mid, ".trash")
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def test_a_pad_kept_released_and_kept_again(self):
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0))
+        self.assertEqual(self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": 0})[0], 200)
+        [name] = self.samples(mid)
+        self.assertEqual(self.trash(mid), [])
+        self.acts(mid, {"type": "slice.clear", "bank": 0, "pad": 0})                 # released: the sample no override uses is swept
+        self.assertEqual((self.samples(mid), self.trash(mid)), ([], [name]))
+        self.assertEqual(self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": 0})[0], 200)   # kept again: the same content, the same name
+        self.assertEqual((self.samples(mid), self.trash(mid)), ([name], [name]))
+        self.assertEqual(self.get(mid)["project"]["overrides"]["0:0"]["src"], f"/media/_mega/{mid}/samples/{name}")
+        self.acts(mid, {"type": "slice.clear", "bank": 0, "pad": 0})
+        self.assertEqual((self.samples(mid), self.trash(mid)), ([], sorted([name, name[:-4] + "-2.wav"])))   # nothing is ever deleted
+        self.assertEqual(self.call(f"/media/_mega/{mid}/samples/{name}", raw=True)[0], 404)
+        # replacing a kept pad by another sound sweeps the old sample
+        self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": 0})
+        self.acts(mid, {"type": "slice.set", "bank": 0, "pad": 0, "start": 3.0, "end": 3.5})
+        self.assertEqual(self.samples(mid), [])
+
+    def test_on_demand_sweeps_orphans_and_keeps_what_overrides_use(self):
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0, 1))
+        self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": 0})
+        self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": 1})
+        keep = self.samples(mid)
+        stray = "0123456789abcdef.wav"
+        shutil.copy(os.path.join(self.root, "_mega", mid, "samples", keep[0]), os.path.join(self.root, "_mega", mid, "samples", stray))
+        open(os.path.join(self.root, "_mega", mid, "samples", "notes.txt"), "w").write("not a sample")
+        code, r = self.post(f"/api/mega/{mid}/sweep", {})
+        self.assertEqual((code, r["moved"], r["kept"]), (200, [stray], 2))
+        self.assertEqual((sorted(f for f in self.samples(mid) if f.endswith(".wav")), self.trash(mid)), (keep, [stray]))
+        self.assertIn("notes.txt", self.samples(mid))                  # anything that is not a sample file is left alone
+        self.assertEqual(self.post(f"/api/mega/{mid}/sweep", {})[1]["moved"], [])
+        self.assertEqual(self.post("/api/mega/nope/sweep", {})[0], 404)
+
+    def test_a_sample_a_song_pattern_needs_is_never_swept(self):
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0), {"type": "song.addPattern", "bars": 1}, *self.hits(5, 6))   # pad 1 is hit by pattern 1 only
+        self.assertEqual(self.get(mid)["project"]["pattern"]["events"][0]["pad"], 5)
+        for pad in (0, 5, 6):
+            self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": pad})
+        names = self.samples(mid)
+        self.assertEqual(len(names), 3)
+        self.assertEqual(self.post(f"/api/mega/{mid}/sweep", {})[1]["moved"], [])
+        self.acts(mid, {"type": "pattern.clear"})
+        self.assertEqual(self.samples(mid), names)                      # the pad of the cleared pattern is still an override: its sample stays
+
+    def test_a_kit_copy_in_progress_and_a_fresh_upload_are_not_swept(self):
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0))
+        self.post(f"/api/mega/{mid}/keep", {"bank": 0, "pad": 0})
+        self.acts(mid, {"type": "slice.set", "bank": 0, "pad": 0, "start": 1.0, "end": 1.5})   # now nothing refers to it
+        self.assertEqual(self.samples(mid), [])
+        up = json.loads(TM.urllib.request.urlopen(TM.urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/api/mega/{mid}/resample", data=wav_bytes(0.5, 500), headers={"Content-Type": "audio/wav"}, method="POST")).read())
+        self.post(f"/api/mega/{mid}/sweep", {})                         # the upload is no override's yet
+        self.assertIn(up["hash"] + ".wav", self.samples(mid))
+        M.pin_for(mid, [up["hash"] + ".wav"], seconds=-1)                # its protection has run out
+        with M.pinned(mid, [up["hash"] + ".wav"]):                       # but a kit copy of it is in progress
+            self.assertEqual(M.sweep_samples(self.root, mid)["moved"], [])
+        self.assertEqual(M.sweep_samples(self.root, mid)["moved"], [up["hash"] + ".wav"])
+
+
+class BarLength(DRig):
+    """The pattern keeps its own bar length (project.pattern.beatsPerBar): the server stamps it, the writers of MIDI, .h2song and the
+    DAW project read it."""
+    def test_the_first_hit_stamps_the_bar_length_and_it_is_saved_and_survives_a_source_with_another_meter(self):
+        d = os.path.join(self.root, "B", "chops.json")
+        three = json.load(open(d))
+        three["beats_per_bar"] = 3
+        with open(d, "w") as f:
+            json.dump(three, f)
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0))
+        self.assertEqual(self.get(mid)["project"]["pattern"]["beatsPerBar"], 4)
+        self.switch(mid, "B")
+        self.assertEqual(self.get(mid)["chops"]["beats_per_bar"], 3)
+        self.acts(mid, *self.hits(1, start=2))
+        self.assertEqual(self.get(mid)["project"]["pattern"]["beatsPerBar"], 4)           # not 3
+        self.acts(mid, {"type": "pattern.setBars", "bars": 1})
+        self.assertEqual([e["beat"] for e in self.get(mid)["project"]["pattern"]["events"]], [0, 2])   # 1 bar of 4 beats, not 3
+        # a pattern with no events yet takes the open song's bar length with its first hit
+        other = self.new_mega("B")
+        self.acts(other, *self.hits(0))
+        self.assertEqual(self.get(other)["project"]["pattern"]["beatsPerBar"], 3)
+
+    def test_the_daw_project_and_the_h2song_use_it(self):
+        import daw_project as DP
+        mid = self.new_mega("A")
+        self.acts(mid, *self.hits(0, 1, start=0), {"type": "pattern.setBars", "bars": 2})
+        doc = M.read(self.root, mid)
+        self.assertEqual(doc["project"]["pattern"]["beatsPerBar"], 4)             # the hit came first: 4 from the chop table of A
+        doc["project"]["pattern"]["beatsPerBar"] = 3
+        proj = DP.build_mega_project(self.root, doc, M.chops_of(self.root, doc), M.song_dir(self.root, "A"), os.path.join(self.tmp, "kits"), bank=0)
+        self.assertEqual(proj.beats_per_bar, 3)
+        import h2song
+        root, info = h2song.build_song(title="t", bpm=120, beats_per_bar=proj.beats_per_bar, wavs=proj.wavs(), pattern=proj.pattern,
+                                       empty_wav="e.wav")
+        self.assertEqual(root.find("patternList/pattern/size").text, str(2 * 3 * 48))     # 2 bars of 3 beats
+        old = {**doc["project"], "pattern": {"bars": 2, "events": []}}
+        self.assertEqual(DP.project_beats_per_bar(old, {"beats_per_bar": 5}), 5)           # an old pattern reads the chop table
+
+
 if __name__ == "__main__":
     unittest.main()

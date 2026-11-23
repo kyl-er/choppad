@@ -828,10 +828,10 @@ class ExportThroughSongRoute(Rig):
             code, r = self.call("/api/songs/B/stretch", {"bank": 0, "pad": 0, "ratio": 0.5, **extra})
             self.assertEqual(code, 400, r)
             self.assertIn("kept", r["error"])
-        # saving a kit from a mega bank that has kept pads is refused clearly (kits of kept pads are step D)
+        # a kit of a mega bank that has kept pads works since step D (the audio is copied into the kit; test_mega_d.Kits)
         code, r = self.call("/api/songs/B/savekit", {"bank": 0, "name": "k"})
-        self.assertEqual(code, 400)
-        self.assertIn("kept", r["error"])
+        self.assertEqual(code, 200, r)
+        self.assertEqual([("src" in p, "song_id" in p) for p in r["pads"][:3]], [(True, False), (True, False), (False, True)])
 
 
 if __name__ == "__main__":

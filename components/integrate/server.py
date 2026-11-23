@@ -223,7 +223,9 @@ class ChopPadServer(ThreadingHTTPServer):
         super().shutdown()
 
 
-MEGA_SUBS = ("events", "actions", "transport", "source", "keep", "project", "resample", "regrid", "reanalyze")
+MEGA_SUBS = ("events", "actions", "transport", "source", "keep", "project", "resample", "regrid", "reanalyze", "sweep", "loadkit")
+# actions that can leave a sample file of the mega bank without an override (a pad released, kept again as something else, ...)
+SWEEP_AFTER = frozenset({"slice.clear", "slice.keep", "slice.set", "slice.setMany", "slice.src", "slice.stem", "slice.stretch", "kit.load"})
 LIBRARY = "*"  # hub key of the library-level stream (GET /api/events): events that belong to no song yet
 
 
@@ -544,6 +546,8 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                         taken.append(a)
                     state = nxt
                 self._commit(doc, state, taken, before)
+                if any(a.get("type") in SWEEP_AFTER for a in taken):
+                    M.sweep_samples(media_root, mid)   # under the lock: the document it reads is the one just written
                 listeners = hub.listeners(mid)
             return self._json({"project": A.project_doc(state), "applied": len(taken), "ignored": len(acts) - len(taken),
                                "view": {"bank": state["bank"], "selected": state["selected"]}, "listeners": listeners, "mega": mid})
@@ -636,7 +640,49 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                 acts, kept, already, failed = self._keep_actions(doc, state, [(bank, pad)], skip_empty=False)
                 state, taken = self._run_batch(doc, state, acts)
                 doc = self._commit(doc, state, taken, before)
+                if taken:
+                    M.sweep_samples(media_root, mid)
                 return self._json({"mega": M.summary(media_root, doc), "kept": kept, "already": already, "failed": failed, "actions": taken})
+
+        def _loadkit(self, mid, body):
+            """POST /api/mega/<mid>/loadkit {kit: id, bank}: a kit on a bank of this mega bank. Kept pads of the kit are COPIED into the mega
+            bank (media/_mega/<mid>/samples/) and become `slice.keep`; the rest is one `kit.load`; the kit's master fx are applied.
+            One batch is saved and broadcast; it is also returned as `actions` (the calling tab applies it, like /keep)."""
+            kid = body.get("kit") if isinstance(body, dict) else None
+            bank = body.get("bank", 0) if isinstance(body, dict) else 0
+            if not isinstance(bank, int) or isinstance(bank, bool) or bank < 0:
+                return self._err(400, "bank must be 0 or more")
+            try:
+                kit = kits.read_kit(media_root, kid if isinstance(kid, str) else "")
+            except KeyError:
+                return self._err(404, "unknown kit")
+            with mega_lock(mid):
+                try:
+                    doc = M.read(media_root, mid)
+                except KeyError:
+                    return self._err(404, "unknown mega bank")
+                try:
+                    acts, copied = kits.kept_actions(media_root, mid, kit, bank, doc.get("source"))
+                except OSError as e:
+                    return self._err(500, f"a sound of the kit could not be copied: {e}")
+                if kit.get("fx"):
+                    acts.append({"type": "fx.set", "params": dict(kit["fx"])})
+                state = self._mega_state(doc)
+                before = state["project"]
+                state, taken = self._run_batch(doc, state, acts)
+                doc = self._commit(doc, state, taken, before)
+                if any(a.get("type") in SWEEP_AFTER for a in taken):
+                    M.sweep_samples(media_root, mid)
+                return self._json({"ok": True, "loaded": sum(1 for p in kit["pads"] if p), "name": kit.get("name"), "kept": copied, "actions": taken,
+                                   "mega": M.summary(media_root, doc)})
+
+        def _sweep(self, mid):
+            """POST /api/mega/<mid>/sweep: move the samples no override uses to media/_mega/<mid>/.trash/ (never deletes)."""
+            with mega_lock(mid):
+                try:
+                    return self._json(M.sweep_samples(media_root, mid))
+                except KeyError:
+                    return self._err(404, "unknown mega bank")
 
         def _transport(self, mid, src):
             """`src`: the source song of the mega bank (a DAW manager keyed by song is found through it), or None."""
@@ -802,7 +848,7 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     local_buckets.pop(mid, None)
                 mega_event("removed", doc)
                 return self._json({"ok": True}) or True
-            if method == "POST" and sub in ("actions", "transport", "source", "keep", "regrid", "reanalyze") or (method == "POST" and sub in mega_actions):
+            if method == "POST" and sub in ("actions", "transport", "source", "keep", "regrid", "reanalyze", "sweep", "loadkit") or (method == "POST" and sub in mega_actions):
                 doc = self._mega_doc_or_404(mid)
                 if not doc:
                     return True
@@ -812,6 +858,10 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
                     return self._transport(mid, doc.get("source")) or True
                 if sub in ("regrid", "reanalyze"):
                     return self._source_regrid(doc, sub, body) or True
+                if sub == "sweep":
+                    return self._sweep(mid) or True
+                if sub == "loadkit":
+                    return self._loadkit(mid, body) or True
                 if sub in mega_actions:
                     return self._mega_action(doc, sub, body) or True
                 return (self._source(mid) if sub == "source" else self._keep(mid)) or True
@@ -847,9 +897,11 @@ def make_server(media_root: str, port: int = 8960, *, pipeline=None, regrid=None
             if not doc:
                 return True
             try:
-                return self._json(rendered.save_mega_sample(os.path.join(media_root, M.ROOT, mid, "samples"), mid, data))
+                up = rendered.save_mega_sample(os.path.join(media_root, M.ROOT, mid, "samples"), mid, data)
             except ValueError as e:
                 return self._err(400, str(e))
+            M.pin_for(mid, [up["hash"] + ".wav"])   # not an override's yet: the sweeper leaves it alone for a while
+            return self._json(up)
 
         def _song_dir(self, sid):
             if not ID_RE.match(sid or ""):

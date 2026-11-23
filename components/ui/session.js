@@ -91,6 +91,12 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   const meta = loaded.meta, analysis = loaded.analysis, peaks = loaded.peaks;
   let buffer = loaded.buffer;
   let sourceId = first;
+  // CHOP-13 step D: the mega bank can be removed while this tab has it open (the stream says `mega removed`): from then on no write is
+  // sent (a write would only answer 404) and views are told with the session event `mega-removed`.
+  let removed = false;
+  const gone = () => new Response(JSON.stringify({ error: "this mega bank was removed" }), { status: 404, headers: { "Content-Type": "application/json" } });
+  const post = (url, body) => (removed ? Promise.resolve(gone()) : postJson(url, body));
+  const NO_SONG = "pick a song first";   // what a source-song operation says on a mega bank with no source (the server answers 409 the same way)
 
   // One muted <video> for the life of the session; its src follows the source song.
   const video = document.createElement("video");
@@ -141,20 +147,21 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     timers.add(t);
   }
   const seq = createSequencer({ ctx, click: clickAt, play: (p, vel, when, b, ev) => { engine.trigger(p, vel, when, b, ev); flashAt(when, p, b); } });
-  // The pattern is stored in beats; its bar length is the one it was made with. It follows the chop table only when the table is
-  // changed under the same song (regrid / reanalyze: `adoptChops`), never when the SOURCE song changes (a song in another meter
-  // must not change the loop length). Not saved with the pattern: after a reload it is the open song's again (that needs a
-  // reducer field, reported for step D).
-  let patternBpb = loaded.chops.beats_per_bar ?? 4;
+  // The pattern is stored in beats and keeps its own bar length: `project.pattern.beatsPerBar` (CHOP-13 step D), set with its first
+  // hit, saved with it, so a reload or a song in another meter never changes the loop length. A pattern from an older document has
+  // none and reads the chop table (the open song's), as before; it is given one just before the source song changes (`changeSource`).
+  // The same song's table changed under it (regrid / reanalyze: `adoptChops`): the pattern follows, as before.
+  const patBpb = (st = store.get()) => st.project.pattern.beatsPerBar ?? st.chops?.beats_per_bar ?? 4;
+  const PATTERN_ADD = new Set(["pattern.addEvent", "pattern.toggleStep", "pattern.setBars"]);
   const syncSeqTempo = () => {   // the project tempo when set, else the song's own
     const st = store.get();
     seq.setBpm(projectBpm(st));
-    seq.state.beatsPerBar = patternBpb;
+    seq.state.beatsPerBar = patBpb(st);
     giveSong(st);
   };
   /** Song mode: the sequencer plays the chain (bar-accurate, one beat clock); otherwise it loops the edited pattern. */
   function giveSong(st = store.get()) {
-    seq.setSong(st.project.song?.mode === "song" ? songTimeline(st.project, patternBpb) : null);
+    seq.setSong(st.project.song?.mode === "song" ? songTimeline(st.project, patBpb(st)) : null);
   }
 
   // ---- state -> engine, sequencer, fx, disk ----
@@ -162,6 +169,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   const givePattern = (pattern) => {
     seq.state.pattern = { bars: pattern.bars, events: [...pattern.events] };
     seq.state.bars = pattern.bars;
+    seq.state.beatsPerBar = patBpb();
   };
   function applyAll(s) {
     engine.setChops(s.chops);
@@ -246,7 +254,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   const outbox = [];
   let flushTimer = 0;
   let inflight = Promise.resolve();
-  const send = (url, init) => fetch(url, { ...init, keepalive: true, headers: { "Content-Type": "application/json", [ORIGIN_HEADER]: ORIGIN } });
+  const send = (url, init) => (removed ? Promise.resolve(gone()) : fetch(url, { ...init, keepalive: true, headers: { "Content-Type": "application/json", [ORIGIN_HEADER]: ORIGIN } }));
   function queue(action, prev) {
     const last = outbox[outbox.length - 1];
     // runs of the same edit (a slider drag, a waveform drag) collapse into one
@@ -261,13 +269,16 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
       }
     }
     // a toggle without a bank means "the bank on screen"; the server does not know which one that was for this tab
-    outbox.push(action.type === "pattern.toggleStep" && action.bank == null ? { ...action, bank: prev.bank } : { ...action });
+    // (and a hit that gives a pattern its bar length carries the one this tab used, so the server's copy of the reducer agrees)
+    const out = action.type === "pattern.toggleStep" && action.bank == null ? { ...action, bank: prev.bank } : { ...action };
+    if (PATTERN_ADD.has(out.type) && out.beatsPerBar === undefined) out.beatsPerBar = patBpb(prev);
+    outbox.push(out);
   }
   function flush() {
     clearTimeout(flushTimer);
     flushTimer = 0;
     const batch = outbox.splice(0);
-    if (!batch.length) return inflight;
+    if (!batch.length || removed) return inflight;
     inflight = inflight.then(async () => {
       try {
         const r = await send(`/api/mega/${mid}/actions`, { method: "POST", body: JSON.stringify({ actions: batch }) });
@@ -354,7 +365,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     stopSong();
     engine.trigger(src, vel, null, bank, extra);
     const ev = seq.record(src, bank, vel, extra);
-    if (ev) store.dispatch({ type: "pattern.addEvent", event: ev });
+    if (ev) store.dispatch({ type: "pattern.addEvent", event: ev, beatsPerBar: patBpb() });
     lastChop = c;
     store.dispatch({ type: "pad.select", pad: src });
     emit("hit", { pad, velocity: vel, ...(lv ? { source: src, level: lv } : {}) });
@@ -396,9 +407,12 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
 
   // ---- regrid / tempo ----
   function adoptChops(chops) {
-    patternBpb = chops.beats_per_bar ?? patternBpb;   // the same song's table changed (regrid, meter): the pattern follows, as before
     const t = position();
+    const own = store.get().project.pattern.beatsPerBar;
     store.dispatch({ type: "chops.replace", chops });
+    if (own !== undefined && chops.beats_per_bar && chops.beats_per_bar !== own) {   // the same song's table changed (regrid, meter): the pattern follows, as before
+      store.dispatch({ type: "pattern.load", pattern: { ...store.get().project.pattern, beatsPerBar: chops.beats_per_bar } });
+    }
     followTo(t);
   }
   let lastGrid = null; // the grid to return to when switching back from transient mode
@@ -427,7 +441,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     const bpb = meterOverride ? Number(meterOverride.split("/")[0]) : chops.beats_per_bar;
     beat_offset = ((beat_offset % bpb) + bpb) % bpb;
     if (beat_offset > 3) beat_offset -= bpb;
-    const r = await postJson(`/api/songs/${sourceId}/regrid`, { grid, meter: meterOverride, beat_offset, bpm_mult, mode, sensitivity });
+    const r = await post(`/api/mega/${mid}/regrid`, { grid, meter: meterOverride, beat_offset, bpm_mult, mode, sensitivity });
     if (!r.ok) return false;
     adoptChops(await r.json());
     return true;
@@ -435,7 +449,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   /** Re-run the analysis with a forced tempo (tap tempo). */
   async function reanalyze(bpm) {
     if (!sourceId) return false;
-    const r = await postJson(`/api/songs/${sourceId}/reanalyze`, { bpm, meter: meterOverride });
+    const r = await post(`/api/mega/${mid}/reanalyze`, { bpm, meter: meterOverride });
     if (!r.ok) return false;
     const out = await r.json();
     Object.assign(analysis, out.analysis);
@@ -456,13 +470,13 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   /** Standard MIDI File of the whole chain (song mode's playing order; just the edited pattern when there is no chain). */
   const songMidi = () => {
     const st = store.get();
-    const bpb = patternBpb;
+    const bpb = patBpb(st);
     const tl = songTimeline(st.project, bpb, { force: true });
     return patternToMidi({ bars: tl.total / bpb, events: timelineEvents(tl) }, { bpm: projectBpm(st), beatsPerBar: bpb });
   };
   const patternMidi = () => {
     const st = store.get();
-    return patternToMidi(st.project.pattern, { bpm: projectBpm(st), beatsPerBar: patternBpb });
+    return patternToMidi(st.project.pattern, { bpm: projectBpm(st), beatsPerBar: patBpb(st) });
   };
   /** Offline render of `events` (absolute beats from 0, with their pad, bank, vel, pitch, cutoff) through the pad sounds and the
    *  master fx, at the project tempo. `beats` = length of the take; `tail` adds room for the last hit and the reverb to ring out
@@ -496,7 +510,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   /** Offline render of the whole chain (every pattern as often as the chain says), WAV bytes, or null when there is nothing to play. */
   async function renderSongWav() {
     const st = store.get();
-    const tl = songTimeline(st.project, patternBpb, { force: true });
+    const tl = songTimeline(st.project, patBpb(st), { force: true });
     const events = timelineEvents(tl);
     if (!events.length) return null;
     return encodeWav(await renderEvents(events, { beats: tl.total }));
@@ -512,16 +526,16 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     const { project } = store.get();
     const pat = project.pattern;
     if (!pat.events.length) return null;
-    return encodeWav(await renderEvents(pat.events, { beats: pat.bars * patternBpb }));
+    return encodeWav(await renderEvents(pat.events, { beats: pat.bars * patBpb() }));
   }
 
   // ---- stems (components/stems): drums, bass, vocals and other of the song, from a backend the server is set up with ----
   /** Split the song into stems (the server asks its backend, which can take minutes; cached after the first time). Resolves
    *  { ok, stems: ["drums", ...] } and puts the list in session.meta.stems, or { ok: false, status, error } (501 = no backend set up). */
   async function separateStems({ force = false } = {}) {
-    if (!sourceId) return { ok: false, error: "pick a song first" };
+    if (!sourceId) return { ok: false, error: NO_SONG };
     try {
-      const r = await postJson(`/api/songs/${sourceId}/stems`, force ? { force: true } : {});
+      const r = await post(`/api/mega/${mid}/stems`, force ? { force: true } : {});
       const body = await r.json().catch(() => ({}));
       if (!r.ok) return { ok: false, status: r.status, error: body.error || `HTTP ${r.status}` };
       meta.stems = body.stems;
@@ -583,7 +597,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   async function resample({ bars, seconds, source = "pattern", pad, bank, play = true } = {}) {
     try {
       const st = store.get();
-      const bpm = projectBpm(st), bpb = patternBpb;
+      const bpm = projectBpm(st), bpb = patBpb(st);
       const secs = Number.isFinite(seconds) && seconds > 0 ? seconds : Number.isFinite(bars) && bars > 0 ? (bars * bpb * 60) / bpm : 0;
       if (!(secs >= 0.05 && secs <= 300)) return { ok: false, error: "give bars or seconds (at most 300 s)" };
       if (pad !== undefined && !(Number.isInteger(pad) && pad >= 0 && pad < PADS)) return { ok: false, error: "pad must be 0..15" };
@@ -595,7 +609,9 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
         out = await renderEvents(loopedEvents(pat, beats, bpb), { beats, tail: false });
       } else if (source === "master") out = await captureMaster(secs, { play });
       else return { ok: false, error: 'source must be "pattern" or "master"' };
-      const r = await fetch(`/api/songs/${sourceId}/resample`, { method: "POST", headers: { "Content-Type": "audio/wav", [ORIGIN_HEADER]: ORIGIN }, body: encodeWav(out) });
+      if (removed) return { ok: false, error: "this mega bank was removed" };
+      // stored under the mega bank (media/_mega/<mid>/samples/), so the sound survives the song
+      const r = await fetch(`/api/mega/${mid}/resample`, { method: "POST", headers: { "Content-Type": "audio/wav", [ORIGIN_HEADER]: ORIGIN }, body: encodeWav(out) });
       const body = await r.json().catch(() => ({}));
       if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
       const at = bank ?? store.get().bank;
@@ -613,15 +629,15 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   async function loadSections() {
     if (!sourceId) return;
     try {
-      const r = await postJson(`/api/songs/${sourceId}/sections`);
+      const r = await post(`/api/mega/${mid}/sections`);
       if (r.ok) store.dispatch({ type: "sections.set", sections: (await r.json()).sections });
     } catch { /* sections are optional */ }
   }
   let ai = null;
   /** Ask the audio model about the song. Returns its answer; throws with the server's error text. */
   async function advise() {
-    if (!sourceId) throw new Error("pick a song first");
-    const r = await postJson(`/api/songs/${sourceId}/advise`);
+    if (!sourceId) throw new Error(NO_SONG);
+    const r = await post(`/api/mega/${mid}/advise`);
     const body = await r.json();
     if (!r.ok) throw new Error(body.error || r.status);
     ai = body;
@@ -638,9 +654,8 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   }
   /** kind: "hydrogen" | "sfz" | "zip" (16 WAVs; also returns `url` to download). Returns { ok, path, url?, note, error }. */
   async function exportBank(kind) {
-    if (!sourceId) return { ok: false, error: "pick a song first" };
     const { bank, project } = store.get();
-    const r = await postJson(`/api/songs/${sourceId}/export`, { kind, bank, fx: project.fx, overrides: project.overrides, pads: project.pads });
+    const r = await post(`/api/mega/${mid}/export`, { kind, bank, fx: project.fx, overrides: project.overrides, pads: project.pads });
     const body = await r.json().catch(() => ({}));
     return { ok: r.ok, ...body, error: r.ok ? undefined : (body.error || r.status) };
   }
@@ -648,7 +663,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   // ---- key (analysis.key, detected once on the server) ----
   async function detectKey() {
     if (analysis.key || !sourceId) return analysis.key ?? null;
-    const r = await postJson(`/api/songs/${sourceId}/key`);
+    const r = await post(`/api/mega/${mid}/key`);
     if (!r.ok) return null;
     analysis.key = await r.json();
     emit("key", analysis.key);
@@ -662,8 +677,9 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     if (!sl) return { ok: false, error: `pad ${pad + 1} is empty` };
     if (sl.kept) return { ok: false, error: `pad ${pad + 1} is kept: it owns its audio and is not stretched` };
     if (sl.src) return { ok: false, error: `pad ${pad + 1} plays a resample, which is already at the project tempo` };
-    const src = sl.song ?? sourceId;   // a kit pad from another song is rendered from that song's audio
-    const r = await postJson(`/api/songs/${src}/stretch`, { bank, pad, start: sl.start, end: sl.end, ...(sl.stem ? { stem: sl.stem } : {}), ...how });
+    if (!sl.song && !sourceId) return { ok: false, error: NO_SONG };
+    // a pad from another song is rendered from that song's audio (`song`), the others from the source song
+    const r = await post(`/api/mega/${mid}/stretch`, { bank, pad, start: sl.start, end: sl.end, ...(sl.song ? { song: sl.song } : {}), ...(sl.stem ? { stem: sl.stem } : {}), ...how });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
     if (fit && Math.abs(body.ratio - 1) < 0.002) {   // already at the project tempo: play the plain slice
@@ -757,37 +773,32 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
   /** Save what the current bank holds (slices, pad sounds, master fx) as a kit. Resolves { ok, kit, error }. */
   async function saveBankAsKit(name) {
     const { bank, project } = store.get();
-    if (Array.from({ length: PADS }, (_, p) => engine.getSlice(bank, p)).some((c) => c?.kept)) {
-      // a kit pad names a song slice, a kept pad owns its audio: the server says so (400) until step D; show its words
-      const r = await postJson(`/api/songs/${sourceId}/savekit`, { bank, name: name || undefined, overrides: project.overrides, pads: project.pads, fx: project.fx });
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
-      window.dispatchEvent(new CustomEvent("choppad:kits"));
-      return { ok: true, kit: body };
-    }
-    const pads = Array.from({ length: PADS }, (_, p) => {
-      const sl = engine.getSlice(bank, p);
-      if (!sl) return null;
-      const k = { song_id: sl.song ?? sourceId, start: sl.start, end: sl.end, params: { ...project.pads[p] } };
-      if (sl.stretch) k.stretch = { ...sl.stretch };
-      if (sl.src) k.src = sl.src;       // W3b: a resample or a stem travels with the kit
-      if (sl.stem) k.stem = sl.stem;
-      return k;
-    });
-    const r = await postJson("/api/kits", { name: name || `${meta.title ?? sourceId} bank ${bank + 1}`, pads, fx: project.fx });
+    // the server builds the kit from the mega bank (kept pads: their audio is copied into the kit, so it never depends on the mega bank)
+    const r = await post(`/api/mega/${mid}/savekit`, { bank, name: name || undefined, overrides: project.overrides, pads: project.pads, fx: project.fx });
     const body = await r.json().catch(() => ({}));
     if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
     window.dispatchEvent(new CustomEvent("choppad:kits"));
     return { ok: true, kit: body };
   }
-  /** Put a kit (object, or id to fetch) on the current bank. Pads from other songs load their audio once (cached).
-   *  Resolves { ok, loaded, name, error }. */
+  /** Put a kit (object, or id to fetch) on the current bank. Pads from other songs load their audio once (cached). A kit with kept pads
+   *  goes through the server, which copies their sounds into this mega bank (`slice.keep`). Resolves { ok, loaded, name, error }. */
   async function loadKit(kitOrId) {
     let kit = kitOrId;
     if (typeof kitOrId === "string") {
       const r = await fetch(`/api/kits/${kitOrId}`);
       if (!r.ok) return { ok: false, error: `kit ${kitOrId}: HTTP ${r.status}` };
       kit = await r.json();
+    }
+    if (kit.id && kit.pads.some((p) => p && !p.song_id)) {
+      await flush();
+      const r = await post(`/api/mega/${mid}/loadkit`, { kit: kit.id, bank: store.get().bank });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}` };
+      const acts = body.actions ?? [];
+      await Promise.all(keptOf(acts).map((a) => loadBuffer(a.src)));
+      for (const a of acts) store.dispatch(a, remoteMeta);   // already saved and broadcast by the server
+      await Promise.all([...pending]);
+      return { ok: true, loaded: body.loaded, name: body.name };
     }
     store.dispatch({ type: "kit.load", bank: store.get().bank, song: sourceId, pads: kit.pads });
     if (kit.fx && Object.keys(kit.fx).length) store.dispatch({ type: "fx.set", params: kit.fx });
@@ -897,8 +908,10 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     try {
       const next = await fetchSong(songId, ctx);
       if (!acts) {
+        const pat = store.get().project.pattern;   // a pattern of an older document has no bar length of its own yet: it gets this song's now
+        if (pat.events.length && pat.beatsPerBar === undefined) store.dispatch({ type: "pattern.load", pattern: { ...pat, beatsPerBar: patBpb() } });
         await flush();   // the server must know every hit recorded so far: those pads are "used"
-        const r = await postJson(`/api/mega/${mid}/source`, { song: songId });
+        const r = await post(`/api/mega/${mid}/source`, { song: songId });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
         posted = true;
@@ -912,13 +925,30 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     } catch (e) {
       // the tab goes back to the old song, so the server must too (a mega bank that had no song cannot go back: no endpoint clears
       // the source, so a retry must take the server's batch as it is)
-      if (posted && from) { try { await postJson(`/api/mega/${mid}/source`, { song: from }); reverted = true; } catch { /* the next resync sets it right */ } }
+      if (posted && from) { try { await post(`/api/mega/${mid}/source`, { song: from }); reverted = true; } catch { /* the next resync sets it right */ } }
       const error = String(e?.message ?? e);
       const retry = { song: songId, actions: given ?? (posted && !reverted ? acts : null) };
       lastSourceError = { song: songId, error, retry };
       emit("source-error", { song: songId, error });
       return { ok: false, song: songId, error };
     }
+  }
+  /** The source song was taken away from the mega bank by another tab or an agent (`POST /api/mega/<mid>/source {song: null}`): its used pads
+   *  were kept, so the batch (tempo.set, slice.keep ..., source.set null) is applied; the last song's video and waveform stay on screen. */
+  function clearSource(actions) {
+    switches++;
+    const run = sourceChain.then(async () => {
+      await Promise.all(keptOf(actions).map((a) => loadBuffer(a.src)));
+      stopSong();
+      sourceId = null;
+      lastChop = null;
+      for (const a of actions) store.dispatch(a, remoteMeta);
+      store.dispatch({ type: "sections.set", sections: [] }, remoteMeta);
+      collectBuffers();
+      emit("source-cleared", {});
+    }).catch((e) => emit("source-error", { song: null, error: String(e?.message ?? e) }));
+    sourceChain = run;
+    return run.finally(() => { switches--; });
   }
   /** Make `songId` the source song of this mega bank (kept pads stay, the pattern keeps playing). Resolves
    *  { ok, song, kept, released, failed } or { ok: false, error } (the old source then works as before). `actions` is for the
@@ -937,7 +967,7 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     const run = sourceChain.then(async () => {
       try {
         await flush();
-        const r = await postJson(`/api/mega/${mid}/keep`, { bank, pad });
+        const r = await post(`/api/mega/${mid}/keep`, { bank, pad });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) return { ok: false, error: body.error || `HTTP ${r.status}`, kept: [], already: [], failed: [] };
         const acts = body.actions ?? [];
@@ -990,14 +1020,14 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     apply({ type: "pattern.load", pattern: want.pattern });
     if (d.mega.source && JSON.stringify(d.chops) !== JSON.stringify(store.get().chops)) adoptChops(d.chops);
   }
-  /** The DAW bridge endpoint (POST /api/songs/<id>/daw): command "open" | "sync" | "play" | "stop" for "hydrogen" | "ardour".
+  /** The DAW bridge endpoint (POST /api/mega/<mid>/daw): command "open" | "sync" | "play" | "stop" | "close" for "hydrogen" | "ardour".
    *  open and sync take the bank on screen and this tab's swing / quant / choke. Resolves { ok, ...server answer } or { ok: false, error }. */
   async function dawCommand(name, command, { bank } = {}) {
     try {
       const { settings, bank: shown } = store.get();
       const body = { daw: name, command };
       if (command === "open" || command === "sync") Object.assign(body, { bank: bank ?? shown, swing: settings.swing, quant: settings.quant, choke: settings.choke });
-      const r = await postJson(`/api/songs/${sourceId}/daw`, body);
+      const r = await post(`/api/mega/${mid}/daw`, body);
       const out = await r.json().catch(() => ({}));
       if (!r.ok) return { ok: false, status: r.status, error: out.error || `HTTP ${r.status}` };
       return { ok: out.ok !== false, ...out };
@@ -1022,11 +1052,19 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     onMessage("actions", (d) => {
       const acts = d.actions ?? [];
       const sw = acts.find((a) => a.type === "source.set");
+      if (sw && sw.song === null) { clearSource(acts); return; }   // another tab (or an agent) left the mega bank with no source song
       if (sw) { setSource(sw.song, { actions: acts }); return; }   // another tab (or an agent) changed the source song
       const apply = () => { for (const a of acts) store.dispatch(a, remoteMeta); };
       if (switches > 0) sourceChain = sourceChain.then(apply); else apply();   // stay behind a change that is loading
     });
     onMessage("chops", (d) => adoptChops(d.chops));
+    onMessage("mega", (d) => {   // the mega bank itself changed: only `removed` is for this stream (the list events are on /api/events)
+      if (d.change !== "removed" || removed) return;
+      removed = true;
+      clearTimeout(flushTimer);
+      outbox.length = 0;
+      emit("mega-removed", { id: d.id ?? mid, name: d.name ?? null });
+    });
     onMessage("transport", runTransport);
     onMessage("role", (d) => { primary = !!d.primary; });
     onMessage("daw", (d) => { daw.open = !!d.open; daw.name = d.daw ?? null; daw.bank = Number.isInteger(d.bank) ? d.bank : null; });
@@ -1044,8 +1082,10 @@ export async function openMega({ mid, audio, onProgress = () => {} }) {
     retrySource() { const r = lastSourceError?.retry; return r ? setSource(r.song, r.actions ? { actions: r.actions } : {}) : Promise.resolve({ ok: false, error: "nothing to retry" }); },
     keepPad,
     /** Bar length (beats) of the pattern: the one it was made with; not the open song's when a song of another meter came in. */
-    get patternBeatsPerBar() { return patternBpb; },
+    get patternBeatsPerBar() { return patBpb(); },
     get switching() { return switches > 0; },
+    /** true once the stream said the mega bank was removed (no write is sent any more; the `mega-removed` event told the views) */
+    get removed() { return removed; },
     /** urls of the decoded buffers held right now (tests: what stays in memory) */
     heldBuffers: () => [...decoded.keys()],
     remote: { origin: ORIGIN, get connected() { return stream?.readyState === 1; }, get daw() { return { open: daw.open, bank: daw.bank }; }, get dawName() { return daw.name; }, get primary() { return primary; }, flush },
