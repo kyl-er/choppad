@@ -86,8 +86,7 @@ class MegaKeyed(unittest.TestCase):
         self.assertEqual(m.state_for("m1")["open"], True)
         m.command_mega("m2", builder(bpm=88.0), {"daw": "hydrogen", "command": "open"})   # the bridge now holds m2
         self.assertEqual((m.state_for("m1")["open"], m.state_for("m2")["open"]), (False, True))
-        self.assertEqual(changed[-1], "m2")
-        self.assertIn("m1", changed)                                                       # the tabs of m1 learn it let go
+        self.assertEqual(set(changed[-2:]), {"m1", "m2"})                                  # the tabs of m1 learn it let go
 
     def test_validation_and_the_song_keyed_command_has_no_close(self):
         m, *_ = rig()
