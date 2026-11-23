@@ -178,14 +178,20 @@ class MegaStepB(unittest.TestCase):
             route.continue_()
         page.route(f"**/media/{sid}/audio.wav", handler)
 
+    def keep_pads(self, page):
+        """Step C: choosing another song while the open mega bank has used pads asks (a) new mega bank or (b) keep the drum pads.
+        These tests are about (b), the behaviour step B built: press it in the panel."""
+        page.locator('.mchoice:not([hidden]) [data-choice="b"]').click(timeout=15000)
+
     def choose(self, page, sid, timeout=60000):
         """Choose a song in the library pane, as a person does; returns when the session says the new source is in."""
         page.evaluate("() => { window.__ready = false; window.__failed = null; window.__tReady = null; window.__tClick = null;"
                       " const s = window.choppad.song.session; if (!window.__armed) { window.__armed = true;"
                       " s.on('source', () => { window.__ready = true; window.__tReady = performance.now(); });"
                       " s.on('source-error', (e) => { window.__failed = e.detail.error; }); } }")
-        t0 = page.evaluate("performance.now()")
         page.locator(f'#sidebar li.song[data-id="{sid}"]').click()
+        self.keep_pads(page)
+        t0 = page.evaluate("performance.now()")
         page.wait_for_function("window.__ready === true || window.__failed !== null", timeout=timeout)
         self.last_switch_ms = (page.evaluate("window.__tReady ?? performance.now()") - t0)
 
@@ -206,6 +212,7 @@ class MegaStepB(unittest.TestCase):
         page.evaluate(SAMPLER)
         self.slow_audio(page, self.B, 1.0)
         page.locator(f'#sidebar li.song[data-id="{self.B}"]').click()
+        self.keep_pads(page)
         page.wait_for_function("window.__ready === true || window.__failed !== null", timeout=60000)
         self.assertIsNone(page.evaluate("window.__failed"))
         got = page.evaluate(CHECK)
@@ -250,6 +257,7 @@ class MegaStepB(unittest.TestCase):
         self.slow_audio(page, self.B, 1.5)
         page.wait_for_timeout(1500)   # a stretch of plain playing first
         page.locator(f'#sidebar li.song[data-id="{self.B}"]').click()
+        self.keep_pads(page)
         page.wait_for_function("window.__ready === true || window.__failed !== null", timeout=60000)
         self.assertIsNone(page.evaluate("window.__failed"))
         page.wait_for_timeout(2300)   # and 2 s after song B is ready
@@ -379,7 +387,7 @@ class MegaStepB(unittest.TestCase):
         self.assertIsNone(before["user"], "no user tempo yet")
         self.assertAlmostEqual(before["seq"], bpm_a, places=3)
         self.assertIn("SONG", page.locator(".s-meta").inner_text())
-        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "SONG BPM")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "SONG TEMPO")
         self.choose(page, self.B)
         after = page.evaluate(f"({{ user: {S}.store.get().project.tempo, seq: {S}.seq.state.bpm, tempo: {S}.tempoBpm, song: {S}.store.get().chops.bpm }})")
         self.assertAlmostEqual(after["user"]["bpm"], bpm_a, places=3, msg="the first switch writes the tempo it was running at")
@@ -389,7 +397,7 @@ class MegaStepB(unittest.TestCase):
         self.assertTrue(page.evaluate(f"{S}.seq.state.playing"))
         head = page.locator(".s-meta").inner_text()
         self.assertIn(f"USER {bpm_a:.1f} BPM (song {bpm_b:.1f})", head)
-        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "USER BPM")
+        self.assertEqual(page.locator(".lcd-main .lcd-big small").first.inner_text(), "YOUR TEMPO")
         self.assertEqual(page.locator(".lcd-main .bpm").inner_text(), f"{bpm_a:.1f}")
         # the user sets a tempo; switching back to A does not change it, and A's own tempo is only for A's grid
         page.evaluate(f"{S}.setTempo(93)")

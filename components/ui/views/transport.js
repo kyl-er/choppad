@@ -34,7 +34,7 @@ export function mount(root, session, env) {
   click("click", () => store.dispatch({ type: "settings.set", params: { metronome: !st().settings.metronome } }));
   click("tap", () => env.actions.tap?.());
   click("quant", () => store.dispatch({ type: "settings.set", params: { quant: QUANTS[(QUANTS.indexOf(st().settings.quant) + 1) % QUANTS.length] } }));
-  click("bars", () => store.dispatch({ type: "pattern.setBars", bars: BARS[(BARS.indexOf(st().project.pattern.bars) + 1) % BARS.length], beatsPerBar: st().chops.beats_per_bar }));
+  click("bars", () => store.dispatch({ type: "pattern.setBars", bars: BARS[(BARS.indexOf(st().project.pattern.bars) + 1) % BARS.length], beatsPerBar: session.patternBeatsPerBar }));
 
   const flag = (a, on) => { const b = $(a); b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); };
   function render() {

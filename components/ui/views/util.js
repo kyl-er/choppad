@@ -57,6 +57,32 @@ export function createCell(initial) {
   };
 }
 
+/** The empty state of the parts that show the source song (video, waveform) when the mega bank has none: shown and hidden by the
+ *  session's `source` event, it points at the SONGS list. `d` is the view's disposer. */
+export function noSong(session, env, d, text = "Pick a song to chop") {
+  const el = document.createElement("div");
+  el.className = "no-song";
+  el.innerHTML = `<b>${text}</b><span>Choose one in the SONGS list. Your kept pads and the sequence play without it.</span><button type="button" class="no-song-go">Go to the SONGS list</button>`;
+  el.querySelector("button").addEventListener("click", () => env.nav.focusSongs());
+  const paint = () => { el.hidden = !!session.source; };
+  session.on("source", paint);
+  d.add(() => session.off("source", paint));
+  paint();
+  return el;
+}
+
+/** Short name of a song for a pad, a label or a sentence: "Artist - Song" -> "Song", at most 16 characters. */
+export const shortSong = (title) => {
+  const t = String(title ?? "").trim();
+  const cut = t.replace(/^.*?(?:\s[—–-]\s+|:\s+)/, "");
+  return (cut || t).slice(0, 16).trim();
+};
+/** Bank on screen as the header and the LCD name it: its letter on the bank keys (A-D of its group) and its place in the whole. */
+export const bankName = (bank, count) => `${String.fromCharCode(65 + (bank % 4))} · ${bank + 1}/${count}`;
+/** Contracts §15 tempo: the mega bank's tempo is the user's once set ("yours"); until then it follows the song the bank started on. */
+export const tempoLabel = ({ T, user, source, title }) =>
+  `TEMPO ${T.toFixed(1)} · ${user ? "yours" : source ? `following ${shortSong(title)}` : "default"}`;
+
 /** Section label -> the highlighter it gets: chorus-like sections are "live" (orange), the rest "placed" (blue). */
 export const sectionIsLive = (label) => /chorus|hook|drop/i.test(label ?? "");
 export function sectionAt(sections, t) {

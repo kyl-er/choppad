@@ -119,17 +119,17 @@ export function moreSubpages(ctx) {
     } };
   };
   const ptempo = { name: "project tempo", cls: "cols2 ptempo", fields: () => [
-    inp("Tempo", { name: "ptempo", cls: "pt-bpm", min: 20, max: 400, step: 0.1, deferred: true, get: () => session.tempoBpm, fmt: (v) => v.toFixed(1),
+    inp("Your tempo", { name: "ptempo", cls: "pt-bpm", min: 20, max: 400, step: 0.1, deferred: true, get: () => session.tempoBpm, fmt: (v) => v.toFixed(1),
       set: (v) => runFit(() => session.setTempo(v))() }),
-    act("Song tempo", { cls: "pt-song", disabled: () => tempoDoc().bpm === null, fn: runFit(() => session.setTempo(null)) }),
+    act("Follow song", { cls: "pt-song", disabled: () => tempoDoc().bpm === null, fn: runFit(() => session.setTempo(null)) }),
     bool("Follow", { name: "ptfollow", cls: "pt-follow", get: () => tempoDoc().follow !== false, set: (v) => dispatch({ type: "tempo.set", follow: v }) }),
     act("Refit all", { cls: "pt-refit", val: () => `${fittedKeys().length} fitted`, fn: runFit(() => session.refitAll()) }),
     act("Fit pattern", { cls: "pt-fit-pattern", disabled: () => !tempoDoc().bpm, fn: runFit(() => session.fitToTempo({ scope: "pattern" })) }),
     act("Fit bank", { cls: "pt-fit-bank", disabled: () => !tempoDoc().bpm, fn: runFit(() => session.fitToTempo({ scope: "bank" })) }),
   ], extra: fitList, info: { cls: "pt-info", html: () => {
     const T = tempoDoc().bpm, bpm = st().chops.bpm;
-    return T === null ? `PROJECT TEMPO = THE SONG'S OWN (${bpm.toFixed(1)} BPM). TYPE A TEMPO TO PLAY, RECORD AND EXPORT AT IT, THEN FIT PADS TO IT.`
-      : `PROJECT ${T.toFixed(1)} BPM (SONG ${bpm.toFixed(1)}) · FITTED PADS ARE MARKED “FIT” · HAND-STRETCHED PADS ARE NEVER TOUCHED`;
+    return T === null ? `YOUR TEMPO IS NOT SET: THE MEGA BANK FOLLOWS ${session.source ? `THE SONG (${bpm.toFixed(1)} BPM)` : "NO SONG (120 BPM)"} UNTIL THE FIRST SONG CHANGE. TYPE A TEMPO TO FIX IT, THEN FIT PADS TO IT.`
+      : `YOUR TEMPO ${T.toFixed(1)} BPM STAYS THROUGH SONG CHANGES${session.source ? ` · CHOP TEMPO ${bpm.toFixed(1)} (THE SONG'S)` : ""} · FITTED PADS ARE MARKED “FIT”`;
   } } };
 
   // ------------------------------------------------------------------ SEQ 3 / 4: song mode
@@ -148,7 +148,7 @@ export function moreSubpages(ctx) {
     const w = session.songPosition(), segs = seq.state.song.segments, c = chain();
     let k = 0, entry = 0, rep = 0;
     for (let i = 0; i < c.length; i++) { const n = c[i].repeats; if (w.index < k + n) { entry = i; rep = w.index - k; break; } k += n; entry = i; }
-    return { entry, rep, id: w.id, bar: 1 + Math.floor(w.inPattern / (st().chops.beats_per_bar)), segs: segs.length, index: w.index };
+    return { entry, rep, id: w.id, bar: 1 + Math.floor(w.inPattern / session.patternBeatsPerBar), segs: segs.length, index: w.index };
   };
   ctx.chainPos = chainPos;
   const nameOf = (id) => pats().find((p) => p.id === id)?.name ?? id;
@@ -282,7 +282,7 @@ export function moreSubpages(ctx) {
     inp("Length", { name: "rslen", cls: "rs-len", min: 0.1, max: 300, step: 0.25, get: () => RS.len, set: (v) => { RS.len = v; }, fmt: (v) => v.toFixed(2) }),
     num("Target pad", { name: "rspad", cls: "rs-pad", min: 1, max: 16, step: 1, get: () => rsPad() + 1, set: (v) => { RS.pad = Math.round(v) - 1; } }),
     act("GO", { cls: "rs-go", val: () => (RS.job ? "…" : "▸"), disabled: () => !!RS.job, fn: async () => {
-      const bpm = session.tempoBpm, bpb = st().chops.beats_per_bar;
+      const bpm = session.tempoBpm, bpb = session.patternBeatsPerBar;
       const secs = RS.unit === "bars" ? (RS.len * bpb * 60) / bpm : RS.len;
       RS.res = null; RS.job = { source: RS.source, t0: performance.now(), secs }; ctx.refresh();
       const pad = rsPad();

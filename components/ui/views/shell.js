@@ -1,7 +1,7 @@
 // The sheet: header, theme, the grid that holds every view, and the small shared environment (env) the views use for
 // things that are not song state: the shared ticker, theme, wave zoom, master volume, note variation, toasts.
 // It composes the views; it never touches sound, the store or the network itself.
-import { createCell, createDisposer, createTicker, remember, store as stored } from "./util.js";
+import { bankName, createCell, createDisposer, createTicker, remember, store as stored, tempoLabel } from "./util.js";
 import { bankCount } from "/actions.js";
 import * as lcd from "./lcd.js";
 import * as pads from "./pads.js";
@@ -14,11 +14,12 @@ import * as vu from "./vu.js";
 import * as fxdeck from "./fxdeck.js";
 import * as vox from "./vox.js";
 import * as librarypane from "./librarypane.js";
+import * as songchoice from "./songchoice.js";
 
 const SITE = "CP-16 · SONG STATION · MODEL DRAWING";
 
 /** Shared, non-song view state. `audio` and `input` come from main.js; `library` is { host, park() }. */
-export function createEnv({ audio, input, library = null }) {
+export function createEnv({ audio, input, library = null, nav = null }) {
   const ticker = createTicker();
   const html = document.documentElement;
   const theme = createCell(html.dataset.theme === "dark" ? "dark" : "light");
@@ -45,6 +46,8 @@ export function createEnv({ audio, input, library = null }) {
     audio, input, ticker, theme: { get: theme.get, on: theme.on, set: setTheme }, volume, message, toast,
     zoom: createCell(0), noteVar: createCell(127), levelMode: createCell("velocity"), actions: {},
     libraryHost: library?.host ?? null, parkLibrary: library?.park ?? null,
+    // what the page around the screen offers (main.js): the library's lists, a way to open or make a mega bank, a note from the last screen
+    nav: nav ?? { songInfo: () => null, megaInfo: () => null, focusSongs() {}, focusMegas() {}, openMega() {}, switchSource: async () => null, newMega: async () => null, takeNote: () => null },
     dispose() { ticker.stop(); mq?.removeEventListener?.("change", onScheme); toastEl?.remove(); },
   };
 }
@@ -57,6 +60,13 @@ const headerHtml = (extra = "") => `<header class="hd">
     <button type="button" class="hbtn" data-act="callouts" aria-pressed="true" title="Show or hide the numbered callouts and their key">Key</button>
     <button type="button" class="hbtn" data-act="theme" aria-pressed="false" title="Light (blueprint) or dark (night shift)">Dark</button>
   </header>`;
+
+// SONG ▸ DRUM PAD MEGA BANK ▸ DRUM PAD BANK: where you are (the owner's three levels), each segment opens its picker
+const seg = (k, label, title) => `<button type="button" class="seg seg-${k}" data-seg="${k}" title="${title}"><small>${label}</small><b class="s-${k === "song" ? "title" : k}"></b></button>`;
+const pathHtml = `<nav class="path" aria-label="Where you are: song, drum pad mega bank, drum pad bank">
+    ${seg("song", "SONG", "Pick another song: the SONGS list")}<i class="sep" aria-hidden="true">▸</i>
+    ${seg("mega", "DRUM PAD MEGA BANK", "Pick a drum pad mega bank: the list")}<i class="sep" aria-hidden="true">▸</i>
+    ${seg("bank", "DRUM PAD BANK", "Pick a drum pad bank: the bank keys")}</nav><span class="s-meta"><span class="s-tempo"></span><span class="sr-only s-tempo-long"></span></span>`;
 
 function wireHeader(root, env, d) {
   const html = document.documentElement;
@@ -76,7 +86,7 @@ export function mountShell(root, session, env) {
   const { store, meta, analysis } = session;
   const st = () => store.get();
   root.innerHTML = `<div class="sheet" data-view="station">${zones}
-    ${headerHtml(`<span class="s-title"></span><span class="s-meta"></span>`)}
+    ${headerHtml(pathHtml)}
     <aside class="left">
       <section class="panel lib" data-c="11" data-slot="library"></section>
       <section class="panel plat" data-c="12" data-slot="platter"></section>
@@ -98,24 +108,37 @@ export function mountShell(root, session, env) {
       <div class="tblock"><div><small>TITLE</small><b>CHOPPAD CP-16</b></div><div><small>SHEET</small>1 / 1</div><div><small>SCALE</small>1 : 1</div><div><small>SONG</small><span class="tb-song"></span></div><div><small>BANKS</small><span class="tb-banks"></span></div><div><small>REV</small>D</div></div>
     </aside>
     <section class="wv" data-c="15" data-slot="wavestrip"></section>
+    <div class="mc-slot" data-slot="choice"></div>
   </div>`;
   const slot = (n) => root.querySelector(`[data-slot="${n}"]`);
 
   const fillHeader = () => {
     const { chops, bank, project } = st();
     const nb = bankCount(project, chops);
-    root.querySelector(".s-title").textContent = meta.title;
-    // tempo (contracts §15): the user's own tempo, once set, stays through every song change; else the open song's
+    const set = (el, v) => { if (el.textContent !== v) el.textContent = v; };
+    const titleEl = root.querySelector(".s-title");
+    set(titleEl, session.source ? meta.title : "no song");
+    titleEl.classList.toggle("none", !session.source);
+    set(root.querySelector(".s-mega"), env.nav.megaInfo(session.mega)?.name ?? "—");
+    set(root.querySelector(".s-bank"), bankName(bank, nb));
+    // tempo (contracts §15): the user's own tempo, once set, stays through every song change; until then it follows the open song
     const T = session.tempoBpm, user = project.tempo?.bpm != null;
-    const tempo = user ? (Math.abs(T - chops.bpm) > 0.005 ? `USER ${T.toFixed(1)} BPM (song ${chops.bpm.toFixed(1)})` : `USER ${T.toFixed(1)} BPM`) : `SONG ${chops.bpm.toFixed(1)} BPM`;
+    const tempo = tempoLabel({ T, user, source: session.source, title: meta.title });
     const sm = root.querySelector(".s-meta");
-    sm.textContent = ` · ${tempo} · ${chops.beats_per_bar}/4 · BANK ${bank + 1}/${nb}`;
+    set(sm.querySelector(".s-tempo"), tempo);
+    // the long form for assistive technology (and the older wording): the user tempo with the song's beside it
+    set(sm.querySelector(".s-tempo-long"), !session.source ? " no song" : user ? ` USER ${T.toFixed(1)} BPM${Math.abs(T - chops.bpm) > 0.005 ? ` (song ${chops.bpm.toFixed(1)})` : ""}` : ` SONG ${chops.bpm.toFixed(1)} BPM`);
     sm.dataset.tempo = user ? "user" : "song";
-    root.querySelector(".tb-song").textContent = String(meta.id ?? session.id).slice(0, 14);
+    sm.title = session.source ? `Chop tempo of ${meta.title}: ${chops.bpm.toFixed(1)} BPM (it only cuts this song's chops on its own grid)` : "";
+    root.querySelector(".tb-song").textContent = String(meta.id ?? session.id ?? "—").slice(0, 14);
     root.querySelector(".tb-banks").textContent = String(nb);
-    root.querySelector(".sheet").dataset.source = session.source;
+    root.querySelector(".sheet").dataset.source = session.source ?? "";
   };
   d.add(store.subscribe((s, prev) => { if (s.chops !== prev.chops || s.bank !== prev.bank || s.project.tempo !== prev.project.tempo || s.project.overrides !== prev.project.overrides) fillHeader(); }));
+  d.on(window, "choppad:megas", fillHeader);   // the mega bank list changed (a rename): the header names it
+  // each segment of the path opens its picker: song -> the SONGS list, mega bank -> the list, bank -> the bank keys
+  const picker = { song: () => env.nav.focusSongs(), mega: () => env.nav.focusMegas(), bank: () => (root.querySelector(".bkey.on") ?? root.querySelector(".bkey:not(:disabled)"))?.focus() };
+  root.querySelector(".path").addEventListener("click", (e) => { const b = e.target.closest("[data-seg]"); if (b) picker[b.dataset.seg]?.(); });
   fillHeader();
   // a source change keeps this whole sheet; only what shows the song is updated (each source-dependent view does the same)
   const onSource = () => { fillHeader(); if (!analysis.key) session.detectKey().then((k) => { if (k) window.choppad?.library?.refresh?.(); }); };
@@ -149,7 +172,7 @@ export function mountShell(root, session, env) {
 
   const parts = [
     ["library", librarypane], ["platter", platter], ["monitor", monitor], ["surface", lcd], ["pads", pads], ["vu", vu],
-    ["transport", transport], ["knobs", fxdeck], ["stepgrid", stepgrid], ["vox", vox], ["wavestrip", wavestrip],
+    ["transport", transport], ["knobs", fxdeck], ["stepgrid", stepgrid], ["vox", vox], ["wavestrip", wavestrip], ["choice", songchoice],
   ];
   const mounted = parts.map(([name, mod]) => mod.mount(slot(name), session, env));
   return {

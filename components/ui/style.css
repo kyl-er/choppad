@@ -357,3 +357,101 @@ html[data-ui="pad"] body { background-image: linear-gradient(var(--faint) 1px, t
 .tkey.seq-play.on i { letter-spacing: -.12em; } .tkey.seq-play.song-mode:not(.on) { box-shadow: inset 0 -3px 0 var(--acc-b); }
 /* library: import jobs */
 .job[data-state="running"] .bar i, .job[data-state="queued"] .bar i { background: var(--acc-o); } .job .job-stage { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- CHOP-13 step C: drum pad mega banks ---------- */
+/* header path: SONG ▸ DRUM PAD MEGA BANK ▸ DRUM PAD BANK, each segment opens its picker */
+.hd .song { display: flex; align-items: center; gap: 10px; overflow: visible; text-overflow: clip; }
+.path { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.path .sep { font-style: normal; font-size: 11px; color: var(--muted); }
+.path .seg { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; max-width: 32ch; padding: 1px 6px; border: 1px solid transparent; text-align: left; line-height: 1.1; }
+.path .seg:hover { border-color: var(--ink); background: var(--key); }
+.path .seg small { font: 600 7.5px/1 var(--font-mono); letter-spacing: .12em; color: var(--muted); white-space: nowrap; }
+.path .seg b { font: 700 12px/1.15 var(--font-mono); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path .seg b.none { font-weight: 600; font-style: italic; color: var(--muted); }
+.hd .s-meta { font: 600 11px var(--font-mono); white-space: nowrap; padding-left: 8px; border-left: 1px solid var(--hair); }
+@media (max-width: 1699px) { .hd .sub { display: none; } }
+
+/* library: keyboard-reachable rows, the mega bank list */
+.row-open { display: block; width: 100%; text-align: left; min-width: 0; }
+.row-open .title, .row-open .meta { display: block; }
+.row-open:focus-visible { outline-offset: -2px; }
+.megas { list-style: none; margin: 0; padding: 0; }
+.mega { position: relative; padding: 5px 56px 5px 7px; border-bottom: 1px solid var(--faint); }
+.mega:hover { background: var(--faint); }
+.mega.active { box-shadow: inset 3px 0 0 var(--ink); background: color-mix(in srgb, var(--ink) 7%, transparent); }
+.mega .title { font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mega .meta { font: 10px var(--font-mono); color: var(--muted); overflow: hidden; white-space: normal; }
+.mega .mega-song { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mega-tag { position: absolute; right: 7px; top: 5px; font: 700 8px/1 var(--font-mono); letter-spacing: .08em; padding: 2px 4px; background: var(--key-on); color: var(--key-on-ink); }
+.mega-tag[hidden] { display: none; }
+.mega-act { position: absolute; right: 5px; bottom: 4px; display: flex; gap: 3px; }
+.mega-act button { font: 700 11px/1 var(--font-mono); width: 18px; height: 16px; border: 1px solid var(--hair); background: var(--key); color: var(--key-ink); }
+.mega-act button:hover, .mega-act button:focus-visible { border-color: var(--ink); }
+.mega-name { width: 100%; font: 600 12px var(--font-ui); padding: 1px 3px; background: var(--key); color: var(--key-ink); border: 1px solid var(--ink); border-radius: 0; }
+.mega-ask { margin-top: 5px; padding: 5px; border: 1px solid var(--ink); background: var(--key); font: 10.5px var(--font-mono); display: grid; gap: 4px; }
+.mega-ask-b { display: flex; gap: 4px; }
+.mega-ask-b button { flex: 1; padding: 3px 4px; border: 1px solid var(--ink); font: 700 10px var(--font-mono); background: var(--key); color: var(--key-ink); }
+.mega-ask-b .mega-yes { background: var(--key-on); color: var(--key-on-ink); }
+.mega.asking { padding-right: 7px; } .mega.asking .mega-act, .mega.asking .mega-tag { display: none; }
+.mega-new { width: 100%; margin-top: 4px; padding: 4px; border: 1px dashed var(--ink); font: 700 10.5px var(--font-mono); letter-spacing: .06em; background: transparent; }
+.mega-new:hover, .mega-new:focus-visible { background: var(--key-on); color: var(--key-on-ink); border-style: solid; }
+.mega-note { font: 10px var(--font-mono); min-height: 0; padding: 3px 7px 0; }
+.megas .empty { font: 10.5px var(--font-mono); color: var(--muted); padding: 5px 7px; }
+
+/* the choice on a song change, and the line that says what happened: a non-modal panel, over the right-hand column (never the pads) */
+.mc-slot { position: absolute; z-index: 40; top: 52px; right: 24px; width: min(440px, calc(100% - 48px)); display: grid; gap: 6px; pointer-events: none; }
+.mc-slot > * { pointer-events: auto; }
+.mchoice, .mline { background: var(--paper); border: 1.5px solid var(--ink); box-shadow: 4px 4px 0 var(--ink); color: var(--ink); }
+.mchoice[hidden], .mline[hidden] { display: none; }
+.mchoice { padding: 10px 12px 8px; display: grid; gap: 7px; }
+.mc-head b { font: 700 13px var(--font-mono); letter-spacing: .04em; }
+.mc-sub { font: 11px/1.4 var(--font-mono); color: var(--muted); }
+.mc-opts { display: grid; gap: 6px; }
+.mc-opt { display: flex; gap: 9px; align-items: flex-start; text-align: left; padding: 7px 9px; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); }
+.mc-opt:hover, .mc-opt:focus-visible { background: var(--key-on); color: var(--key-on-ink); }
+.mc-opt kbd, .mc-cancel kbd { font: 700 11px/1 var(--font-mono); padding: 2px 5px; border: 1px solid currentColor; flex: none; }
+.mc-opt span { display: grid; gap: 2px; min-width: 0; }
+.mc-opt b { font: 700 12px var(--font-ui); letter-spacing: .02em; }
+.mc-opt em { font: normal 10.5px/1.35 var(--font-mono); opacity: .85; }
+.mc-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; font: 10.5px var(--font-mono); }
+.mc-remember { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+.mc-remember input { width: 14px; height: 14px; accent-color: var(--ink); margin: 0; }
+.mc-cancel { display: flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--ink); font: 700 10.5px var(--font-mono); background: var(--key); color: var(--key-ink); white-space: nowrap; }
+.mc-cancel:hover, .mc-cancel:focus-visible { background: var(--key-on); color: var(--key-on-ink); }
+.mline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 6px 9px; font: 11px/1.35 var(--font-mono); }
+.mline .ml-text { flex: 1 1 240px; min-width: 0; font-weight: 600; }
+.mline .ml-failed { flex: 1 1 100%; font-size: 10.5px; text-decoration: underline wavy; text-underline-offset: 3px; }
+.mline .ml-b { display: flex; gap: 4px; margin-left: auto; }
+.mline .ml-b button { font: 700 10px var(--font-mono); padding: 2px 7px; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); }
+.mline .ml-b button:hover, .mline .ml-b button:focus-visible { background: var(--key-on); color: var(--key-on-ink); }
+.mline .ml-b .ml-x { width: 20px; padding: 2px 0; }
+.mline[data-kind="error"] { border-style: dashed; }
+.mline[data-kind="error"] .ml-text::before { content: "! "; font-weight: 700; }
+
+/* kept pads: a heavier inner frame and the KEPT tag (not colour alone), the song it came from in the label */
+.pad.kept::after { inset: 3px; border: 2px solid currentColor; opacity: .85; }
+.pad.kept .pad-label { font-size: 10.5px; letter-spacing: 0; }
+.padkeys { gap: 4px; } .padkeys .lvl-key, .padkeys .keep-key { padding: 2px 5px; letter-spacing: .04em; font-size: 9.5px; gap: 3px; }
+.keep-key { display: flex; flex: none; align-items: center; gap: 5px; padding: 2px 7px; white-space: nowrap; border: 1px solid var(--ink); background: var(--key); color: var(--key-ink); font: 600 10px var(--font-mono); letter-spacing: .1em; text-transform: uppercase; }
+.keep-key i { font-style: normal; font-size: 11px; } .keep-key.on { background: var(--key-on); color: var(--key-on-ink); }
+
+/* the parts that show the source song, with no song */
+.no-song { position: absolute; inset: 0; z-index: 3; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 8px; text-align: center; background: color-mix(in srgb, var(--paper) 94%, transparent); color: var(--ink); }
+.no-song[hidden] { display: none; }
+.no-song b { font: 700 13px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.no-song span { font: 10.5px/1.35 var(--font-mono); color: var(--muted); max-width: 46ch; }
+.no-song button { margin-top: 3px; padding: 3px 9px; border: 1px solid var(--ink); font: 700 10px var(--font-mono); background: var(--key); color: var(--key-ink); }
+.no-song button:hover, .no-song button:focus-visible { background: var(--key-on); color: var(--key-on-ink); }
+.vid .frame { min-height: 90px; }
+
+/* LCD: the three names on MAIN, the bank overview, the kept pad page */
+.lcd-title::before { content: "SONG "; font-weight: 600; font-size: 9px; letter-spacing: .12em; opacity: .75; }
+.lcd-title.none { font-style: italic; }
+.mega-line { font-size: 10.5px; font-weight: 700; margin-bottom: 1px; }
+.lcd-extra.bankov { max-height: 112px; padding: 0; }
+.bo-row { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; width: 100%; padding: 0 4px; font: 10.5px/15px var(--font-mono); text-align: left; color: inherit; }
+.bo-row span:not(:first-child) { text-align: right; }
+.bo-head { font-weight: 700; opacity: .75; border-bottom: 1px dotted currentColor; position: sticky; top: 0; background: var(--lcd-bg); }
+.bo-row.on { background: var(--lcd-ink); color: var(--lcd-bg); } button.bo-row:hover { background: color-mix(in srgb, var(--lcd-ink) 16%, transparent); } button.bo-row.on:hover { background: var(--lcd-ink); }
+.kept-out b { font-weight: 700; }
+.wave .no-song { flex-direction: row; gap: 14px; } .wave .no-song span { display: none; } .wave .no-song button { margin-top: 0; }

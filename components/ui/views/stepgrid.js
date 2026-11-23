@@ -12,7 +12,7 @@ export function mount(root, session, env) {
     <span class="seq-info"></span>`;
   const grid = root.querySelector(".stepgrid"), info = root.querySelector(".seq-info");
   let nowCell = -1, cursor = { pad: 0, step: 0 }, built = 0;
-  const stepCount = () => st().project.pattern.bars * st().chops.beats_per_bar * 4;
+  const stepCount = () => st().project.pattern.bars * session.patternBeatsPerBar * 4;
 
   function build() {
     const { chops } = st(), n = stepCount();
@@ -20,7 +20,7 @@ export function mount(root, session, env) {
     let html = "";
     for (let p = 15; p >= 0; p--) {
       html += `<button type="button" class="row-name" data-pad="${p}" tabindex="-1" aria-label="Play pad ${p + 1}">${p + 1}</button>`;
-      for (let i = 0; i < n; i++) html += `<i role="gridcell" data-pad="${p}" data-step="${i}" class="${i % 4 === 0 ? "beat" : ""}${i % (4 * chops.beats_per_bar) === 0 ? " bar" : ""}"></i>`;
+      for (let i = 0; i < n; i++) html += `<i role="gridcell" data-pad="${p}" data-step="${i}" class="${i % 4 === 0 ? "beat" : ""}${i % (4 * session.patternBeatsPerBar) === 0 ? " bar" : ""}"></i>`;
     }
     grid.innerHTML = html;
     built = n; nowCell = -1;
