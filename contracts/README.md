@@ -295,5 +295,10 @@ open mega bank has used pads asks: (a) new mega bank for that song, or (b) keep 
 **Agents, DAW, exports (step D).** CLI verbs and MCP tools take a mega bank (or a song, through the compatibility rule); exports and the DAW
 bridge read the mega bank; a kit (§13) is 16 pads saved from or loaded into a mega bank.
 
-**Assumptions not yet confirmed by neo (cheap to change):** the video follows only the open song (a kept pad from another song moves nothing);
-the mega bank's tempo stays when the song changes and new chops are fitted only on request; kept pads are not re-fitted automatically.
+**Tempo (neo, 2026-11-22: "tempo is set by user and should stay once they set it" / "but the chop should be tempo of the song").**
+The mega bank's tempo (`project.tempo.bpm`) is the user's: once set, nothing but the user changes it; loading or switching a song never
+does. A song's detected tempo (`chops.bpm`) is used only to cut that song's chops on its own grid. While the user has set no tempo
+(`project.tempo.bpm` null) the sequencer runs at the tempo of the source the mega bank was started on; on the first source switch that
+value is written into `project.tempo.bpm` (follow: false), so it stays. New chops are fitted to the mega bank's tempo only on request.
+
+**Assumption not yet confirmed by neo (cheap to change):** the video follows only the open song (a kept pad from another song moves nothing).
