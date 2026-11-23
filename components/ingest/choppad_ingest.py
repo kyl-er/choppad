@@ -144,11 +144,46 @@ def enforce_cap(media_root: str, cap_bytes: int, keep: str | None = None) -> lis
 
     dirs.sort(key=lambda x: x[0])
 
+    def _protected():
+        """CHOP-13 (contracts §15): songs a mega bank still needs: the source of a mega bank with used pads (an override, or a
+        hit in the pattern or in a song pattern), and every song an override refers to (`song`, or a `stretch.url` / `src`
+        under /media/<song>/). A mega bank that cannot be read protects nothing."""
+        import re  # (local: this function is the only part of the file this change touches)
+        keep_ids = set()
+        mroot = os.path.join(media_root, "_mega")
+        refs = re.compile(r"^/media/([A-Za-z0-9_-]{1,64})/")
+        for mid in os.listdir(mroot) if os.path.isdir(mroot) else []:
+            if mid.startswith("."):  # .trash
+                continue
+            try:
+                with open(os.path.join(mroot, mid, "mega.json"), encoding="utf-8") as f:
+                    doc = json.load(f)
+                project = doc["project"]
+                overrides = project.get("overrides") or {}
+                song = project.get("song") if isinstance(project.get("song"), dict) else {}
+                event_lists = [(project.get("pattern") or {}).get("events")] + [p.get("events") for p in song.get("patterns") or []]
+                used = bool(overrides) or any(isinstance(ev, list) and ev for ev in event_lists)
+                if used and isinstance(doc.get("source"), str):
+                    keep_ids.add(doc["source"])
+                for o in overrides.values():
+                    if not isinstance(o, dict):
+                        continue
+                    if isinstance(o.get("song"), str):
+                        keep_ids.add(o["song"])
+                    for url in (o.get("src"), (o.get("stretch") or {}).get("url") if isinstance(o.get("stretch"), dict) else None):
+                        m = refs.match(url) if isinstance(url, str) else None
+                        if m:
+                            keep_ids.add(m.group(1))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        return keep_ids
+
+    protected = _protected()
     removed = []
     for _, name, path in dirs:
         if total <= cap_bytes:
             break
-        if name == keep:
+        if name == keep or name in protected:
             continue
         total -= _total_size(path)
         _rmtree(path)

@@ -1,6 +1,7 @@
 """export: export a chop bank to a zero-copy Ardour SFZ file and a Hydrogen drumkit directory.
 See contracts/README.md §7 (v2.1)."""
 
+import io
 import json
 import os
 import re
@@ -87,21 +88,63 @@ def _stretch_path(media_root, url):
     return path
 
 
-def project_overrides(media_dir):
+# ---- CHOP-13: a song's project is the project of its mega bank (contracts §15) ----
+_MEGA_SAMPLE_URL = re.compile(r"^/media/_mega/([A-Za-z0-9_-]{1,64})/samples/([0-9a-f]{16}\.wav)$")
+MEGA_DIR = "_mega"
+
+
+def _mega_sample_path(media_root, url):
+    """File of a kept pad's audio (`src: /media/_mega/<mid>/samples/<hash>.wav`). The url pattern allows no path escape."""
+    m = _MEGA_SAMPLE_URL.match(url or "")
+    if not m:
+        raise ValueError(f"bad mega sample url {url!r}")
+    path = os.path.join(media_root, MEGA_DIR, m.group(1), "samples", m.group(2))
+    if not os.path.isfile(path):
+        raise ValueError(f"kept sound {url} is missing")
+    return path
+
+
+def latest_mega_doc(media_root, song_id):
+    """The most recently updated mega bank document whose `source` is `song_id`, or None. Read-only (nothing is created or
+    migrated here; media/_mega/.trash is ignored). The one definition of the compatibility rule of contracts §15."""
+    root = os.path.join(media_root, MEGA_DIR)
+    best = None
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        if not _ID.match(name):
+            continue
+        try:
+            with open(os.path.join(root, name, "mega.json"), encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or doc.get("source") != song_id or not isinstance(doc.get("project"), dict):
+            continue
+        key = tuple(v if _num(v) else 0 for v in (doc.get("updated"), doc.get("created"))) + (name,)
+        if best is None or key > best[0]:
+            best = (key, doc)
+    return best[1] if best else None
+
+
+def song_project(media_dir):
+    """The project of the song's mega bank; without one, the song's old project.json (read only); else {}."""
+    media_dir = os.path.abspath(media_dir)
+    doc = latest_mega_doc(os.path.dirname(media_dir), os.path.basename(media_dir))
+    if doc:
+        return doc["project"]
     path = os.path.join(media_dir, "project.json")
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
-            return json.load(f).get("overrides") or {}
+            return json.load(f)
     return {}
+
+
+def project_overrides(media_dir):
+    return song_project(media_dir).get("overrides") or {}
 
 
 def project_pad_params(media_dir):
     """The saved project's per-pad sound settings (contracts §8 `pads`), 16 dicts (missing ones empty)."""
-    path = os.path.join(media_dir, "project.json")
-    pads = []
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as f:
-            pads = json.load(f).get("pads") or []
+    pads = song_project(media_dir).get("pads") or []
     return [p if isinstance(p, dict) else {} for p in (list(pads) + [{}] * 16)[:16]]
 
 
@@ -114,43 +157,67 @@ def project_pad_sounds(media_dir):
     return project_pad_params(media_dir)
 
 
-def bank_pads(media_dir, bank=0, overrides=None, pad_params=None, sounds=None):
+def bank_pads(media_dir, bank=0, overrides=None, pad_params=None, sounds=None, *, chops=None, media_root=None, only=None):
     """THE definition of "the audio of pad p on bank b, as played": the chop table plus the project's custom slices
     (`overrides`, default: the saved project.json), their stretch renderings and slices from other songs. Empty pads are
     left out. Every pad dict also carries the pad's sound settings that a DAW kit can express: `gain_db` and `pitch`
     (semitones), and `params`, the full sound dict (filter, envelope, mute group) that the exporters bake into the audio
     or write as opcodes; both come from `pad_params` (16 dicts; `sounds` is the same argument under its older name;
     default: the saved project's `pads`).
-    The Export button (Hydrogen kit, SFZ, zip) and the DAW bridge both start here."""
-    chops = _read_json(media_dir, "chops.json")
-    media_root = os.path.dirname(os.path.abspath(media_dir))
-    own = os.path.join(media_dir, "audio.wav")
-    if overrides is None:
-        overrides = project_overrides(media_dir)
+    The Export button (Hydrogen kit, SFZ, zip) and the DAW bridge both start here.
+    CHOP-13: a KEPT pad (override `kept: true`, `src: /media/_mega/<mid>/samples/<hash>.wav`) plays that sample file and its
+    `params` are the pad's sound (`override.params` instead of `pad_params[pad]`). `media_dir` may be None for a mega bank without
+    a source song (then give `media_root`; `chops` = the table to use instead of reading chops.json; both optional otherwise).
+    `only` = a pad number: just that pad is looked at (so another pad's missing file cannot fail it)."""
+    if media_dir is None:
+        own, own_id = None, None
+        chops = chops if chops is not None else {"banks": [], "chops": []}
+    else:
+        chops = chops if chops is not None else _read_json(media_dir, "chops.json")
+        media_root = media_root or os.path.dirname(os.path.abspath(media_dir))
+        own, own_id = os.path.join(media_dir, "audio.wav"), os.path.basename(os.path.abspath(media_dir))
+        if overrides is None:
+            overrides = project_overrides(media_dir)
+    overrides = overrides or {}
     indices = chops["banks"][bank] if 0 <= bank < len(chops["banks"]) else []
     if pad_params is None:
         pad_params = sounds
-    params = pad_params if pad_params is not None else project_pad_params(media_dir)
+    params = pad_params if pad_params is not None else (project_pad_params(media_dir) if media_dir is not None else [])
     pads = []
     for pad in range(16):
+        if only is not None and pad != only:
+            continue
         o = overrides.get(f"{bank}:{pad}")
+        kept = False
         if isinstance(o, dict) and _num(o.get("start")) and _num(o.get("end")) and o["end"] > o["start"]:
             start, end = o["start"], o["end"]
-            own_id = os.path.basename(os.path.abspath(media_dir))
-            audio = own if not o.get("song") or o["song"] == own_id else _song_audio(media_root, o["song"])
-            if o.get("src"):                      # W3b: a resample, or a stem of the song, instead of the song's own audio
-                audio = _resample_path(media_root, o["src"])
-            elif o.get("stem"):
-                audio = _stem_path(media_root, o.get("song") or own_id, o["stem"])
-            stretch = _stretch_path(media_root, o["stretch"]["url"]) if o.get("stretch") else None
+            if o.get("kept") is True and _MEGA_SAMPLE_URL.match(o.get("src") or ""):
+                kept, audio, stretch = True, _mega_sample_path(media_root, o["src"]), None
+            else:
+                if not o.get("song") or o["song"] == own_id:
+                    if own is None:
+                        raise ValueError(f"pad {pad + 1} on bank {bank + 1} needs a source song")
+                    audio = own
+                else:
+                    audio = _song_audio(media_root, o["song"])
+                if o.get("src"):                      # W3b: a resample, or a stem of the song, instead of the song's own audio
+                    audio = _resample_path(media_root, o["src"])
+                elif o.get("stem"):
+                    audio = _stem_path(media_root, o.get("song") or own_id, o["stem"])
+                stretch = _stretch_path(media_root, o["stretch"]["url"]) if o.get("stretch") else None
         elif pad < len(indices):
             ch = chops["chops"][indices[pad]]
             start, end, audio, stretch = ch["start"], ch["end"], own, None
+            if own is None:
+                continue
         else:
             continue
-        pr = params[pad] if pad < len(params) and isinstance(params[pad], dict) else {}
+        if kept:
+            pr = o["params"] if isinstance(o.get("params"), dict) else {}
+        else:
+            pr = params[pad] if pad < len(params) and isinstance(params[pad], dict) else {}
         pads.append({"pad": pad, "start": start, "end": end, "audio": audio, "stretch": stretch, "sr": _sample_rate(audio),
-                     "params": pr,
+                     "kept": kept, "params": pr,
                      "gain_db": float(pr["gainDb"]) if _num(pr.get("gainDb")) else 0.0,
                      "pitch": float(pr["pitch"]) if _num(pr.get("pitch")) else 0.0})
     return pads
@@ -285,6 +352,19 @@ def pad_pcm(p, cache):
     return sr, nch, sampwidth, _slice_declicked(frames, nch, sampwidth, start, end, sr)
 
 
+def pad_wav_bytes(p, cache=None, *, neutral=False):
+    """(WAV file bytes, duration in seconds) of one pad as `pad_pcm` renders it. `neutral=True` leaves out the pad's sound
+    params (filter, envelope): the audio of the pad as played, which is what a mega bank keeps (contracts §15)."""
+    sr, nch, sampwidth, data = pad_pcm({**p, "params": {}} if neutral else p, {} if cache is None else cache)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(nch)
+        w.setsampwidth(sampwidth)
+        w.setframerate(sr)
+        w.writeframes(data)
+    return buf.getvalue(), len(data) / (nch * sampwidth) / sr
+
+
 def export_zip(media_dir, out_path=None, *, bank=0, overrides=None, sounds=None):
     """Zip of the bank's pads as WAV files pad01.wav .. pad16.wav (empty pads left out). Returns the .zip path."""
     return write_zip(bank_pads(media_dir, bank, overrides, sounds), out_path or os.path.join(
@@ -292,20 +372,12 @@ def export_zip(media_dir, out_path=None, *, bank=0, overrides=None, sounds=None)
 
 
 def write_zip(pads, out_path):
-    import io
     import zipfile
     cache = {}
     tmp = out_path + ".part"
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         for p in pads:
-            sr, nch, sampwidth, data = pad_pcm(p, cache)
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as w:
-                w.setnchannels(nch)
-                w.setsampwidth(sampwidth)
-                w.setframerate(sr)
-                w.writeframes(data)
-            z.writestr(f"pad{p['pad'] + 1:02d}.wav", buf.getvalue())
+            z.writestr(f"pad{p['pad'] + 1:02d}.wav", pad_wav_bytes(p, cache)[0])
     os.replace(tmp, out_path)
     return out_path
 
