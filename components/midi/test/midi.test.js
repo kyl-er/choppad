@@ -49,6 +49,20 @@ test("hot-plugged input is picked up and announced in devices", () => {
   assert.deepEqual(input.getDevices().map((d) => d.id), ["b"]);
 });
 
+test("MIDI access given later (after a permission prompt) is bound like access given at the start", () => {
+  const input = createInput({}); const got = collect(input);
+  assert.deepEqual(input.getDevices(), []);
+  const access = new FakeAccess([new FakeInput("a", "Late Controller")]);
+  input.setMidiAccess(access);
+  assert.ok(got.some((e) => e.type === "devices" && e.devices.some((d) => d.name === "Late Controller")));
+  send(access.inputs.get("a"), 0x90, 37, 100);
+  assert.equal(got.filter((e) => e.type === "pad-on" && e.pad === 1).length, 1);
+  plug(access, new FakeInput("b", "Second"));
+  assert.deepEqual(input.getDevices().map((d) => d.id).sort(), ["a", "b"]);
+  input.setMidiAccess(new FakeAccess([]));   // a second answer is ignored
+  assert.equal(input.getDevices().length, 2);
+});
+
 const key = (t, type, code, extra = {}) => t.dispatchEvent(Object.assign(new Event(type), { code, key: "?", repeat: false, target: null, ...extra }));
 
 test("keyboard uses KeyboardEvent.code: KeyZ -> pad 0, repeats ignored, keyup -> pad-off", () => {

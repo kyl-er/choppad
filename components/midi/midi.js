@@ -81,7 +81,7 @@ export function parseMidiMessage(data, mapping = defaultMapping, time = 0) {
 /**
  * Listen on every MIDI input (incl. hot-plugged) and on keyboardTarget. Returns an EventTarget emitting
  * pad-on / pad-off / bank / panic / devices / learn-state CustomEvents, extended with:
- *   getDevices() -> [{id, name, state}], startLearn(), cancelLearn(), resetMap(), mapping, destroy()
+ *   getDevices() -> [{id, name, state}], setMidiAccess(access), startLearn(), cancelLearn(), resetMap(), mapping, destroy()
  * storage: localStorage-like ({getItem, setItem, removeItem}); learned note map persists under STORAGE_KEY.
  */
 export function createInput({ midiAccess = null, keyboardTarget = null, mapping = defaultMapping, storage = null } = {}) {
@@ -218,7 +218,8 @@ export function createInput({ midiAccess = null, keyboardTarget = null, mapping 
     announceDevices();
   };
 
-  if (midiAccess) {
+  const bindAccess = () => {
+    if (!midiAccess) return;
     syncInputs();
     stateHandler = handleStateChange;
     try {
@@ -230,7 +231,15 @@ export function createInput({ midiAccess = null, keyboardTarget = null, mapping 
       midiAccess.addEventListener("statechange", stateHandler);
       savedInputs.push([midiAccess, stateHandler]);
     }
-  }
+  };
+  bindAccess();
+  /** Give the input its MIDI access later: the browser may ask the person for permission, and the page must not wait for the answer. */
+  const setMidiAccess = (access) => {
+    if (destroyed || !access || midiAccess) return;
+    midiAccess = access;
+    bindAccess();
+    announceDevices();
+  };
 
   // ---- keyboard --------------------------------------------------------------
   const handleKey = (event) => {
@@ -314,6 +323,7 @@ export function createInput({ midiAccess = null, keyboardTarget = null, mapping 
 
   Object.defineProperties(target, {
     getDevices: { value: getDevices, enumerable: true },
+    setMidiAccess: { value: setMidiAccess, enumerable: true },
     startLearn: { value: startLearn, enumerable: true },
     cancelLearn: { value: cancelLearn, enumerable: true },
     resetMap: { value: resetMap, enumerable: true },

@@ -3,7 +3,16 @@ export const FADE_IN = 0.0025;   // s
 export const FADE_OUT = 0.003;   // s
 export const TARGET_PEAK = 0.891; // -1 dBFS
 export const MAX_NORM_GAIN = 4;
-export const DEFAULT_PAD = Object.freeze({ gainDb: 0, pitch: 0, attack: 0.0025, release: 0.003, reverse: false, mode: null });
+// Pad sound. attack/decay/release are seconds, sustain 0..1 (the defaults are today's sound: instant decay to full level).
+// filter.type "off" | "lp" | "hp" | "bp"; cutoff in Hz; q = resonance (linear, 0.7 = flat).
+export const FILTER_TYPES = Object.freeze(["off", "lp", "hp", "bp"]);
+export const DEFAULT_FILTER = Object.freeze({ type: "off", cutoff: 8000, q: 0.7 });
+// muteGroup 0..8: a pad cuts the voices of the pads in its own group (0 = none). The global `choke` setting still means
+// "everything cuts everything" (the default), groups matter once it is off.
+export const MUTE_GROUPS = 8;
+export const DEFAULT_PAD = Object.freeze({ gainDb: 0, pitch: 0, attack: 0.0025, decay: 0, sustain: 1, release: 0.003,
+  reverse: false, mode: null, filter: DEFAULT_FILTER, muteGroup: 0 });
+const BIQUAD = { lp: "lowpass", hp: "highpass", bp: "bandpass" };
 
 /** Pure: chop for (bank, pad) or null when the pad is empty. = chops.chops[chops.banks[bank]?.[pad]] ?? null */
 export function resolveChop(chops, bank, pad) {
@@ -41,7 +50,9 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   let _mode = mode;
   let _choke = choke;
   let _fullLevel = fullLevel;
-  const normGain = normalizationGain(buffer);
+  let _buffer = buffer;                 // the open song's audio; swapped by setBuffer when a mega bank changes its source song
+  let _bankCount = null;                // number of banks when it is more than the chop table's (kept pads on later banks)
+  let normGain = normalizationGain(buffer);
   const activeVoices = [];
   let pendingTarget = null;
   let cancelPause = null;
@@ -81,67 +92,128 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   let revBuffer = null;
   function reversedBuffer() {
     if (!revBuffer) {
-      revBuffer = ctx.createBuffer(buffer.numberOfChannels, buffer.length, buffer.sampleRate);
-      for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
-        const src = buffer.getChannelData(ch), dst = revBuffer.getChannelData(ch), n = src.length;
+      revBuffer = ctx.createBuffer(_buffer.numberOfChannels, _buffer.length, _buffer.sampleRate);
+      for (let ch = 0; ch < _buffer.numberOfChannels; ch++) {
+        const src = _buffer.getChannelData(ch), dst = revBuffer.getChannelData(ch), n = src.length;
         for (let i = 0; i < n; i++) dst[i] = src[n - 1 - i];
       }
     }
     return revBuffer;
   }
+  // Per-pad alternate sound source (W3): a time-stretched rendering of the slice ({whole: false}: the buffer IS the slice)
+  // or another song's audio ({whole: true}: play from the slice start like the main buffer). key -> {buffer, whole, gain}
+  const padBuffers = new Map();
+  const reversedCache = new WeakMap();
+  const reversedOf = (buf) => {
+    if (buf === _buffer) return reversedBuffer();
+    let r = reversedCache.get(buf);
+    if (!r) {
+      r = ctx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
+      for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+        const src = buf.getChannelData(ch), dst = r.getChannelData(ch), n = src.length;
+        for (let i = 0; i < n; i++) dst[i] = src[n - 1 - i];
+      }
+      reversedCache.set(buf, r);
+    }
+    return r;
+  };
   function sliceFor(bank, pad) {
     const base = resolveChop(_chops, bank, pad);
     const o = overrides.get(`${bank}:${pad}`);
     if (!o) return base;
-    return { ...(base ?? { index: -1, bar: 0, beat: 0 }), start: o.start, end: o.end, custom: true };
+    const out = { ...(base ?? { index: -1, bar: 0, beat: 0 }), start: o.start, end: o.end, custom: true };
+    if (o.song) out.song = o.song;
+    if (o.stretch) out.stretch = o.stretch;
+    if (o.src) out.src = o.src;
+    if (o.stem) out.stem = o.stem;
+    if (o.kept) { out.kept = true; if (o.from) out.from = o.from; }   // CHOP-13: the pad owns its audio and its sound
+    return out;
   }
 
-  function chokeAll(now) {
-    for (const v of activeVoices) {
+  /** Cut the active voices (all of them, or only those of mute group `group`) with the short fade. */
+  function chokeAll(now, group = 0) {
+    for (let i = activeVoices.length - 1; i >= 0; i--) {
+      const v = activeVoices[i];
+      if (group && v.group !== group) continue;
       v.gain.gain.cancelScheduledValues(now);
       v.gain.gain.setValueAtTime(v.gain.gain.value, now);
       v.gain.gain.linearRampToValueAtTime(1e-6, now + FADE_OUT);
       v.source.stop(now + FADE_OUT);
+      activeVoices.splice(i, 1);
     }
-    activeVoices.length = 0;
   }
 
-  /** Play `pad` now, or at AudioContext time `when` (sequencer); `bank` defaults to the current bank. */
-  function trigger(pad, velocity = 1, when = null, bank = _bank) {
+  /** Play `pad` now, or at AudioContext time `when` (sequencer); `bank` defaults to the current bank.
+   *  `extra` = {pitch?, cutoff?}: semitones added to the pad's pitch and a cutoff in Hz for this hit only (16 levels). */
+  function trigger(pad, velocity = 1, when = null, bank = _bank, extra = null) {
     const chop = sliceFor(bank, pad);
     if (!chop) return;
-    const P = padParams[pad];
+    if (chop.kept && !padBuffers.has(`${bank}:${pad}`)) return;   // its sample is not loaded yet: silence, never the song's audio
+    const P = overrides.get(`${bank}:${pad}`)?.params ?? padParams[pad];   // a kept pad has its own sound (CHOP-13)
     const mode = P.mode ?? _mode;
     const now = when ?? ctx.currentTime;
     if (_choke) chokeAll(now);
+    else if (P.muteGroup > 0) chokeAll(now, P.muteGroup);   // a pad cuts the voices of its own mute group
 
-    const rate = Math.pow(2, P.pitch / 12);
-    const level = normGain * Math.pow(10, P.gainDb / 20) * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
+    const alt = padBuffers.get(`${bank}:${pad}`);   // stretched slice or another song's audio, else the main song
+    const srcBuf = alt ? alt.buffer : _buffer;
+    const sliceBuf = alt && !alt.whole;             // the buffer is exactly the slice: play it from 0
+    const xPitch = Number.isFinite(extra?.pitch) ? extra.pitch : 0;
+    const rate = Math.pow(2, (P.pitch + xPitch) / 12);
+    const level = (alt ? alt.gain : normGain) * Math.pow(10, P.gainDb / 20) * (_fullLevel ? 1 : Math.pow(velocity, 1.4));
     const source = ctx.createBufferSource();
-    source.buffer = P.reverse ? reversedBuffer() : buffer;
+    source.buffer = P.reverse ? reversedOf(srcBuf) : srcBuf;
     source.playbackRate.value = rate;
     const gainNode = ctx.createGain();
-    source.connect(gainNode);
+    // One BiquadFilter per voice, only when the filter is on (or this hit carries a cutoff): source -> filter -> gain
+    const F = P.filter ?? DEFAULT_FILTER;
+    const xCut = Number.isFinite(extra?.cutoff) ? extra.cutoff : null;
+    const ftype = F.type !== "off" ? F.type : xCut !== null ? "lp" : null;
+    if (ftype) {
+      const filter = ctx.createBiquadFilter();
+      filter.type = BIQUAD[ftype];
+      filter.frequency.value = Math.max(20, Math.min(xCut ?? F.cutoff, (ctx.sampleRate || 44100) * 0.45));
+      filter.Q.value = ftype === "bp" ? F.q : 20 * Math.log10(F.q);   // WebAudio lowpass/highpass Q is in dB, bandpass Q is linear
+      source.connect(filter);
+      filter.connect(gainNode);
+    } else source.connect(gainNode);
     gainNode.connect(output ?? ctx.destination);
 
-    const dur = chop.end - chop.start;       // in song time
+    const dur = sliceBuf ? srcBuf.duration : chop.end - chop.start;   // in source time
     const realDur = dur / rate;              // in wall-clock time
-    const offset = P.reverse ? buffer.duration - chop.end : chop.start;
+    const offset = sliceBuf ? 0 : (P.reverse ? srcBuf.duration - chop.end : chop.start);
+    const follow = alt ? alt.follow : true;  // the video is the open song's: it does not follow another song's pad (it does follow a stem)
     const attack = Math.min(P.attack, realDur / 2);
+    // ADSR on the gain AudioParam, all scheduled up front (nothing asynchronous): attack to `level`, decay to level * sustain.
+    const sustain = Math.min(1, Math.max(0, P.sustain ?? 1)), decay = Math.max(0, P.decay ?? 0);
+    const sus = level * sustain;
+    const envAt = (t) => {   // envelope value t seconds after the start
+      if (t < attack) return level * (attack > 0 ? t / attack : 1);
+      if (sustain >= 1) return level;
+      if (decay > 0 && t < attack + decay) return level + (sus - level) * ((t - attack) / decay);
+      return sus;
+    };
     gainNode.gain.setValueAtTime(0, now);
     gainNode.gain.linearRampToValueAtTime(level, now + attack);
-
-    if (mode === "oneshot") {
-      gainNode.gain.setValueAtTime(level, now + Math.max(attack, realDur - P.release));
-      gainNode.gain.linearRampToValueAtTime(1e-6, now + realDur);
-      source.start(now, offset, dur);
-      followAt(now, chop.start, realDur);
-    } else {
-      source.start(now, offset); // gate: until release; playthrough: until choked
-      followAt(now, chop.start, null);
+    const releaseAt = realDur - P.release;   // oneshot: when the final fade starts
+    if (sustain < 1) {
+      const endDecay = mode === "oneshot" ? Math.min(attack + decay, Math.max(attack, releaseAt)) : attack + decay;
+      if (decay > 0) gainNode.gain.linearRampToValueAtTime(envAt(endDecay), now + endDecay);
+      else gainNode.gain.setValueAtTime(sus, now + attack);
     }
 
-    const voice = { source, gain: gainNode, pad, mode, release: P.release };
+    if (mode === "oneshot") {
+      const tr = Math.max(attack, releaseAt);
+      gainNode.gain.setValueAtTime(envAt(tr), now + tr);
+      gainNode.gain.linearRampToValueAtTime(1e-6, now + realDur);
+      source.start(now, offset, dur);
+      if (follow) followAt(now, chop.start, realDur);
+    } else {
+      source.start(now, offset); // gate: until release; playthrough: until choked
+      if (follow) followAt(now, chop.start, null);
+    }
+
+    const voice = { source, gain: gainNode, pad, mode, release: P.release, group: P.muteGroup | 0 };
     activeVoices.push(voice);
     source.onended = () => { const i = activeVoices.indexOf(voice); if (i >= 0) activeVoices.splice(i, 1); };
   }
@@ -162,7 +234,7 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
 
   function setBank(n) {
     if (n < 0) n = 0;
-    if (n >= _chops.banks.length) n = _bank; // clamp stays at current
+    if (n >= (_bankCount ?? _chops.banks.length)) n = _bank; // clamp stays at current
     _bank = n;
   }
 
@@ -190,12 +262,44 @@ export function createEngine({ ctx, buffer, chops, video = null, mode = "oneshot
   return {
     trigger, release, setBank,
     get bank() { return _bank; },
+    /** CHOP-13: swap the main buffer (the open song's audio) in one step; pads that play their own buffers are not touched. */
+    setBuffer(buf) { _buffer = buf; normGain = normalizationGain(buf); revBuffer = null; },
+    get buffer() { return _buffer; },
+    /** CHOP-13: number of banks (>= the chop table's when kept pads sit on later banks); null = the chop table's. */
+    setBankCount(n) { _bankCount = n; },
     setChops, setMode, setChoke, setFullLevel, stopAll,
     /** Merge sound params into a pad: {gainDb, pitch, attack, release, reverse, mode|null}. */
     setPadParams(pad, partial) { Object.assign(padParams[pad], partial); },
     getPadParams(pad) { return { ...padParams[pad] }; },
-    /** Put a custom slice {start, end} on (bank, pad); null restores the grid chop. */
-    setOverride(bank, pad, slice) { if (slice) overrides.set(`${bank}:${pad}`, { start: slice.start, end: slice.end }); else overrides.delete(`${bank}:${pad}`); },
+    /** Put a custom slice {start, end, song?, stretch?, src?, stem?} on (bank, pad); null restores the grid chop.
+     *  A slice without `stretch` / `song` drops that pad's alternate buffer. */
+    setOverride(bank, pad, slice) {
+      const key = `${bank}:${pad}`;
+      if (slice) {
+        const o = { start: slice.start, end: slice.end };
+        if (slice.song) o.song = slice.song;
+        if (slice.stretch) o.stretch = slice.stretch;
+        if (slice.src) o.src = slice.src;       // W3b: a rendered file of a song (resample) ...
+        if (slice.stem) o.stem = slice.stem;    // ... or a stem of it: both are whole files played from the slice start
+        if (slice.kept) {                       // CHOP-13: a kept pad's own sound, merged with the defaults here, not on the trigger path
+          o.kept = true;
+          if (slice.from) o.from = slice.from;
+          if (slice.params) o.params = { ...DEFAULT_PAD, ...slice.params };
+        }
+        overrides.set(key, o);
+        const alt = padBuffers.get(key);
+        if (alt && ((alt.whole && !slice.song && !slice.src && !slice.stem) || (!alt.whole && !slice.stretch))) padBuffers.delete(key);
+      } else { overrides.delete(key); padBuffers.delete(key); }
+    },
+    /** Play (bank, pad) from `buf` instead of the song: `whole: false` = the buffer is the slice itself (a stretched
+     *  render), `whole: true` = another song's full audio (played from the slice start). null goes back to the song.
+     *  `gain` = level normalisation for it (default: the song's for a slice, its own peak for a whole song). */
+    setPadBuffer(bank, pad, buf, { whole = false, gain, follow = !whole } = {}) {
+      const key = `${bank}:${pad}`;
+      if (!buf) { padBuffers.delete(key); return; }
+      padBuffers.set(key, { buffer: buf, whole, follow, gain: gain ?? (whole ? normalizationGain(buf) : normGain) });
+    },
+    getPadBuffer(bank, pad) { return padBuffers.get(`${bank}:${pad}`)?.buffer ?? null; },
     getOverrides() { return Object.fromEntries(overrides); },
     getSlice(bank, pad) { return sliceFor(bank, pad); },
     _ctx: ctx,

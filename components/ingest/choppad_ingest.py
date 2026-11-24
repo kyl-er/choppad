@@ -9,6 +9,46 @@ import time
 import urllib.request
 
 
+
+class ImportProblem(ValueError):
+    """An import that cannot go ahead for a reason the person can act on. The message is a plain sentence shown as it is."""
+
+
+def _clock(seconds):
+    seconds = int(round(float(seconds)))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+_YT_HOSTS = ("youtube.com", "youtube-nocookie.com", "youtu.be")
+_YT_ID = r"[A-Za-z0-9_-]{11}"
+
+
+def normalize_url(source: str) -> str:
+    """A YouTube link reduced to its one video: `https://www.youtube.com/watch?v=<id>`.
+
+    Links copied while a playlist or a mix is playing carry `list=`, `index=`, `start_radio=`, `pp=` and friends; those
+    are dropped so nothing downstream can pick another entry of the list. Handles watch, youtu.be, shorts, embed, live
+    and music.youtube.com links, with or without a scheme. A playlist link that names no video raises ImportProblem.
+    Anything that is not YouTube is returned unchanged."""
+    import re
+    from urllib.parse import parse_qs, urlsplit
+    raw = source.strip()
+    parts = urlsplit(raw if "://" in raw else "https://" + raw)
+    host = (parts.hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in _YT_HOSTS):
+        return raw
+    vid = None
+    if host.endswith("youtu.be"):
+        vid = parts.path.strip("/").split("/")[0]
+    else:
+        m = re.match(rf"^/(?:shorts|embed|live|v)/({_YT_ID})(?:[/?]|$)", parts.path)
+        vid = m.group(1) if m else (parse_qs(parts.query).get("v") or [None])[0]
+    if not vid or not re.fullmatch(_YT_ID, vid):
+        if "list=" in parts.query or parts.path.startswith("/playlist"):
+            raise ImportProblem("That link is a whole playlist. Open the song you want and paste its link instead.")
+        return raw
+    return f"https://www.youtube.com/watch?v={vid}"
+
 def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies_from_browser: str | None = None,
            force: bool = False, cap_bytes: int = 500 * 2**20) -> str:
     """Fetch/convert `source`, enforce the cache cap, return the media dir. Idempotent unless force=True.
@@ -16,10 +56,13 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
 
     is_url = "://" in source or source.startswith(("http:", "https:", "www."))
     if is_url:
+        source = normalize_url(source)   # one video, never the playlist or mix the link was copied from
         info = _url_info(source, cookies_from_browser)
         duration = info.get("duration") or 0
         if duration > max_duration_s:
-            raise ValueError(f"source duration {duration}s exceeds max_duration_s {max_duration_s}")
+            raise ImportProblem(
+                f"\"{info.get('title') or info.get('id') or source}\" is {_clock(duration)} long; "
+                f"ChopPad imports up to {_clock(max_duration_s)}. ({info.get('id') or source})")
         media_id = info.get("id") or hashlib.sha1(source.encode()).hexdigest()[:10]
     else:
         if not os.path.isfile(source):
@@ -29,7 +72,8 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
              "-of", "default=noprint_wrappers=1:nokey=1", source],
             capture_output=True, text=True).stdout.strip() or 0)
         if duration_s > max_duration_s:
-            raise ValueError(f"source duration {duration_s:.1f}s exceeds max_duration_s {max_duration_s}")
+            raise ImportProblem(f"\"{os.path.basename(source)}\" is {_clock(duration_s)} long; "
+                                f"ChopPad imports up to {_clock(max_duration_s)}.")
         media_id = "local-" + hashlib.sha1(os.path.abspath(source).encode()).hexdigest()[:10]
 
     media_dir = os.path.join(media_root, media_id)
@@ -54,11 +98,20 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
     audio_wav = os.path.join(media_dir, "audio.wav")
     video_mp4 = os.path.join(media_dir, "video.mp4")
 
+    # Audio-only sources (mp3, wav, … dropped in the app) get a plain dark video so the player still works.
+    has_video = bool(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_type",
+         "-of", "csv=p=0", input_file], capture_output=True, text=True).stdout.strip())
+    src_dur = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=noprint_wrappers=1:nokey=1", input_file],
+                             capture_output=True, text=True).stdout.strip() or "0"
+    video_in = [] if has_video else ["-f", "lavfi", "-t", src_dur, "-i", "color=c=0x14181c:s=854x480:r=30"]
+    video_map = ["-map", "0:v:0"] if has_video else ["-map", "1:v:0"]
     subprocess.run([
-        "ffmpeg", "-y", "-i", input_file,
-        "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le",
+        "ffmpeg", "-y", "-i", input_file, *video_in,
+        "-map", "0:a:0", "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le",
         audio_wav,
-        "-an", "-c:v", "libx264", "-profile:v", "baseline",
+        *video_map, "-an", "-c:v", "libx264", "-profile:v", "baseline",
         "-vf", "scale=-2:480,fps=30",
         "-g", "6", "-keyint_min", "1", "-sc_threshold", "0", "-bf", "0",
         "-preset", "veryfast", "-tune", "fastdecode", "-crf", "25",
@@ -79,7 +132,7 @@ def ingest(source: str, media_root: str, *, max_duration_s: float = 420, cookies
         title = info.get("title", "")
         meta_source = info.get("webpage_url") or source
     else:
-        title = os.path.basename(source)
+        title = os.path.splitext(os.path.basename(source))[0]  # "beat.mp3" -> "beat"
         meta_source = os.path.abspath(source)
 
     meta = {
@@ -129,17 +182,52 @@ def enforce_cap(media_root: str, cap_bytes: int, keep: str | None = None) -> lis
 
     dirs = []
     for entry in os.scandir(media_root):
-        if entry.is_dir():
+        if entry.is_dir() and not entry.name.startswith("_"):  # "_kits" and other "_" dirs are user data, never evicted
             st = entry.stat()
             dirs.append((st.st_mtime, entry.name, entry.path))
 
     dirs.sort(key=lambda x: x[0])
 
+    def _protected():
+        """CHOP-13 (contracts §15): songs a mega bank still needs: the source of a mega bank with used pads (an override, or a
+        hit in the pattern or in a song pattern), and every song an override refers to (`song`, or a `stretch.url` / `src`
+        under /media/<song>/). A mega bank that cannot be read protects nothing."""
+        import re  # (local: this function is the only part of the file this change touches)
+        keep_ids = set()
+        mroot = os.path.join(media_root, "_mega")
+        refs = re.compile(r"^/media/([A-Za-z0-9_-]{1,64})/")
+        for mid in os.listdir(mroot) if os.path.isdir(mroot) else []:
+            if mid.startswith("."):  # .trash
+                continue
+            try:
+                with open(os.path.join(mroot, mid, "mega.json"), encoding="utf-8") as f:
+                    doc = json.load(f)
+                project = doc["project"]
+                overrides = project.get("overrides") or {}
+                song = project.get("song") if isinstance(project.get("song"), dict) else {}
+                event_lists = [(project.get("pattern") or {}).get("events")] + [p.get("events") for p in song.get("patterns") or []]
+                used = bool(overrides) or any(isinstance(ev, list) and ev for ev in event_lists)
+                if used and isinstance(doc.get("source"), str):
+                    keep_ids.add(doc["source"])
+                for o in overrides.values():
+                    if not isinstance(o, dict):
+                        continue
+                    if isinstance(o.get("song"), str):
+                        keep_ids.add(o["song"])
+                    for url in (o.get("src"), (o.get("stretch") or {}).get("url") if isinstance(o.get("stretch"), dict) else None):
+                        m = refs.match(url) if isinstance(url, str) else None
+                        if m:
+                            keep_ids.add(m.group(1))
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        return keep_ids
+
+    protected = _protected()
     removed = []
     for _, name, path in dirs:
         if total <= cap_bytes:
             break
-        if name == keep:
+        if name == keep or name in protected:
             continue
         total -= _total_size(path)
         _rmtree(path)

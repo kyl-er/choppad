@@ -37,4 +37,5 @@ media/
 
 # Tooling and machine-local files
 .claude/
+_atlas.md
 .DS_Store

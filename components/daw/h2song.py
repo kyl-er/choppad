@@ -1,0 +1,231 @@
+"""Hydrogen 1.2.7 `.h2song` writer. Pure (no Hydrogen needed): turns a ChopPad pattern (contracts §8) plus 16 chop WAV
+files into a song Hydrogen loads with OPEN_SONG, `hydrogen -s`, or renders headless with `h2cli -s song -o out.wav`.
+
+Facts proven against Hydrogen 1.2.7 (see docs/daw-bridge-spikes.md): a pattern of `size` ticks with denominator 4 has
+48 ticks per quarter note (192 per 4/4 bar); a note's `position` is in ticks from the pattern start; `length` -1 plays
+the whole sample; the `instrument` of a note is the index in `instrumentList`.
+"""
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "..", "export"))
+from choppad_export import hydrogen_gain, hydrogen_pitch  # noqa: E402  (pad gain dB / pitch -> Hydrogen instrument units)
+from daw_project import QUANT_BEATS, swung_beat  # noqa: E402
+
+TICKS_PER_QUARTER = 48
+PADS = 16
+SONG_VERSION = "1.2.0"  # the format the 1.2.x demo songs use; 1.2.7 reads it as is
+
+
+def ticks(beat: float) -> int:
+    """Position of a hit `beat` quarter notes from the loop start, in Hydrogen ticks (rounded)."""
+    return int(round(beat * TICKS_PER_QUARTER))
+
+
+def pattern_ticks(bars: float, beats_per_bar: int = 4) -> int:
+    return max(1, int(round(bars * beats_per_bar * TICKS_PER_QUARTER)))
+
+
+def _txt(parent, tag, value):
+    el = ET.SubElement(parent, tag)
+    el.text = value if isinstance(value, str) else (("true" if value else "false") if isinstance(value, bool) else repr(value) if isinstance(value, float) else str(value))
+    return el
+
+
+def _instrument(parent, pad, name, wav_path, *, choke, gain, pitch=0.0, kit="ChopPad", lookup=1, mute_group=None):
+    i = ET.SubElement(parent, "instrument")
+    _txt(i, "id", pad)
+    _txt(i, "name", name)
+    _txt(i, "drumkit", kit)
+    _txt(i, "drumkitLookup", lookup)  # 1 = user data, 2 = system data (the demo songs)
+    _txt(i, "volume", 1.0)
+    _txt(i, "isMuted", False)
+    _txt(i, "isSoloed", False)
+    _txt(i, "pan", 0.0)
+    _txt(i, "gain", gain)
+    _txt(i, "applyVelocity", True)
+    _txt(i, "filterActive", False)
+    _txt(i, "filterCutoff", 1.0)
+    _txt(i, "filterResonance", 0.0)
+    for n in range(1, 5):
+        _txt(i, f"FX{n}Level", 0.0)
+    _txt(i, "Attack", 0)
+    _txt(i, "Decay", 0)
+    _txt(i, "Sustain", 1.0)
+    _txt(i, "Release", 1000)
+    _txt(i, "pitchOffset", float(pitch))
+    _txt(i, "randomPitchFactor", 0.0)
+    # W3b: with mute groups in use (`mute_group` is the pad's 0..8) Hydrogen gets the same group, -1 = none
+    _txt(i, "muteGroup", (mute_group if mute_group else -1) if mute_group is not None else (0 if choke else -1))
+    _txt(i, "isStopNote", False)
+    _txt(i, "sampleSelectionAlgo", "VELOCITY")
+    _txt(i, "midiOutChannel", -1)
+    _txt(i, "midiOutNote", 36 + pad)
+    _txt(i, "isHihat", -1)
+    _txt(i, "lower_cc", 0)
+    _txt(i, "higher_cc", 127)
+    comp = ET.SubElement(i, "instrumentComponent")
+    _txt(comp, "component_id", 0)
+    _txt(comp, "gain", 1.0)
+    layer = ET.SubElement(comp, "layer")
+    _txt(layer, "filename", wav_path)
+    _txt(layer, "ismodified", False)
+    _txt(layer, "smode", "forward")
+    for tag, v in (("startframe", 0), ("loopframe", 0), ("loops", 0), ("endframe", 0), ("userubber", 0),
+                   ("rubberdivider", 1), ("rubberCsettings", 4), ("rubberPitch", 1)):
+        _txt(layer, tag, v)
+    _txt(layer, "min", 0.0)
+    _txt(layer, "max", 1.0)
+    _txt(layer, "gain", 1.0)
+    _txt(layer, "pitch", 0.0)
+
+
+def build_song(*, title, bpm, beats_per_bar, wavs, pattern, bank=0, volume=0.5, choke=True, loop=True,
+               pattern_name="ChopPad", empty_wav=None, kit_name="ChopPad", gains_db=None, pitches=None, swing=0.0,
+               quant="1/16"):
+    """The song as an ElementTree root.
+
+    wavs: 16 entries, WAV path or None (an empty pad plays `empty_wav` at gain 0 and its hits are not written).
+    pattern: contracts §8 {bars, events:[{beat, pad, bank, vel}]}; only hits on `bank` are written (the kit holds one
+    bank). Returns (root, info) where info counts written/dropped hits.
+    """
+    if len(wavs) != PADS:
+        raise ValueError(f"wavs must have {PADS} entries")
+    # extras DawProject carries inside `pattern` (hydrogen.py passes the dict as it is): "mute_groups" = 16 ints 0..8
+    mute_groups = (pattern or {}).get("mute_groups")
+    if not (isinstance(mute_groups, list) and len(mute_groups) == PADS and any(mute_groups)):
+        mute_groups = None
+    bars = float((pattern or {}).get("bars") or 2)
+    size = pattern_ticks(bars, beats_per_bar)
+    root = ET.Element("song")
+    _txt(root, "version", SONG_VERSION)
+    _txt(root, "bpm", float(bpm))
+    _txt(root, "volume", float(volume))
+    _txt(root, "metronomeVolume", 0.5)
+    _txt(root, "name", title)
+    _txt(root, "author", "ChopPad")
+    _txt(root, "notes", "Generated by ChopPad")
+    _txt(root, "license", "Unknown license")
+    _txt(root, "loopEnabled", bool(loop))
+    _txt(root, "patternModeMode", True)
+    _txt(root, "playbackTrackFilename", "")
+    _txt(root, "playbackTrackEnabled", False)
+    _txt(root, "playbackTrackVolume", 0.0)
+    _txt(root, "action_mode", 0)
+    _txt(root, "mode", "song")
+    _txt(root, "pan_law_type", "RATIO_STRAIGHT_POLYGONAL")
+    _txt(root, "pan_law_k_norm", 1.33333)
+    _txt(root, "humanize_time", 0.0)
+    _txt(root, "humanize_velocity", 0.0)
+    _txt(root, "swing_factor", 0.0)
+    comps = ET.SubElement(root, "componentList")
+    comp = ET.SubElement(comps, "drumkitComponent")
+    _txt(comp, "id", 0)
+    _txt(comp, "name", "Main")
+    _txt(comp, "volume", 1.0)
+
+    inst_list = ET.SubElement(root, "instrumentList")
+    for pad in range(PADS):
+        wav = wavs[pad] or empty_wav
+        if wav is None:
+            raise ValueError(f"pad {pad} has no WAV and no empty_wav was given")
+        # always 16 instruments, so NOTE_ON note 36+n (= list position n) and midiOutNote 36+n both mean pad n
+        _instrument(inst_list, pad, f"Pad {pad + 1}" if wavs[pad] else f"Pad {pad + 1} (empty)", wav,
+                    choke=choke, kit=kit_name, gain=hydrogen_gain((gains_db or [0.0] * PADS)[pad]) if wavs[pad] else 0.0,
+                    pitch=hydrogen_pitch((pitches or [0.0] * PADS)[pad]),
+                    mute_group=int(mute_groups[pad]) if mute_groups else None)
+
+    # W3b song mode: with a song in "song" mode and a chain (DawProject carries it in pattern["song"]) every ChopPad pattern is
+    # one Hydrogen pattern and the chain is the pattern sequence; otherwise the one pattern, as before.
+    specs, sequence = [(pattern_name, bars, (pattern or {}).get("events") or [], beats_per_bar)], [pattern_name]
+    song = (pattern or {}).get("song")
+    if isinstance(song, dict) and song.get("mode") == "song" and isinstance(song.get("chain"), list) and isinstance(song.get("patterns"), list):
+        names, listed, used = {}, [], set()
+        for sp in song["patterns"]:
+            if not isinstance(sp, dict) or not isinstance(sp.get("id"), str):
+                continue
+            base = (str(sp.get("name") or sp["id"]).strip() or sp["id"])[:40]
+            name, k = base, 2
+            while name in used:  # Hydrogen finds a pattern by its name: names must be unique
+                name, k = f"{base} {k}", k + 1
+            used.add(name)
+            names[sp["id"]] = name
+            sbars = float(sp["bars"]) if isinstance(sp.get("bars"), (int, float)) and sp["bars"] >= 1 else 2.0
+            own = sp.get("beatsPerBar")   # a pattern keeps its own bar length (step D); an old one takes the project's
+            listed.append((name, sbars, sp.get("events") or [], own if isinstance(own, int) and not isinstance(own, bool) and 1 <= own <= 16 else beats_per_bar))
+        order = []
+        for c in song["chain"]:
+            if isinstance(c, dict) and c.get("pattern") in names:
+                reps = c.get("repeats") if isinstance(c.get("repeats"), int) and not isinstance(c.get("repeats"), bool) else 1
+                order += [names[c["pattern"]]] * max(1, min(64, reps))
+        if listed and order:
+            specs, sequence = listed, order
+
+    pats = ET.SubElement(root, "patternList")
+    written = dropped_bank = dropped_other = 0
+    q = QUANT_BEATS.get(quant, 0.25)
+    for pname, pbars, pevents, pbpb in specs:
+        psize = pattern_ticks(pbars, pbpb)
+        pat = ET.SubElement(pats, "pattern")
+        _txt(pat, "name", pname)
+        _txt(pat, "category", "")
+        _txt(pat, "size", psize)
+        _txt(pat, "denominator", 4)
+        _txt(pat, "info", "")
+        notes = ET.SubElement(pat, "noteList")
+        events = sorted(pevents, key=lambda e: (e.get("beat", 0), e.get("pad", 0)))
+        for e in events:
+            try:
+                pad, pos = int(e["pad"]), ticks(swung_beat(float(e["beat"]), q, swing))
+            except (KeyError, TypeError, ValueError):
+                dropped_other += 1
+                continue
+            if int(e.get("bank", bank)) != bank:
+                dropped_bank += 1
+                continue
+            if not 0 <= pad < PADS or wavs[pad] is None or not 0 <= pos < psize:
+                dropped_other += 1
+                continue
+            n = ET.SubElement(notes, "note")
+            _txt(n, "position", pos)
+            _txt(n, "leadlag", 0.0)
+            _txt(n, "velocity", max(0.0, min(1.0, float(e.get("vel", 1.0)))))
+            _txt(n, "pan", 0.0)
+            _txt(n, "pitch", float(e["pitch"]) if isinstance(e.get("pitch"), (int, float)) and not isinstance(e.get("pitch"), bool) else 0.0)  # W3b: 16 levels
+            _txt(n, "probability", 1.0)
+            _txt(n, "key", "C0")
+            _txt(n, "length", -1)
+            _txt(n, "instrument", pad)
+            _txt(n, "note_off", False)
+            written += 1
+    ET.SubElement(root, "virtualPatternList")
+    seq = ET.SubElement(root, "patternSequence")
+    for pname in sequence:
+        _txt(ET.SubElement(seq, "group"), "patternID", pname)
+    lad = ET.SubElement(root, "ladspa")
+    for _ in range(4):
+        fx = ET.SubElement(lad, "fx")
+        _txt(fx, "name", "no plugin")
+        _txt(fx, "filename", "-")
+        _txt(fx, "enabled", False)
+        _txt(fx, "volume", 0.0)
+    ET.SubElement(root, "BPMTimeLine")
+    ET.SubElement(root, "timeLineTag")
+    ET.SubElement(ET.SubElement(root, "automationPaths"), "path", adjust="velocity")
+    info = {"ticks": size, "notes": written, "dropped_other_bank": dropped_bank, "dropped_invalid": dropped_other}
+    if sequence != [pattern_name]:  # W3b song mode: how many patterns and how many columns in the sequence
+        info.update(patterns=len(specs), sequence=len(sequence))
+    return root, info
+
+
+def write_song(path, **kw):
+    """build_song + write to `path` (atomically); returns the info dict."""
+    root, info = build_song(**kw)
+    ET.indent(root, space=" ")
+    tmp = path + ".tmp"
+    ET.ElementTree(root).write(tmp, encoding="utf-8", xml_declaration=True)
+    os.replace(tmp, path)
+    return info

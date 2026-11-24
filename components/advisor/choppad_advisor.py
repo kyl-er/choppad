@@ -1,4 +1,5 @@
-"""advisor: optional OpenRouter audio-LLM section map, best-16 chop bank & BPM/meter check.
+"""advisor: optional audio-LLM section map, best-16 chop bank & BPM/meter check (OpenRouter by default, any
+OpenAI-compatible chat endpoint such as the local LiteLLM router via CHOPPAD_LLM_URL / CHOPPAD_LLM_MODEL / CHOPPAD_LLM_KEY).
 See contracts/README.md §6 (v2.1). Off the critical path; mocked in unit tests.
 
 Three public functions:
@@ -20,6 +21,15 @@ from validate import ContractError, validate_advisor
 DEFAULT_MODEL = "qwen/qwen3.8-omni-flash"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def llm_settings(env=None) -> tuple[str, str, str | None]:
+    """(url, model, key) for the audio LLM. Env: CHOPPAD_LLM_URL (default OpenRouter), CHOPPAD_LLM_MODEL (default
+    DEFAULT_MODEL), CHOPPAD_LLM_KEY (falls back to OPENROUTER_API_KEY). Only reads the environment; keys are never printed."""
+    env = os.environ if env is None else env
+    return (env.get("CHOPPAD_LLM_URL") or OPENROUTER_URL,
+            env.get("CHOPPAD_LLM_MODEL") or DEFAULT_MODEL,
+            env.get("CHOPPAD_LLM_KEY") or env.get("OPENROUTER_API_KEY") or None)
 
 # Audio is transcoded to 16 kHz mono 32 kbps MP3 (~960 KB for a 4-minute song) before the request.
 AUDIO_SR = 16000
@@ -166,15 +176,17 @@ def _mp3_bytes(audio_path: str) -> bytes:
             pass
 
 
-def _call_openrouter(prompt: str, mp3: bytes, model: str) -> dict:
-    """Real HTTP path; only reached when no injectable client is supplied and OPENROUTER_API_KEY is set."""
+def _call_llm(prompt: str, mp3: bytes, model: str) -> dict:
+    """Real HTTP path; only reached when no injectable client is supplied. Endpoint and key come from llm_settings().
+    A custom endpoint (a local router) may need no key; the default OpenRouter endpoint always does."""
     import base64
     import urllib.error
     import urllib.request
 
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set; pass client=... for offline use")
+    url, _, key = llm_settings()
+    if not key and url == OPENROUTER_URL:
+        raise RuntimeError("no API key: set CHOPPAD_LLM_KEY (or OPENROUTER_API_KEY), or point CHOPPAD_LLM_URL at a local "
+                           "router; pass client=... for offline use")
     audio_b64 = base64.b64encode(mp3).decode("ascii")
     body = {
         "model": model,
@@ -189,22 +201,19 @@ def _call_openrouter(prompt: str, mp3: bytes, model: str) -> dict:
         "response_format": {"type": "json_object"},
         "temperature": 0.2,
     }
-    req = urllib.request.Request(
-        OPENROUTER_URL,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
-                 "X-Title": "ChopPad advisor"},
-        method="POST",
-    )
+    headers = {"Content-Type": "application/json", "X-Title": "ChopPad advisor"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"OpenRouter HTTP {e.code}: {e.read()[:500].decode('utf-8', 'replace')}") from e
+        raise RuntimeError(f"LLM HTTP {e.code}: {e.read()[:500].decode('utf-8', 'replace')}") from e
     try:
         return payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as e:
-        raise RuntimeError(f"unexpected OpenRouter payload: {str(payload)[:500]}") from e
+        raise RuntimeError(f"unexpected LLM payload: {str(payload)[:500]}") from e
 
 
 def _coerce(raw) -> dict:
@@ -291,11 +300,12 @@ def _read_json(path: str) -> dict:
         return json.load(fh)
 
 
-def advise(media_dir: str, *, client=None, model: str = DEFAULT_MODEL,
+def advise(media_dir: str, *, client=None, model: str | None = None,
            max_cost_usd: float = 0.05, force: bool = False) -> dict:
     """Produce and cache <media_dir>/advisor.json (validated against choppad.advisor/2).
-    Raises ValueError if estimated cost > max_cost_usd.
-    If `client` is given, calls `client(prompt, audio_mp3_bytes, model) -> dict|str` instead of OpenRouter HTTP."""
+    Raises ValueError if estimated cost > max_cost_usd. `model` defaults to $CHOPPAD_LLM_MODEL, then DEFAULT_MODEL.
+    If `client` is given, calls `client(prompt, audio_mp3_bytes, model) -> dict|str` instead of the HTTP endpoint."""
+    model = model or llm_settings()[1]
     out_path = os.path.join(media_dir, "advisor.json")
     if os.path.isfile(out_path) and not force:
         return _read_json(out_path)
@@ -315,7 +325,7 @@ def advise(media_dir: str, *, client=None, model: str = DEFAULT_MODEL,
     audio_path = os.path.join(media_dir, "audio.wav")
     audio = _mp3_bytes(audio_path)
 
-    raw = client(prompt, audio, model) if client is not None else _call_openrouter(prompt, audio, model)
+    raw = client(prompt, audio, model) if client is not None else _call_llm(prompt, audio, model)
     doc = _sanitize(_coerce(raw), chops, model)
     try:
         validate_advisor(doc, chops=chops)
@@ -328,3 +338,6 @@ def advise(media_dir: str, *, client=None, model: str = DEFAULT_MODEL,
         fh.write("\n")
     os.replace(tmp, out_path)
     return doc
+
+
+_call_openrouter = _call_llm  # old name

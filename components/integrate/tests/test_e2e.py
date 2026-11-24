@@ -10,6 +10,7 @@ class EndToEnd(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix="choppad-e2e-")
+        cls.addClassCleanup(__import__("shutil").rmtree, cls.tmp, ignore_errors=True)
         wav = os.path.join(cls.tmp, "song.wav")
         cls.truth = click_track(wav, 120, n_beats=40, pickup=2)
         src = os.path.join(cls.tmp, "song.mp4")

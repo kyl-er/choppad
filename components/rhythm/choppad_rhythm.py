@@ -36,6 +36,8 @@ def analyze(audio_path: str, meter: str | None = None, bpm: float | None = None)
 
     beat_frames = _ellis_dp_beats(onset_env, active_start, est_bpm)
     beats = _regularize([f * _ONSET_HOP_SEC for f in beat_frames])
+    # regularization can extrapolate a beat a few ms past the end of a short loop
+    beats = [b for b in beats if 0 <= b <= duration_s]
 
     ibi = statistics.median(b2 - b1 for b1, b2 in zip(beats, beats[1:]))
     derived_bpm = round(60.0 / ibi, 4)
@@ -44,8 +46,15 @@ def analyze(audio_path: str, meter: str | None = None, bpm: float | None = None)
 
     bpb, downbeats, meter_conf = _detect_meter(beats, accent_env, active_start_s, meter)
 
+    try:  # optional: musical key (contracts: analysis["key"]); never blocks the tempo analysis
+        from choppad_key import detect_key
+        key = detect_key(mono, SR)
+    except Exception:  # noqa: BLE001
+        key = None
+
     return {
         "schema": "choppad.analysis/2",
+        **({"key": key} if key else {}),
         "duration_s": duration_s,
         "bpm": derived_bpm,
         "bpm_candidates": candidates,
