@@ -13,6 +13,6 @@
     "export":    { "owner": "agent-export",     "deps": ["contracts"],                               "cmd": "python3 -m unittest discover -s components/export/tests" },
     "daw":       { "owner": "agent-daw",        "deps": ["contracts", "export"],                     "cmd": "python3 -m unittest discover -s components/daw/tests" },
     "integrate": { "owner": "agent-integrator", "deps": ["ingest", "rhythm", "chop", "midi", "ui", "control", "daw", "stems"], "cmd": "python3 -m unittest discover -s components/integrate/tests" },
-    "e2e":       { "owner": "orchestrator",     "deps": ["integrate"],                               "cmd": "/usr/bin/python3 -W ignore -m unittest tests/e2e/test_smoke.py tests/e2e/test_core.py tests/e2e/test_core2.py tests/e2e/test_bridge.py tests/e2e/test_station.py tests/e2e/test_station2.py tests/e2e/test_mega.py tests/e2e/test_mega_ui.py tests/e2e/test_mega_d.py" }
+    "e2e":       { "owner": "orchestrator",     "deps": ["integrate"],                               "cmd": "${CHOPPAD_E2E_PYTHON:-/usr/bin/python3} -W ignore -m unittest tests/e2e/test_smoke.py tests/e2e/test_core.py tests/e2e/test_core2.py tests/e2e/test_bridge.py tests/e2e/test_station.py tests/e2e/test_station2.py tests/e2e/test_mega.py tests/e2e/test_mega_ui.py tests/e2e/test_mega_d.py" }
   }
 }

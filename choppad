@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# ChopPad launcher, self-contained in the repo:  ./choppad --serve      ./choppad <youtube-url|file> --serve
+#                                                ./choppad songs | show <id> | mega list | station ...   (./choppad --help)
+# Uses the repo's own .venv when it exists (uv sync creates it), otherwise runs through uv.
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+if [ -x "$here/.venv/bin/python" ]; then
+  exec "$here/.venv/bin/python" "$here/components/integrate/choppad.py" "$@"
+elif command -v uv >/dev/null 2>&1; then
+  exec uv run --project "$here" python "$here/components/integrate/choppad.py" "$@"
+else
+  echo "ChopPad needs its Python environment: install uv (https://docs.astral.sh/uv/) and run 'uv sync' in $here" >&2
+  exit 1
+fi
