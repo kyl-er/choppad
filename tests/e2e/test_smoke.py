@@ -221,6 +221,27 @@ class SongScreenSmoke(unittest.TestCase):
         page.close()
 
 
+    def test_the_page_opens_while_the_midi_permission_prompt_is_unanswered(self):
+        """A browser that asks the person for MIDI permission must not hold the page on "Loading…" until they answer."""
+        page = self.browser.new_page(viewport={"width": 1500, "height": 1000})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.add_init_script("navigator.requestMIDIAccess = () => new Promise(() => {});")   # the prompt is never answered
+        page.goto(f"{self.base}/#/song/{self.sid}")
+        page.wait_for_function("window.choppad?.song?.session", timeout=30000)
+        page.wait_for_selector(".pad .pad-label:not(:empty)")
+        page.evaluate(WATCH_JS)
+        page.keyboard.press("KeyX")   # the keyboard plays the pads without MIDI
+        self.assertGreater(page.evaluate(PEAK_JS), 0.001)
+        self.assertEqual(errors, [])
+        page.close()
+        # and with no song in the address, the library screen (not "Loading…") is shown
+        page = self.browser.new_page()
+        page.add_init_script("navigator.requestMIDIAccess = () => new Promise(() => {});")
+        page.goto(f"{self.base}/")
+        page.wait_for_function("window.choppad && !document.querySelector('#main .loading')", timeout=15000)
+        page.close()
+
     def test_transport_record_and_render(self):
         page, errors = self.open_song()
         sess = "window.choppad.song.session"

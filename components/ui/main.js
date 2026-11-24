@@ -23,11 +23,12 @@ document.addEventListener("pointerdown", resume);
 document.addEventListener("keydown", resume);
 refreshUnlock();
 
-let midiAccess = null;
-try { midiAccess = (await navigator.requestMIDIAccess?.()) ?? null; } catch { midiAccess = null; }
 let storage = null;
 try { storage = window.localStorage; } catch { storage = null; }
-const input = createInput({ midiAccess, keyboardTarget: document, storage });
+const input = createInput({ midiAccess: null, keyboardTarget: document, storage });
+// MIDI is asked for in the background: the browser may show a permission prompt, and waiting for the answer here left the
+// page on "Loading…" for as long as the prompt was open (or for ever, when it was dismissed). Keyboard and mouse work at once.
+try { navigator.requestMIDIAccess?.().then((access) => { if (access) input.setMidiAccess(access); }, () => {}); } catch { /* no Web MIDI */ }
 
 // ?ui=classic keeps the previous screen; the default is the new station (ui.js + views/). ?mode=pad = phone pad screen.
 const classic = new URLSearchParams(location.search).get("ui") === "classic";

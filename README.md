@@ -27,6 +27,10 @@ uv sync
 
 Import from the page, or from the shell: `./choppad "https://www.youtube.com/watch?v=..." --serve`.
 
+On Windows use `choppad.cmd --serve` in place of `./choppad --serve` (or `uv run python components/integrate/choppad.py --serve`). The app itself is developed and tested on Linux; on Windows the importer, pads, sequencer and exports to files are expected to work, while the Hydrogen/Ardour bridge and the virtual MIDI port are Linux-only.
+
+If the page ever sits on "Loading…": check that you are on the `v4` branch (`git branch --show-current`), and hard-reload the tab.
+
 Optional tools, used only by the features that name them:
 
 | Tool | Used for |
@@ -65,8 +69,8 @@ Tests: `PATH="$PWD/.venv/bin:$PATH" python3 tools/status.py`. The browser suites
 
 ## Branches
 
-- `master`: the earlier version 3.
-- `v4`: the current workstation described above, including the drum pad mega banks and the import link fix. Not merged to `master` yet.
+- `v4` (default): the current workstation described above, including the drum pad mega banks and the import link fix.
+- `master`: the earlier version 3. `v4` has not been merged into it yet.
 
 ## Notes
 
