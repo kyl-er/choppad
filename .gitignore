@@ -1,6 +1,40 @@
-media/
+# Python
 .venv/
 __pycache__/
+*.pyc
+.pytest_cache/
+
+# Node
 node_modules/
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# The media library: downloaded songs, videos, analysis, mega banks, kits, exports. Never in git.
+media/
+
+# Audio, video and archives anywhere else
 *.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.aiff
 *.mp4
+*.mkv
+*.webm
+*.mov
+*.zip
+*.h2drumkit
+
+# Local environment and credentials
+.env
+.env.*
+*.pem
+*.key
+
+# Tooling and machine-local files
+.claude/
+.DS_Store
